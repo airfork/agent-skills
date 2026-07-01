@@ -33,9 +33,23 @@ See `platform-adapters.md` for Cursor and Claude Code notes.
 /code-review quick staged
 /code-review standard working tree
 /code-review high pr #123
+/code-review deep branch
 /address-review the findings from the last review
 /address-review pr #123 comments
 ```
+
+## Run Options
+
+`/code-review` requires an explicit review tier as its first argument. If the command has no tier, or the first argument is a target such as `staged`, `branch`, `working tree`, or `pr #123`, print the help text from `SKILL.md` and stop instead of running a default review.
+
+| Tier | Cost | Use when | Coverage |
+|------|------|----------|----------|
+| `quick` | Low | Small, low-risk diffs or a fast pre-check. | Guideline auditor and bug scanner only. |
+| `standard` | Medium | Normal local branch, staged, unstaged, or PR review. | Adds history analysis around touched hunks. |
+| `high` | High | Pre-merge review where extra coverage is worth the cost. | Adds prior PR/merge context and local comment intent checks. |
+| `deep` | Highest | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes. | Adds integration/context analysis and uses the strictest verifier threshold. |
+
+Targets are optional after the tier. With no target, review committed branch diff plus staged, unstaged, and untracked files.
 
 ## Design checks
 

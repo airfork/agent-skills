@@ -21,7 +21,7 @@ For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 ## Invocation
 
 ```text
-/code-review [quick|standard|high] [target]
+/code-review <quick|standard|high|deep> [target]
 /address-review [target-or-finding-source]
 ```
 
@@ -35,15 +35,55 @@ Natural-language requests also apply:
 
 When the user asks for review and fixes in the same turn, run the review first. Continue into address mode only for findings that pass verification; do not fix speculative or low-confidence candidates.
 
+## Tier Parsing And Help
+
+`/code-review` requires an explicit tier as the first meaningful argument. Recognize only `quick`, `standard`, `high`, `deep`, and obvious aliases:
+
+| Alias | Tier |
+|-------|------|
+| `q`, `fast` | `quick` |
+| `std`, `normal`, `default` | `standard` |
+| `thorough` | `high` |
+| `xhigh`, `max`, `full` | `deep` |
+
+If the user runs `/code-review` with no tier, or if the first argument is a target or other text that is not a recognizable tier, print this help text and stop:
+
+```text
+Usage:
+  /code-review <quick|standard|high|deep> [target]
+
+Tiers:
+  quick     Low-cost pass for small, low-risk diffs.
+  standard  Normal local branch, staged, unstaged, or PR review.
+  high      Pre-merge review with extra context coverage.
+  deep      Highest-cost review for large, risky, security-sensitive, architecture-shaping, or release-blocking changes.
+
+Targets:
+  branch | committed | HEAD     Review committed branch diff only.
+  working tree | dirty | local   Review staged, unstaged, and untracked files.
+  staged                       Review staged changes only.
+  unstaged                     Review unstaged changes only.
+  pr #123 | <PR URL>            Review pull request diff and metadata via gh.
+
+Examples:
+  /code-review quick staged
+  /code-review standard working tree
+  /code-review high pr #123
+  /code-review deep branch
+```
+
+Do not silently default to `standard` for explicit `/code-review` invocations. For natural-language review requests without a tier, ask the user to choose a tier unless the surrounding instructions clearly provide one.
+
 ## Intensity
 
-Intensity defaults to `standard`.
+The tier controls review cost, finder roster, and verifier threshold.
 
-| Intensity | Finders | Verifier threshold | Use when |
-|-----------|---------|--------------------|----------|
-| `quick` | 2 | 70 | Small or low-risk diffs |
-| `standard` | 3 | 75 | Normal local or PR review |
+| Tier | Finders | Verifier threshold | Use when |
+|------|---------|--------------------|----------|
+| `quick` | 2 | 70 | Small, low-risk diffs or a fast pre-check |
+| `standard` | 3 | 75 | Normal local branch, staged, unstaged, or PR review |
 | `high` | 5 | 80 | Pre-merge review where extra coverage is worth the cost |
+| `deep` | 6 | 85 | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes |
 
 Prefer false negatives over false positives. The goal is to catch important review issues, not to produce a long list.
 
@@ -231,13 +271,14 @@ Exclude pre-existing problems, unchanged-line issues, CI-catchable build/lint/ty
 
 Finder roster:
 
-| Intensity | Finder | Focus |
-|-----------|--------|-------|
+| Tier | Finder | Focus |
+|------|--------|-------|
 | quick+ | Guideline auditor | Explicit project guidance on changed lines only |
 | quick+ | Bug scanner | Serious behavior, data, security, concurrency, lifecycle, or reliability bugs |
 | standard+ | History analyst | `git blame` and `git log -p -- <file>` around touched hunks to catch context regressions |
-| high | Prior PR analyst | Related prior PRs, merge history, or unresolved review context for changed files |
-| high | Comment auditor | `TODO`, `FIXME`, `NOTE`, warnings, and nearby comments that define local intent |
+| high+ | Prior PR analyst | Related prior PRs, merge history, or unresolved review context for changed files |
+| high+ | Comment auditor | `TODO`, `FIXME`, `NOTE`, warnings, and nearby comments that define local intent |
+| deep | Integration/context analyst | Cross-file contracts, public APIs, configuration, dependency, data-shape, migration, and security boundary assumptions touched by the change |
 
 If a finder returns invalid JSON, ask once for JSON repair without changing the substance. If it still fails, drop that finder output and note the gap internally.
 
