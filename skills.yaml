@@ -34,9 +34,9 @@ model_tiers:
 
 skills:
   - name: code-review
-    path: code-review
+    path: skills/codex-cursor/code-review
     category: codex-cursor
-    status: draft-unplaced
+    status: active
     interfaces:
       - codex
       - cursor
@@ -44,10 +44,10 @@ skills:
     heavy_model_tier: deep
     install:
       codex:
-        enabled: false
+        enabled: true
         mode: symlink
       cursor:
         enabled: false
         mode: symlink
-    description: Codex-first, review-only multi-agent code review workflow with Cursor adapter notes.
-    notes: Existing root-level draft intentionally left unmoved until the category structure is finalized.
+    description: Codex-first workflow for reviewing changes and addressing verified review findings, with Cursor adapter notes.
+    notes: Finalized under the codex-cursor category and installed into Codex through a managed symlink.

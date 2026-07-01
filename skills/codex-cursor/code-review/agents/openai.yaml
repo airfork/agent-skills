@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Review"
+  short_description: "Review changes or address verified review findings"
+  default_prompt: "Use $code-review to review my current branch/local changes, or address verified review findings when requested."

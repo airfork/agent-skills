@@ -1,4 +1,0 @@
-interface:
-  display_name: "Code Review"
-  short_description: "Review PRs and local changes"
-  default_prompt: "Use $code-review to review my current branch and local changes before merge."
