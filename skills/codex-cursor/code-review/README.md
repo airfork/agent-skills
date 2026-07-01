@@ -71,10 +71,15 @@ Invoking review mode grants permission to spawn the read-only finder and verifie
 
 Targets are optional after the tier. With no target, review committed branch diff plus staged, unstaged, and untracked files.
 
+## Model Policy
+
+Finder subagents use the selected review intensity and usually inherit the parent/default model unless the host exposes a stronger model that is justified by `high` or `deep`. Verifier subagents are different: they check one bounded candidate against evidence and the rubric, so they should use a lower-cost fast model tier when the host supports model overrides. Do not let verifiers inherit the parent model when an explicit verifier model can be set.
+
 ## Design checks
 
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
 - Dirty worktree and untracked files are included when in scope.
 - Finder/verifier thresholds match your preferred cost-to-confidence tradeoff.
+- Verifier subagents use a lower/fast model tier whenever the host supports subagent model overrides.
 - The adapter spawns read-only finder/verifier subagents without asking for extra permission; sequential fallback is only for hosts where subagents are unavailable.

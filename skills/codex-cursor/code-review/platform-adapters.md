@@ -37,7 +37,14 @@ Typical mapping:
 | Wait for results | Collect all outputs before dedupe or filtering |
 | Clean up | Close completed agents/tasks if the host exposes an explicit close operation |
 
-Prefer omitting explicit model overrides so subtasks inherit the parent/default model. Use explicit model overrides only when the current schema lists them and the review justifies the cost tradeoff.
+Use different model policies for finder and verifier subtasks:
+
+| Role | Codex model policy |
+|------|--------------------|
+| Finder | Usually inherit the parent/default model. For `high` or `deep`, use an explicit stronger finder model only when the current schema exposes one and the selected tier justifies it. |
+| Verifier | Use an explicit lower-cost fast model whenever the current schema exposes model selection. Suggested examples are `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. |
+
+Do not omit the model override for verifier subagents when the spawn/task tool supports one. If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
 
 Codex subagent wrapper:
 

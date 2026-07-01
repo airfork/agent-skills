@@ -96,6 +96,18 @@ The tier controls review cost, finder roster, and verifier threshold.
 
 Prefer false negatives over false positives. The goal is to catch important review issues, not to produce a long list.
 
+## Subagent Model Policy
+
+Finder and verifier subagents do not use the same model policy.
+
+| Role | Model policy |
+|------|--------------|
+| Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
+| Finder | Use the parent/default model unless the selected `high` or `deep` tier and current tool schema justify an explicit stronger finder model. |
+| Verifier | Use a lower-cost fast model tier when the host supports explicit subagent model selection. Suggested Codex examples: `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. |
+
+Do not omit a verifier model override when the host exposes one. Verifiers inspect one candidate issue, one hunk/excerpt, relevant guidance, and the rubric; this bounded task should not consume the same model tier as broad finder agents. If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
+
 ## Target Resolution
 
 | User asks for | Review scope |
@@ -297,7 +309,7 @@ Deduplicate candidates before verification by `file`, overlapping line range, su
 
 ### Step 4: Parallel Verifiers
 
-For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again.
+For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again. Use the lower-cost fast verifier model tier when the host supports subagent model overrides; do not let verifiers inherit the parent/default model when an explicit verifier model can be set.
 
 Give each verifier:
 
@@ -341,6 +353,7 @@ Verdict: Fix N issue(s) before merge.
 Notes:
 - Static review only; builds, tests, linters, and typechecks were not run.
 - Sequential fallback was used because subagents were unavailable. [only include if true]
+- Verifier agents inherited the parent model because this host did not expose subagent model overrides. [only include if true]
 ```
 
 For each finding, include enough detail after the table for the user to act:
