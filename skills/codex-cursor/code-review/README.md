@@ -1,9 +1,9 @@
 # code-review skill
 
-Personal Codex-first skill for two related workflows:
+Personal Codex-first skill for two related workflows, both invoked through `$code-review`:
 
-1. `/code-review` - review a branch, PR, staged diff, unstaged diff, or dirty worktree using independent finder and verifier passes.
-2. `/address-review` - address verified review findings or actionable PR review comments with narrow edits and targeted verification.
+1. **Review mode** - review a branch, PR, staged diff, unstaged diff, or dirty worktree using independent finder and verifier passes.
+2. **Address mode** - address verified review findings or actionable PR review comments with narrow edits and targeted verification.
 
 The review workflow is intentionally conservative: it reports only high-confidence issues introduced by the review target and avoids CI-catchable failures, broad quality commentary, and senior-engineer nits.
 
@@ -11,7 +11,7 @@ The review workflow is intentionally conservative: it reports only high-confiden
 
 | File | Purpose |
 |------|---------|
-| [SKILL.md](SKILL.md) | Main review and address-review workflow |
+| [SKILL.md](SKILL.md) | Main review and address mode workflow |
 | [verifier-rubric.md](verifier-rubric.md) | Confidence scoring rubric for verifier subagents |
 | [platform-adapters.md](platform-adapters.md) | Codex, Cursor, Claude Code, and sequential fallback notes |
 | [agents/openai.yaml](agents/openai.yaml) | Minimal OpenAI/Codex-facing manifest |
@@ -27,20 +27,38 @@ scripts/sync-skills --target codex --apply
 
 See `platform-adapters.md` for Cursor and Claude Code notes.
 
-## Quick test prompts
+## Codex Prompt Examples
 
 ```text
-/code-review quick staged
-/code-review standard working tree
-/code-review high pr #123
-/code-review deep branch
-/address-review the findings from the last review
-/address-review pr #123 comments
+Use $code-review to run /code-review quick staged.
+Use $code-review to run /code-review standard working tree.
+Use $code-review to run /code-review high pr #123.
+Use $code-review to run /code-review deep branch.
 ```
+
+Review first, then fix every verified finding that is safe to address:
+
+```text
+Use $code-review to run /code-review standard working tree. Report the verified findings first, then address all applicable findings in the same turn and run targeted verification.
+```
+
+Address findings from the review that just ran:
+
+```text
+Use $code-review to address the verified findings from the last code review. Re-check that each finding still applies, fix the applicable ones, leave stale or decision-needed items unchanged, and run targeted verification.
+```
+
+Address PR review comments:
+
+```text
+Use $code-review to address actionable review comments on PR #123. Re-check each comment against the current code, patch only applicable comments, and run targeted verification.
+```
+
+`/address-review` is not a separate Codex skill or command. Use `$code-review` with natural language when you want address mode.
 
 ## Run Options
 
-`/code-review` requires an explicit review tier as its first argument. If the command has no tier, or the first argument is a target such as `staged`, `branch`, `working tree`, or `pr #123`, print the help text from `SKILL.md` and stop instead of running a default review.
+In Codex, invoke the skill with `$code-review`; the `/code-review` text is the review-mode instruction inside the prompt. `/code-review` requires an explicit review tier as its first argument. If the command has no tier, or the first argument is a target such as `staged`, `branch`, `working tree`, or `pr #123`, print the help text from `SKILL.md` and stop instead of running a default review.
 
 | Tier | Cost | Use when | Coverage |
 |------|------|----------|----------|

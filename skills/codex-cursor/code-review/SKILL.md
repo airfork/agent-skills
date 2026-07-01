@@ -20,9 +20,15 @@ For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
 ## Invocation
 
+Codex installs this as one skill named `$code-review`; address mode is not a separate Codex command or skill.
+
+Use these prompt shapes:
+
 ```text
-/code-review <quick|standard|high|deep> [target]
-/address-review [target-or-finding-source]
+Use $code-review to run /code-review <quick|standard|high|deep> [target].
+Use $code-review to address the verified findings from the last code review.
+Use $code-review to address actionable review comments on PR #123.
+Use $code-review to run /code-review standard working tree, then address all applicable verified findings and run targeted verification.
 ```
 
 Natural-language requests also apply:
