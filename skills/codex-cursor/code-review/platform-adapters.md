@@ -27,6 +27,8 @@ If installing into multiple environments, keep environment-specific command/fron
 
 Use the parallel task or subagent tools exposed by the current Codex environment. The exact names can vary, so inspect the available tool schema instead of hard-coding names.
 
+Invoking `$code-review` in review mode authorizes the read-only finder and verifier subagents required by the selected tier. Do not ask the user for additional permission before spawning those subagents. Ask only before actions outside the user-requested scope, such as unrequested edits, broad refactors, GitHub write actions, resolving review threads, or explicit model/cost escalation beyond the chosen tier.
+
 Typical mapping:
 
 | Need | Adapter behavior |

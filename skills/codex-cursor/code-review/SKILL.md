@@ -14,7 +14,7 @@ Codex-first workflow for two related jobs:
 1. **Review mode**: inspect a diff with independent finder agents, verify each candidate finding, and report only high-confidence issues.
 2. **Address mode**: take verified review findings or PR review comments, re-check that they still apply, make the smallest safe fixes, and verify the result.
 
-Review mode is read-only. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
+Review mode is read-only. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
 
 For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
@@ -113,7 +113,9 @@ If the resolved target has no changes, stop with `No diff to review.`
 
 - Protect user work: inspect `git status --short` before editing or running any command that could affect files.
 - Review mode is read-only: do not edit files and do not run builds, tests, typechecks, formatters, linters, compilers, package installs, migrations, or app commands.
+- Subagents are part of review mode: spawn the read-only finder/verifier subagents for the selected tier without asking the user for additional permission. If the host lacks subagent tools, use sequential fallback and disclose it in the final report.
 - Address mode is narrow: edit only what is needed for verified findings or explicitly actionable review comments.
+- Ask before actions outside the selected review tier or outside read-only review work, such as broad edits, GitHub write actions, resolving threads, or explicit model/cost escalation beyond the chosen tier.
 - Do not report pre-existing issues, unchanged-line issues, ordinary CI failures, style preferences, broad quality concerns, or missing tests/docs unless explicit project guidance requires them.
 - Do not browse or scrape PRs in a browser when `gh` can provide the data.
 - Do not rely on stale assumptions about tool names, model names, or host capabilities. Use the tools actually exposed by the current environment.
@@ -242,7 +244,7 @@ IN_SCOPE_PACKET_FILES
 
 ### Step 3: Parallel Finders
 
-Dispatch all finders for the chosen intensity in parallel as read-only subagents. Use the host's current parallel-task or subagent tools. If no such tools exist, run the same roles sequentially and disclose that in the final report.
+Dispatch all finders for the chosen intensity in parallel as read-only subagents. The user's invocation of review mode is permission to spawn these read-only subagents; do not ask again. Use the host's current parallel-task or subagent tools. If no such tools exist, run the same roles sequentially and disclose that in the final report.
 
 Shared finder wrapper:
 
@@ -295,7 +297,7 @@ Deduplicate candidates before verification by `file`, overlapping line range, su
 
 ### Step 4: Parallel Verifiers
 
-For each deduplicated candidate, dispatch one read-only verifier subagent in parallel.
+For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again.
 
 Give each verifier:
 

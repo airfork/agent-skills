@@ -60,6 +60,8 @@ Use $code-review to address actionable review comments on PR #123. Re-check each
 
 In Codex, invoke the skill with `$code-review`. Review prompts must name an explicit tier: `quick`, `standard`, `high`, or `deep`. If the prompt asks for review but only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print the help text from `SKILL.md` and stop instead of running a default review.
 
+Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier. The skill should not ask again before spawning those subagents; only ask before work outside the user-requested scope, such as unrequested edits, broad refactors, GitHub write actions, or explicit model/cost escalation beyond the chosen tier.
+
 | Tier | Cost | Use when | Coverage |
 |------|------|----------|----------|
 | `quick` | Low | Small, low-risk diffs or a fast pre-check. | Guideline auditor and bug scanner only. |
@@ -75,4 +77,4 @@ Targets are optional after the tier. With no target, review committed branch dif
 - Address mode edits only verified/applicable findings.
 - Dirty worktree and untracked files are included when in scope.
 - Finder/verifier thresholds match your preferred cost-to-confidence tradeoff.
-- The adapter you use has an acceptable sequential fallback when subagents are unavailable.
+- The adapter spawns read-only finder/verifier subagents without asking for extra permission; sequential fallback is only for hosts where subagents are unavailable.
