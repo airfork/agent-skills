@@ -1,0 +1,47 @@
+schema_version: 1
+
+categories:
+  general:
+    path: skills/general
+    description: Portable skills that can be used across agent environments.
+  codex-cursor:
+    path: skills/codex-cursor
+    description: Skills designed for Codex and/or Cursor workflows.
+  claude:
+    path: skills/claude
+    description: Claude-only skills and command workflows.
+  claude-ultracode:
+    path: skills/claude-ultracode
+    description: Claude workflows that explicitly assume UltraCode.
+
+model_tiers:
+  fast:
+    codex: GPT-5.4 mini
+    claude: Sonnet medium
+    use_for: Small edits, simple transforms, and quick checks.
+  standard:
+    codex: GPT-5.5 medium
+    claude: Sonnet high
+    use_for: Normal skill execution and repo-aware work.
+  deep:
+    codex: GPT-5.5 high
+    claude: Opus 4.8 high
+    use_for: Broad reviews, ambiguous planning, architecture, and high-risk work.
+  ultracode:
+    codex: null
+    claude: Opus 4.8 high with UltraCode
+    use_for: Claude-only workflows that explicitly benefit from UltraCode.
+
+skills:
+  - name: code-review
+    path: code-review
+    category: codex-cursor
+    status: draft-unplaced
+    interfaces:
+      - codex
+      - cursor
+    recommended_model_tier: standard
+    heavy_model_tier: deep
+    description: Codex-first, review-only multi-agent code review workflow with Cursor adapter notes.
+    notes: Existing root-level draft intentionally left unmoved until the category structure is finalized.
+

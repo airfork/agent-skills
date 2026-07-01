@@ -1,0 +1,28 @@
+# Skill Catalog
+
+This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
+
+## Model Tier Key
+
+| Tier | Recommended execution |
+|------|-----------------------|
+| `fast` | GPT-5.4 mini or Claude Sonnet medium. |
+| `standard` | GPT-5.5 medium or Claude Sonnet high. |
+| `deep` | GPT-5.5 high or Claude Opus 4.8 high. |
+| `ultracode` | Claude Opus 4.8 high with UltraCode. |
+
+## Skills
+
+| Skill | Path | Category | Status | Recommended tier | Description |
+|-------|------|----------|--------|------------------|-------------|
+| `code-review` | `code-review/` | `codex-cursor` candidate | Draft, unplaced | `standard`; use `deep` for high-intensity review | Codex-first, review-only multi-agent code review workflow with Cursor adapter notes. |
+
+## Category Backlog
+
+| Category | Path | Notes |
+|----------|------|-------|
+| General | `skills/general/` | Portable skills that should work across agent environments. |
+| Codex/Cursor | `skills/codex-cursor/` | Skills optimized for Codex, Cursor, or both. |
+| Claude | `skills/claude/` | Claude-only skills and command workflows. |
+| Claude plus UltraCode | `skills/claude-ultracode/` | Claude workflows that explicitly depend on or strongly benefit from UltraCode. |
+

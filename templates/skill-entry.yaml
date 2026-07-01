@@ -1,0 +1,11 @@
+name: example-skill
+path: skills/general/example-skill
+category: general
+status: draft
+interfaces:
+  - codex
+recommended_model_tier: standard
+heavy_model_tier:
+description: One sentence describing what the skill does and when to use it.
+notes:
+
