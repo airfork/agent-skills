@@ -13,9 +13,9 @@ This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
 
 ## Skills
 
-| Skill | Path | Category | Status | Recommended tier | Description |
-|-------|------|----------|--------|------------------|-------------|
-| `code-review` | `code-review/` | `codex-cursor` candidate | Draft, unplaced | `standard`; use `deep` for high-intensity review | Codex-first, review-only multi-agent code review workflow with Cursor adapter notes. |
+| Skill | Path | Category | Status | Install | Recommended tier | Description |
+|-------|------|----------|--------|---------|------------------|-------------|
+| `code-review` | `code-review/` | `codex-cursor` candidate | Draft, unplaced | Disabled for Codex and Cursor | `standard`; use `deep` for high-intensity review | Codex-first, review-only multi-agent code review workflow with Cursor adapter notes. |
 
 ## Category Backlog
 
@@ -25,4 +25,3 @@ This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
 | Codex/Cursor | `skills/codex-cursor/` | Skills optimized for Codex, Cursor, or both. |
 | Claude | `skills/claude/` | Claude-only skills and command workflows. |
 | Claude plus UltraCode | `skills/claude-ultracode/` | Claude workflows that explicitly depend on or strongly benefit from UltraCode. |
-

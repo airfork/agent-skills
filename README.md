@@ -13,6 +13,7 @@ Private source repo for custom agent skills, drafts, and shared authoring conven
 | `CATALOG.md` | Human-readable skill inventory, status, and model guidance. |
 | `skills.yaml` | Machine-readable index for scripts, agents, or future tooling. |
 | `docs/repo-guidelines.md` | Repository conventions and authoring rules. |
+| `scripts/sync-skills` | Manifest-driven installer for per-skill symlinks into global skill directories. |
 | `templates/` | Reusable metadata templates for adding new skills. |
 
 Root-level skill folders are allowed temporarily for existing drafts. Do not move them into `skills/` until the target category and install behavior are finalized.
@@ -34,3 +35,20 @@ Model names are local operating labels. Update them when the available model men
 
 See `CATALOG.md` for the current skill list. The existing `code-review/` draft is intentionally left at the repository root until the category structure is finalized.
 
+## Installing Skills Locally
+
+Use managed per-skill symlinks for local installs. A skill is installed only when `skills.yaml` explicitly enables the target under `install`.
+
+Preview Codex installs:
+
+```bash
+scripts/sync-skills --target codex --dry-run
+```
+
+Apply Codex installs:
+
+```bash
+scripts/sync-skills --target codex --apply
+```
+
+The script refuses to overwrite unmanaged files or directories unless `--force` is passed. Use `--prune` to remove repo-managed symlinks that are no longer selected for a target.

@@ -1,0 +1,215 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "optparse"
+require "yaml"
+
+DEFAULT_DESTINATIONS = {
+  "codex" => "~/.codex/skills",
+  "cursor" => "~/.cursor/skills"
+}.freeze
+
+def inside_directory?(path, root)
+  expanded_path = File.expand_path(path)
+  expanded_root = File.expand_path(root)
+  expanded_path == expanded_root || expanded_path.start_with?("#{expanded_root}/")
+end
+
+def target_install(skill, target)
+  install = skill.fetch("install", {})
+  value = install[target]
+  value.is_a?(Hash) ? value : {}
+end
+
+def enabled_for_target?(skill, target)
+  target_install(skill, target)["enabled"] == true
+end
+
+def skill_name(skill)
+  skill["name"].to_s.strip
+end
+
+def desired_symlink?(dest_path, source_path)
+  File.symlink?(dest_path) &&
+    File.expand_path(File.readlink(dest_path), File.dirname(dest_path)) == source_path
+end
+
+def managed_repo_symlink?(path, repo_root)
+  File.symlink?(path) && inside_directory?(File.expand_path(File.readlink(path), File.dirname(path)), repo_root)
+end
+
+options = {
+  apply: false,
+  force: false,
+  prune: false,
+  repo_root: File.expand_path("..", __dir__),
+  target: "codex"
+}
+
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: scripts/sync-skills [options]"
+
+  opts.on("--target TARGET", "Install target: codex or cursor. Default: codex.") do |target|
+    options[:target] = target
+  end
+
+  opts.on("--repo-root PATH", "Repository root. Default: parent of this script.") do |path|
+    options[:repo_root] = path
+  end
+
+  opts.on("--manifest PATH", "Manifest path. Default: <repo-root>/skills.yaml.") do |path|
+    options[:manifest] = path
+  end
+
+  opts.on("--dest PATH", "Install directory. Defaults by target.") do |path|
+    options[:dest] = path
+  end
+
+  opts.on("--dry-run", "Preview changes without writing. This is the default.") do
+    options[:apply] = false
+  end
+
+  opts.on("--apply", "Create, update, or prune symlinks.") do
+    options[:apply] = true
+  end
+
+  opts.on("--force", "Replace existing unmanaged paths for selected skills.") do
+    options[:force] = true
+  end
+
+  opts.on("--prune", "Remove managed repo symlinks no longer selected for the target.") do
+    options[:prune] = true
+  end
+
+  opts.on("-h", "--help", "Show this help.") do
+    puts opts
+    exit
+  end
+end
+
+parser.parse!
+
+target = options[:target]
+unless DEFAULT_DESTINATIONS.key?(target)
+  warn "Unsupported target: #{target}. Expected one of: #{DEFAULT_DESTINATIONS.keys.join(", ")}"
+  exit 2
+end
+
+repo_root = File.expand_path(options[:repo_root])
+manifest_path = File.expand_path(options[:manifest] || File.join(repo_root, "skills.yaml"))
+dest_root = File.expand_path(options[:dest] || DEFAULT_DESTINATIONS.fetch(target))
+
+begin
+  manifest = YAML.load_file(manifest_path)
+rescue Errno::ENOENT
+  warn "Manifest not found: #{manifest_path}"
+  exit 1
+rescue Psych::SyntaxError => e
+  warn "Invalid YAML in #{manifest_path}: #{e.message}"
+  exit 1
+end
+
+skills = Array(manifest.fetch("skills", []))
+selected = skills.select { |skill| enabled_for_target?(skill, target) }
+
+errors = []
+operations = []
+desired_names = []
+
+selected.each do |skill|
+  name = skill_name(skill)
+  path = skill["path"].to_s.strip
+  install = target_install(skill, target)
+  mode = install["mode"] || "symlink"
+
+  if name.empty?
+    errors << "Skill entry is missing name"
+    next
+  end
+
+  if path.empty?
+    errors << "#{name}: missing path"
+    next
+  end
+
+  unless mode == "symlink"
+    errors << "#{name}: unsupported #{target} install mode #{mode.inspect}; only symlink is supported"
+    next
+  end
+
+  source_path = File.expand_path(path, repo_root)
+  unless inside_directory?(source_path, repo_root)
+    errors << "#{name}: source path escapes repository root: #{path}"
+    next
+  end
+
+  unless File.file?(File.join(source_path, "SKILL.md"))
+    errors << "#{name}: missing SKILL.md at #{source_path}"
+    next
+  end
+
+  dest_path = File.join(dest_root, name)
+  desired_names << name
+
+  if desired_symlink?(dest_path, source_path)
+    operations << [:noop, name, dest_path, source_path]
+  elsif File.exist?(dest_path) || File.symlink?(dest_path)
+    if options[:force]
+      operations << [:replace, name, dest_path, source_path]
+    else
+      errors << "Refusing to overwrite unmanaged path: #{dest_path}"
+    end
+  else
+    operations << [:link, name, dest_path, source_path]
+  end
+end
+
+if options[:prune] && Dir.exist?(dest_root)
+  Dir.children(dest_root).sort.each do |entry|
+    next if desired_names.include?(entry)
+
+    path = File.join(dest_root, entry)
+    operations << [:prune, entry, path, nil] if managed_repo_symlink?(path, repo_root)
+  end
+end
+
+unless errors.empty?
+  errors.each { |error| warn error }
+  exit 1
+end
+
+if operations.empty?
+  puts "No #{target} skills selected for install"
+  exit 0
+end
+
+operations.each do |operation, name, dest_path, source_path|
+  case operation
+  when :noop
+    puts "#{name} already linked"
+  when :link
+    if options[:apply]
+      FileUtils.mkdir_p(File.dirname(dest_path))
+      File.symlink(source_path, dest_path)
+      puts "Linked #{name}: #{dest_path} -> #{source_path}"
+    else
+      puts "Would link #{name}: #{dest_path} -> #{source_path}"
+    end
+  when :replace
+    if options[:apply]
+      FileUtils.rm_rf(dest_path)
+      FileUtils.mkdir_p(File.dirname(dest_path))
+      File.symlink(source_path, dest_path)
+      puts "Replaced #{name}: #{dest_path} -> #{source_path}"
+    else
+      puts "Would replace #{name}: #{dest_path} -> #{source_path}"
+    end
+  when :prune
+    if options[:apply]
+      FileUtils.rm_f(dest_path)
+      puts "Pruned #{name}: #{dest_path}"
+    else
+      puts "Would prune #{name}: #{dest_path}"
+    end
+  end
+end
