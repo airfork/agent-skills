@@ -30,16 +30,16 @@ See `platform-adapters.md` for Cursor and Claude Code notes.
 ## Codex Prompt Examples
 
 ```text
-Use $code-review to run /code-review quick staged.
-Use $code-review to run /code-review standard working tree.
-Use $code-review to run /code-review high pr #123.
-Use $code-review to run /code-review deep branch.
+Use $code-review to review staged changes with quick intensity.
+Use $code-review to review the working tree with standard intensity.
+Use $code-review to review PR #123 with high intensity.
+Use $code-review to review branch changes with deep intensity.
 ```
 
 Review first, then fix every verified finding that is safe to address:
 
 ```text
-Use $code-review to run /code-review standard working tree. Report the verified findings first, then address all applicable findings in the same turn and run targeted verification.
+Use $code-review to review the working tree with standard intensity, then address all applicable verified findings and run targeted verification.
 ```
 
 Address findings from the review that just ran:
@@ -58,7 +58,7 @@ Use $code-review to address actionable review comments on PR #123. Re-check each
 
 ## Run Options
 
-In Codex, invoke the skill with `$code-review`; the `/code-review` text is the review-mode instruction inside the prompt. `/code-review` requires an explicit review tier as its first argument. If the command has no tier, or the first argument is a target such as `staged`, `branch`, `working tree`, or `pr #123`, print the help text from `SKILL.md` and stop instead of running a default review.
+In Codex, invoke the skill with `$code-review`. Review prompts must name an explicit tier: `quick`, `standard`, `high`, or `deep`. If the prompt asks for review but only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print the help text from `SKILL.md` and stop instead of running a default review.
 
 | Tier | Cost | Use when | Coverage |
 |------|------|----------|----------|

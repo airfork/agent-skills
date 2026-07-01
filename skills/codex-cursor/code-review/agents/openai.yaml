@@ -1,4 +1,4 @@
 interface:
   display_name: "Code Review"
   short_description: "Review changes or address verified review findings"
-  default_prompt: "Use $code-review to run /code-review standard working tree, or address verified review findings when requested."
+  default_prompt: "Use $code-review to review the working tree with standard intensity, or address verified review findings when requested."

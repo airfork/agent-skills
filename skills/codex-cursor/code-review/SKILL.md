@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: >-
-  Use when the user runs /code-review, asks for a thorough review of a pull
+  Use when the user invokes $code-review, asks for a thorough review of a pull
   request, branch diff, staged changes, unstaged changes, dirty working tree,
   or local changes before merge; also use when the user asks to address or fix
   verified code-review findings.
@@ -25,10 +25,13 @@ Codex installs this as one skill named `$code-review`; address mode is not a sep
 Use these prompt shapes:
 
 ```text
-Use $code-review to run /code-review <quick|standard|high|deep> [target].
+Use $code-review to review staged changes with quick intensity.
+Use $code-review to review the working tree with standard intensity.
+Use $code-review to review PR #123 with high intensity.
+Use $code-review to review branch changes with deep intensity.
 Use $code-review to address the verified findings from the last code review.
 Use $code-review to address actionable review comments on PR #123.
-Use $code-review to run /code-review standard working tree, then address all applicable verified findings and run targeted verification.
+Use $code-review to review the working tree with standard intensity, then address all applicable verified findings and run targeted verification.
 ```
 
 Natural-language requests also apply:
@@ -43,7 +46,7 @@ When the user asks for review and fixes in the same turn, run the review first. 
 
 ## Tier Parsing And Help
 
-`/code-review` requires an explicit tier as the first meaningful argument. Recognize only `quick`, `standard`, `high`, `deep`, and obvious aliases:
+Review mode requires an explicit tier in the user's review request. Recognize only `quick`, `standard`, `high`, `deep`, and obvious aliases:
 
 | Alias | Tier |
 |-------|------|
@@ -52,11 +55,11 @@ When the user asks for review and fixes in the same turn, run the review first. 
 | `thorough` | `high` |
 | `xhigh`, `max`, `full` | `deep` |
 
-If the user runs `/code-review` with no tier, or if the first argument is a target or other text that is not a recognizable tier, print this help text and stop:
+If the user asks for review without a recognizable tier, or if the request only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print this help text and stop:
 
 ```text
 Usage:
-  /code-review <quick|standard|high|deep> [target]
+  Use $code-review to review <target> with <quick|standard|high|deep> intensity.
 
 Tiers:
   quick     Low-cost pass for small, low-risk diffs.
@@ -72,13 +75,13 @@ Targets:
   pr #123 | <PR URL>            Review pull request diff and metadata via gh.
 
 Examples:
-  /code-review quick staged
-  /code-review standard working tree
-  /code-review high pr #123
-  /code-review deep branch
+  Use $code-review to review staged changes with quick intensity.
+  Use $code-review to review the working tree with standard intensity.
+  Use $code-review to review PR #123 with high intensity.
+  Use $code-review to review branch changes with deep intensity.
 ```
 
-Do not silently default to `standard` for explicit `/code-review` invocations. For natural-language review requests without a tier, ask the user to choose a tier unless the surrounding instructions clearly provide one.
+Do not silently default to `standard` for review requests. For natural-language review requests without a tier, ask the user to choose a tier unless the surrounding instructions clearly provide one.
 
 ## Intensity
 
