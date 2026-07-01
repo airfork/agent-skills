@@ -41,10 +41,10 @@ Use different model policies for finder and verifier subtasks:
 
 | Role | Codex model policy |
 |------|--------------------|
-| Finder | Usually inherit the parent/default model. For `high` or `deep`, use an explicit stronger finder model only when the current schema exposes one and the selected tier justifies it. |
-| Verifier | Use an explicit lower-cost fast model whenever the current schema exposes model selection. Suggested examples are `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. |
+| Finder | Inherit the parent/default model for `quick` and `standard`. For `high` or `deep`, use an explicit stronger finder model when the current schema exposes one. |
+| Verifier | Use an explicit lower-cost fast model for ordinary bounded candidates when the current schema exposes model selection. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts. |
 
-Do not omit the model override for verifier subagents when the spawn/task tool supports one. If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
+Do not omit the model decision for verifier subagents when the spawn/task tool supports one. If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
 
 Codex subagent wrapper:
 

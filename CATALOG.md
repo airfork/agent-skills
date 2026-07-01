@@ -15,7 +15,7 @@ This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
 
 | Skill | Path | Category | Status | Install | Recommended tier | Description |
 |-------|------|----------|--------|---------|------------------|-------------|
-| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex enabled; Cursor disabled | `standard`; use `high` or `deep` for intensive review | Codex-first workflow for reviewing changes and addressing verified review findings, with Cursor adapter notes. |
+| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex enabled; Cursor disabled | `deep`; use `standard` only for lower-cost routine reviews | Severity-aware Codex-first workflow for thorough review and verified finding remediation, with Cursor adapter notes. |
 
 ## Category Backlog
 

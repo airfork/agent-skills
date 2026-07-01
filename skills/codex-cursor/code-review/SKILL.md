@@ -10,18 +10,15 @@ description: >-
 # Code Review
 
 Codex-first workflow for two related jobs:
-
-1. **Review mode**: inspect a diff with independent finder agents, verify each candidate finding, and report only high-confidence issues.
+1. **Review mode**: inspect a diff with independent finder agents, require enough surrounding context to find severe regressions, verify each candidate finding, and report only high-confidence issues.
 2. **Address mode**: take verified review findings or PR review comments, re-check that they still apply, make the smallest safe fixes, and verify the result.
 
-Review mode is read-only. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
-
+Review mode is read-only. It is not limited to reading the diff text: agents may read unchanged files, callers, consumers, schemas, configs, migrations, and nearby project guidance when that context is needed to decide whether the changed lines introduce a real issue. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
 For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
 ## Invocation
 
 Codex installs this as one skill named `$code-review`; address mode is not a separate Codex command or skill.
-
 Use these prompt shapes:
 
 ```text
@@ -35,7 +32,6 @@ Use $code-review to review the working tree with standard intensity, then addres
 ```
 
 Natural-language requests also apply:
-
 - "review my current branch"
 - "review this PR"
 - "check staged changes before merge"
@@ -85,16 +81,16 @@ Do not silently default to `standard` for review requests. For natural-language 
 
 ## Intensity
 
-The tier controls review cost, finder roster, and verifier threshold.
+The tier controls review cost, finder roster, and report threshold.
 
-| Tier | Finders | Verifier threshold | Use when |
+| Tier | Finders | Major/minor report threshold | Use when |
 |------|---------|--------------------|----------|
-| `quick` | 2 | 70 | Small, low-risk diffs or a fast pre-check |
+| `quick` | 2 | 75 | Small, low-risk diffs or a fast pre-check |
 | `standard` | 3 | 75 | Normal local branch, staged, unstaged, or PR review |
-| `high` | 5 | 80 | Pre-merge review where extra coverage is worth the cost |
-| `deep` | 6 | 85 | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes |
+| `high` | 5 | 75 | Pre-merge review where extra coverage is worth the cost |
+| `deep` | 6 | 75 | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes |
 
-Prefer false negatives over false positives. The goal is to catch important review issues, not to produce a long list.
+Keep false-positive control for minor, style, and broad quality concerns. For concrete blocker-class risks such as user-visible breakage, data loss/corruption, security exposure, migration failure, or violation of a must-follow project rule, prefer surfacing the candidate to verification over dropping it early.
 
 ## Subagent Model Policy
 
@@ -103,10 +99,10 @@ Finder and verifier subagents do not use the same model policy.
 | Role | Model policy |
 |------|--------------|
 | Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
-| Finder | Use the parent/default model unless the selected `high` or `deep` tier and current tool schema justify an explicit stronger finder model. |
-| Verifier | Use a lower-cost fast model tier when the host supports explicit subagent model selection. Suggested Codex examples: `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. |
+| Finder | Use the parent/default model for `quick` and `standard`. For `high` or `deep`, use the strongest available finder model when the host exposes explicit model selection. |
+| Verifier | Use a lower-cost fast model tier for ordinary bounded candidates when the host supports explicit subagent model selection. Suggested Codex examples: `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts. |
 
-Do not omit a verifier model override when the host exposes one. Verifiers inspect one candidate issue, one hunk/excerpt, relevant guidance, and the rubric; this bounded task should not consume the same model tier as broad finder agents. If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
+Do not omit a verifier model decision when the host exposes model selection: choose fast for ordinary bounded candidates and stronger for blocker-class or cross-file candidates. If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
 
 ## Target Resolution
 
@@ -129,6 +125,7 @@ If the resolved target has no changes, stop with `No diff to review.`
 - Address mode is narrow: edit only what is needed for verified findings or explicitly actionable review comments.
 - Ask before actions outside the selected review tier or outside read-only review work, such as broad edits, GitHub write actions, resolving threads, or explicit model/cost escalation beyond the chosen tier.
 - Do not report pre-existing issues, unchanged-line issues, ordinary CI failures, style preferences, broad quality concerns, or missing tests/docs unless explicit project guidance requires them.
+- Do not suppress a blocker or major regression solely because CI, typechecking, tests, or a compiler might also catch it. If the diff proves a real runtime, integration, migration, security, or user-visible failure, it is a review finding.
 - Do not browse or scrape PRs in a browser when `gh` can provide the data.
 - Do not rely on stale assumptions about tool names, model names, or host capabilities. Use the tools actually exposed by the current environment.
 
@@ -168,7 +165,9 @@ Run prep inline unless a cheap read-only subagent is clearly useful.
    - `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `CONTRIBUTING.md`
    - `.cursor/rules/*`, `.github/copilot-instructions.md`
    - matching guidance files in directories touched by the review target
-6. Summarize the change in 3-5 sentences: intent, touched areas, risk areas, and any notable generated/binary/dependency files.
+   - referenced docs from those files when they define review-relevant requirements
+6. Build a short context map for the touched files: changed API surfaces, direct callers/consumers, schemas, migrations, configuration, dependency manifests, and security or permission boundaries that changed behavior may cross.
+7. Summarize the change in 3-5 sentences: intent, touched areas, risk areas, and any notable generated/binary/dependency files.
 
 For generated-only, formatting-only, or lockfile-only diffs, do not skip automatically. Downgrade effort when appropriate, but still check for real dependency, security, packaging, or generated-artifact inconsistencies.
 
@@ -192,19 +191,24 @@ Populate only the files that are in scope:
 git diff --stat "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.stat"
 git diff --name-status "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.name-status"
 git diff "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.diff"
+git diff --name-only "$BASE_SHA"..HEAD >> "$REVIEW_DIR/changed.files"
 
 # Staged changes, when in scope
 git diff --cached --stat > "$REVIEW_DIR/staged.stat"
 git diff --cached --name-status > "$REVIEW_DIR/staged.name-status"
 git diff --cached > "$REVIEW_DIR/staged.diff"
+git diff --cached --name-only >> "$REVIEW_DIR/changed.files"
 
 # Unstaged changes, when in scope
 git diff --stat > "$REVIEW_DIR/unstaged.stat"
 git diff --name-status > "$REVIEW_DIR/unstaged.name-status"
 git diff > "$REVIEW_DIR/unstaged.diff"
+git diff --name-only >> "$REVIEW_DIR/changed.files"
 
 # Untracked files, when in scope
 git ls-files --others --exclude-standard > "$REVIEW_DIR/untracked.files"
+cat "$REVIEW_DIR/untracked.files" >> "$REVIEW_DIR/changed.files"
+sort -u "$REVIEW_DIR/changed.files" -o "$REVIEW_DIR/changed.files"
 ```
 
 For untracked files in scope, snapshot readable text files into the packet so finders do not depend on a moving worktree:
@@ -227,7 +231,10 @@ For PR targets, create explicit PR packet files instead of relying on local bran
 ```bash
 gh pr view "$PR" --json number,title,state,isDraft,headRefName,baseRefName,url,reviewDecision,mergeStateStatus > "$REVIEW_DIR/pr.json"
 gh pr diff "$PR" > "$REVIEW_DIR/pr.diff"
+gh pr diff "$PR" --name-only > "$REVIEW_DIR/changed.files" 2>/dev/null || true
 ```
+
+If the user explicitly asks to include local dirty changes with a PR review, also populate the staged, unstaged, and untracked packet files above, appending their paths to `changed.files`, then run `sort -u "$REVIEW_DIR/changed.files" -o "$REVIEW_DIR/changed.files"`.
 
 Adjust packet content by target:
 
@@ -249,6 +256,7 @@ TARGET
 BASE_SHA
 HEAD_SHA
 GUIDELINE_PATHS
+CONTEXT_PATHS
 CHANGE_SUMMARY
 THRESHOLD
 IN_SCOPE_PACKET_FILES
@@ -263,7 +271,7 @@ Shared finder wrapper:
 ```text
 Your task is to perform a read-only code review subtask.
 
-Do not edit files. Do not run builds, tests, typechecks, linters, formatters, compilers, package installs, migrations, or app commands. Inspect only the review target. Output only the requested JSON.
+Do not edit files. Do not run builds, tests, typechecks, linters, formatters, compilers, package installs, migrations, or app commands. Inspect only the review target and directly relevant static context needed to judge it. Output only the requested JSON.
 ```
 
 Shared finder prompt:
@@ -278,54 +286,60 @@ Head: {HEAD_SHA}
 Review packet: {REVIEW_DIR}
 In-scope packet files: {IN_SCOPE_PACKET_FILES}
 Guideline paths: {GUIDELINE_PATHS}
+Context paths: {CONTEXT_PATHS}
 Change summary: {CHANGE_SUMMARY}
 
-Use packet files first. For untracked files, read the snapshot under {REVIEW_DIR}/untracked when present; otherwise read the listed file directly only if it is in scope.
+Use packet files first to understand what changed. Then read enough unchanged context to judge the change: direct callers/consumers, public interfaces, schemas, configs, migrations, dependency manifests, permission checks, and nearby invariants. For untracked files, read the snapshot under {REVIEW_DIR}/untracked when present; otherwise read the listed file directly only if it is in scope.
 
 Read guideline files only when relevant to your assigned role.
+
+Before returning `[]`, check these questions internally for your assigned role. Do not output the answers unless they support an issue object:
+- What behavior, data shape, lifecycle, permission, or integration contract did the change alter?
+- What failure mode follows if a caller, consumer, migration, or config still expects the previous contract?
+- What project requirement or local invariant would be violated if this change is wrong?
 
 Return ONLY a JSON array. Each issue must use this shape:
 {"id":"F{finder_number}-{issue_number}","file":"path","line_start":N,"line_end":N,"severity":"blocker|major|minor","title":"short","detail":"specific explanation","category":"guideline|bug|history|prior-pr|comment|security|other","evidence":"why this is introduced by this change"}
 
 No issues: []
 
-Exclude pre-existing problems, unchanged-line issues, CI-catchable build/lint/type/format issues, broad quality concerns, missing tests/docs unless explicitly required by project guidance, and senior-engineer nits.
+Exclude pre-existing problems, unchanged-line issues, ordinary CI-only mechanics, broad quality concerns, missing tests/docs unless explicitly required by project guidance, and senior-engineer nits. Do not exclude a concrete blocker/major regression only because CI might also fail; include it if the diff and context prove user-visible breakage, data loss/corruption, security exposure, migration failure, or a broken public contract.
 ```
 
 Finder roster:
 
 | Tier | Finder | Focus |
 |------|--------|-------|
-| quick+ | Guideline auditor | Explicit project guidance on changed lines only |
-| quick+ | Bug scanner | Serious behavior, data, security, concurrency, lifecycle, or reliability bugs |
-| standard+ | History analyst | `git blame` and `git log -p -- <file>` around touched hunks to catch context regressions |
+| quick+ | Guideline auditor | Explicit project guidance on changed lines plus file-level or directory-level must-follow requirements triggered by changed files |
+| quick+ | Bug scanner | Serious behavior, data, security, concurrency, lifecycle, or reliability bugs, including direct caller/consumer contract breaks |
+| standard+ | History/context analyst | `git blame`, `git log -p -- <file>`, and direct caller/consumer context around touched hunks to catch regressions |
 | high+ | Prior PR analyst | Related prior PRs, merge history, or unresolved review context for changed files |
 | high+ | Comment auditor | `TODO`, `FIXME`, `NOTE`, warnings, and nearby comments that define local intent |
 | deep | Integration/context analyst | Cross-file contracts, public APIs, configuration, dependency, data-shape, migration, and security boundary assumptions touched by the change |
 
-If a finder returns invalid JSON, ask once for JSON repair without changing the substance. If it still fails, drop that finder output and note the gap internally.
+If a finder returns invalid JSON, ask once for JSON repair without changing the substance. If it still fails, drop ordinary candidates, but manually normalize any clearly stated plausible blocker/major candidate into the required JSON shape before verification.
 
 Deduplicate candidates before verification by `file`, overlapping line range, substantially similar claim, and shared root cause. Preserve the clearest title/detail/evidence across duplicates.
 
 ### Step 4: Parallel Verifiers
 
-For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again. Use the lower-cost fast verifier model tier when the host supports subagent model overrides; do not let verifiers inherit the parent/default model when an explicit verifier model can be set.
+For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again. Use the lower-cost fast verifier model tier for ordinary bounded candidates when the host supports subagent model overrides. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts.
 
 Give each verifier:
 
 - the candidate issue JSON
 - the relevant diff hunk or untracked-file excerpt
-- nearby unchanged context only as needed
+- nearby unchanged context and caller/consumer/schema/config/migration context as needed
 - relevant project guideline excerpts, if the candidate depends on a guideline
 - [verifier-rubric.md](verifier-rubric.md) verbatim
 
 Verifier output must be JSON only:
 
 ```json
-{"issue_id":"F1-1","score":85,"severity":"major","reason":"one sentence"}
+{"issue_id":"F1-1","score":85,"severity":"major","disposition":"valid","reason":"one sentence"}
 ```
 
-Drop candidates with `score < THRESHOLD`. Also drop candidates that the verifier marks as pre-existing, unchanged-line only, speculative, or CI-only even if the numeric score is high.
+Drop candidates whose `disposition` is not `valid`, even if the numeric score is high. Drop major/minor candidates with `score < THRESHOLD`. Report blocker candidates with `score >= 75` even in `high` or `deep` reviews. Do not silently drop blocker candidates scored `50-74`; have the parent agent perform one manual evidence pass, and either (a) dispatch a second verifier with broader context or (b) drop it with an internal note if the evidence is still speculative.
 
 Zero survivors means report:
 
@@ -470,7 +484,8 @@ Do not claim a comment is resolved unless the code change was made and verified.
 
 - Pre-existing issues not introduced by the review target
 - Issues only on unchanged lines
-- Linter, typechecker, formatter, compiler, import, or ordinary test failures
+- Ordinary linter, typechecker, formatter, compiler, import, or test failures with no independently reviewable behavioral impact
+- Findings whose only evidence is that CI might fail, rather than a concrete changed contract or failure mode
 - Pedantic style unless explicit project guidance requires it
 - General code quality, missing docs, or missing tests unless explicit project guidance requires it
 - Intentional behavior directly tied to the change

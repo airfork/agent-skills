@@ -5,7 +5,7 @@ Personal Codex-first skill for two related workflows, both invoked through `$cod
 1. **Review mode** - review a branch, PR, staged diff, unstaged diff, or dirty worktree using independent finder and verifier passes.
 2. **Address mode** - address verified review findings or actionable PR review comments with narrow edits and targeted verification.
 
-The review workflow is intentionally conservative: it reports only high-confidence issues introduced by the review target and avoids CI-catchable failures, broad quality commentary, and senior-engineer nits.
+The review workflow is severity-aware: it keeps false-positive control for minor, style, and broad quality concerns, but pushes concrete blocker/security/data-loss/migration candidates through verification instead of filtering them out early.
 
 ## Files
 
@@ -65,21 +65,21 @@ Invoking review mode grants permission to spawn the read-only finder and verifie
 | Tier | Cost | Use when | Coverage |
 |------|------|----------|----------|
 | `quick` | Low | Small, low-risk diffs or a fast pre-check. | Guideline auditor and bug scanner only. |
-| `standard` | Medium | Normal local branch, staged, unstaged, or PR review. | Adds history analysis around touched hunks. |
+| `standard` | Medium | Normal local branch, staged, unstaged, or PR review. | Adds history and direct caller/consumer context around touched hunks. |
 | `high` | High | Pre-merge review where extra coverage is worth the cost. | Adds prior PR/merge context and local comment intent checks. |
-| `deep` | Highest | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes. | Adds integration/context analysis and uses the strictest verifier threshold. |
+| `deep` | Highest | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes. | Adds integration/context analysis without raising the blocker reporting threshold. |
 
-Targets are optional after the tier. With no target, review committed branch diff plus staged, unstaged, and untracked files.
+Targets may be omitted from a tiered review request. With no target, review committed branch diff plus staged, unstaged, and untracked files.
 
 ## Model Policy
 
-Finder subagents use the selected review intensity and usually inherit the parent/default model unless the host exposes a stronger model that is justified by `high` or `deep`. Verifier subagents are different: they check one bounded candidate against evidence and the rubric, so they should use a lower-cost fast model tier when the host supports model overrides. Do not let verifiers inherit the parent model when an explicit verifier model can be set.
+Finder subagents use the selected review intensity and usually inherit the parent/default model for `quick` and `standard`; use a stronger model for `high` or `deep` when the host exposes one. Verifier subagents use a lower-cost fast model for ordinary bounded candidates, but blocker/security/data-loss/migration candidates and cross-file contract candidates should use the parent/default or stronger model.
 
 ## Design checks
 
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
 - Dirty worktree and untracked files are included when in scope.
-- Finder/verifier thresholds match your preferred cost-to-confidence tradeoff.
-- Verifier subagents use a lower/fast model tier whenever the host supports subagent model overrides.
+- Finder/verifier thresholds preserve false-positive control without filtering blocker-class issues only because proof is contextual.
+- Verifier subagents use a lower/fast model tier for ordinary bounded candidates and a stronger model for blocker-class or cross-file candidates when the host supports subagent model overrides.
 - The adapter spawns read-only finder/verifier subagents without asking for extra permission; sequential fallback is only for hosts where subagents are unavailable.
