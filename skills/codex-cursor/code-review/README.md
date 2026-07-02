@@ -2,17 +2,17 @@
 
 Personal Codex-first skill for two related workflows, both invoked through `$code-review`:
 
-1. **Review mode** - review a branch, PR, staged diff, unstaged diff, or dirty worktree using independent finder and verifier passes.
+1. **Review mode** - review a branch, PR, staged diff, unstaged diff, or dirty worktree with independent method-based finder angles, then verify each candidate with a verdict ladder.
 2. **Address mode** - address verified review findings or actionable PR review comments with narrow edits and targeted verification.
 
-The review workflow is severity-aware: it keeps false-positive control for minor, style, and broad quality concerns, but pushes concrete blocker/security/data-loss/migration candidates through verification instead of filtering them out early.
+The workflow mirrors the built-in Claude Code `/code-review` skill: finders are bug-hunting *methods* (line-by-line scan, removed-behavior audit, cross-file tracing, plus cleanup/altitude/conventions lenses), not context-source roles. The precision/recall dial lives in verification and synthesis, not in the finders — finders pass every candidate with a nameable failure scenario through, and a verifier keeps everything it cannot refute from the code.
 
 ## Files
 
 | File | Purpose |
 |------|---------|
 | [SKILL.md](SKILL.md) | Main review and address mode workflow |
-| [verifier-rubric.md](verifier-rubric.md) | Confidence scoring rubric for verifier subagents |
+| [verifier-rubric.md](verifier-rubric.md) | Verdict ladder (CONFIRMED / PLAUSIBLE / REFUTED) and recall rules for verifier subagents |
 | [platform-adapters.md](platform-adapters.md) | Codex, Cursor, Claude Code, and sequential fallback notes |
 | [agents/openai.yaml](agents/openai.yaml) | Minimal OpenAI/Codex-facing manifest |
 
@@ -62,24 +62,25 @@ In Codex, invoke the skill with `$code-review`. Review prompts must name an expl
 
 Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier. The skill should not ask again before spawning those subagents; only ask before work outside the user-requested scope, such as unrequested edits, broad refactors, GitHub write actions, or explicit model/cost escalation beyond the chosen tier.
 
-| Tier | Cost | Use when | Coverage |
-|------|------|----------|----------|
-| `quick` | Low | Small, low-risk diffs or a fast pre-check. | Guideline auditor and bug scanner only. |
-| `standard` | Medium | Normal local branch, staged, unstaged, or PR review. | Adds history and direct caller/consumer context around touched hunks. |
-| `high` | High | Pre-merge review where extra coverage is worth the cost. | Adds prior PR/merge context and local comment intent checks. |
-| `deep` | Highest | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes. | Adds integration/context analysis without raising the blocker reporting threshold. |
+| Tier | Cost | Structure | Report cap |
+|------|------|-----------|------------|
+| `quick` | Low | One inline diff pass, no subagents, no verify. | 4 |
+| `standard` | Medium | 8 finder angles x up to 6 candidates, 1-vote verify, precision-tuned. | 8 |
+| `high` | High | Same 8 angles, recall-tuned finders and recall-biased verify. | 10 |
+| `deep` | Highest | 10 angles (adds language-pitfall and wrapper/proxy correctness) x up to 8 candidates, recall-biased verify, plus a gap-sweep pass. | 15 |
 
 Targets may be omitted from a tiered review request. With no target, review committed branch diff plus staged, unstaged, and untracked files.
 
 ## Model Policy
 
-Finder subagents use the selected review intensity and usually inherit the parent/default model for `quick` and `standard`; use a stronger model for `high` or `deep` when the host exposes one. Verifier subagents use a lower-cost fast model for ordinary bounded candidates, but blocker/security/data-loss/migration candidates and cross-file contract candidates should use the parent/default or stronger model.
+Finder subagents inherit the parent/default model; use a stronger model at `deep` when the host exposes one. Verifier subagents use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, a lower-cost fast model is acceptable for candidates whose evidence is bounded to one or two files.
 
 ## Design checks
 
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
 - Dirty worktree and untracked files are included when in scope.
-- Finder/verifier thresholds preserve false-positive control without filtering blocker-class issues only because proof is contextual.
-- Verifier subagents use a lower/fast model tier for ordinary bounded candidates and a stronger model for blocker-class or cross-file candidates when the host supports subagent model overrides.
+- Finders never see the never-report list; filtering happens at verify and synthesis so half-believed candidates reach an independent verifier.
+- Verification is a 3-state verdict ladder with the burden of proof on refuting; at `high`/`deep` the recall rules make PLAUSIBLE the default for realistic runtime states.
+- Unchanged lines inside a touched function are in scope; files the diff never touches are not.
 - The adapter spawns read-only finder/verifier subagents without asking for extra permission; sequential fallback is only for hosts where subagents are unavailable.

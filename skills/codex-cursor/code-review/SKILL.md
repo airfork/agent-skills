@@ -10,10 +10,10 @@ description: >-
 # Code Review
 
 Codex-first workflow for two related jobs:
-1. **Review mode**: inspect a diff with independent finder agents, require enough surrounding context to find severe regressions, verify each candidate finding, and report only high-confidence issues.
+1. **Review mode**: inspect a diff with independent method-based finder angles, verify each candidate with a verdict ladder, and report what survives.
 2. **Address mode**: take verified review findings or PR review comments, re-check that they still apply, make the smallest safe fixes, and verify the result.
 
-Review mode is read-only. It is not limited to reading the diff text: agents may read unchanged files, callers, consumers, schemas, configs, migrations, and nearby project guidance when that context is needed to decide whether the changed lines introduce a real issue. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
+Review mode is read-only. It is not limited to reading the diff text: agents may read unchanged files, callers, consumers, schemas, configs, migrations, and nearby project guidance when that context is needed to judge the changed lines. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
 For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
 ## Invocation
@@ -38,7 +38,7 @@ Natural-language requests also apply:
 - "address the review findings"
 - "fix the PR comments"
 
-When the user asks for review and fixes in the same turn, run the review first. Continue into address mode only for findings that pass verification; do not fix speculative or low-confidence candidates.
+When the user asks for review and fixes in the same turn, run the review first. Continue into address mode only for findings that survive verification.
 
 ## Tier Parsing And Help
 
@@ -58,10 +58,11 @@ Usage:
   Use $code-review to review <target> with <quick|standard|high|deep> intensity.
 
 Tiers:
-  quick     Low-cost pass for small, low-risk diffs.
-  standard  Normal local branch, staged, unstaged, or PR review.
-  high      Pre-merge review with extra context coverage.
-  deep      Highest-cost review for large, risky, security-sensitive, architecture-shaping, or release-blocking changes.
+  quick     One inline diff pass, no subagents. Small, low-risk diffs.
+  standard  8 finder angles, precision-tuned. Normal local or PR review.
+  high      8 finder angles, recall-tuned. Pre-merge review.
+  deep      10 finder angles plus gap sweep, recall-tuned. Large, risky,
+            security-sensitive, or release-blocking changes.
 
 Targets:
   branch | committed | HEAD     Review committed branch diff only.
@@ -77,32 +78,35 @@ Examples:
   Use $code-review to review branch changes with deep intensity.
 ```
 
-Do not silently default to `standard` for review requests. For natural-language review requests without a tier, ask the user to choose a tier unless the surrounding instructions clearly provide one.
+Do not silently default to `standard` for review requests. For an explicit `$code-review` invocation without a tier, print the help text verbatim and stop. For natural-language review requests without a tier, ask the user conversationally to choose one (summarizing the four tiers) unless the surrounding instructions clearly provide a tier.
 
 ## Intensity
 
-The tier controls review cost, finder roster, and report threshold.
+The tier controls the finder roster, the review's precision/recall bias, and the report cap.
 
-| Tier | Finders | Major/minor report threshold | Use when |
-|------|---------|--------------------|----------|
-| `quick` | 2 | 75 | Small, low-risk diffs or a fast pre-check |
-| `standard` | 3 | 75 | Normal local branch, staged, unstaged, or PR review |
-| `high` | 5 | 75 | Pre-merge review where extra coverage is worth the cost |
-| `deep` | 6 | 75 | Large, risky, security-sensitive, architecture-shaping, or release-blocking changes |
+| Tier | Structure | Bias | Report cap |
+|------|-----------|------|------------|
+| `quick` | 1 inline diff pass, no subagents, no verify | precision | 4 |
+| `standard` | 8 finder angles x up to 6 candidates -> 1-vote verify | precision | 8 |
+| `high` | 8 finder angles x up to 6 candidates -> 1-vote verify (recall-biased) | recall | 10 |
+| `deep` | 10 finder angles x up to 8 candidates -> 1-vote verify (recall-biased) -> gap sweep | recall | 15 |
 
-Keep false-positive control for minor, style, and broad quality concerns. For concrete blocker-class risks such as user-visible breakage, data loss/corruption, security exposure, migration failure, or violation of a must-follow project rule, prefer surfacing the candidate to verification over dropping it early.
+Bias framing, prepended to every finder prompt at that tier:
+
+- **Precision** (`quick`, `standard`): every finding surfaced should be one a maintainer would act on.
+- **Recall** (`high`, `deep`): catch every real bug a careful reviewer would catch in one sitting. At this level, catching real bugs matters more than avoiding false positives — a missed bug ships. Err on the side of surfacing.
+
+Verifiers receive the bias through the rubric instead: at `high` and `deep` they get the recall rules ("PLAUSIBLE by default"); at `standard` they get the verdict ladder alone. No tier pre-filters in the finder's head — finders at every tier pass candidates through; verification and synthesis decide what survives.
 
 ## Subagent Model Policy
-
-Finder and verifier subagents do not use the same model policy.
 
 | Role | Model policy |
 |------|--------------|
 | Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
-| Finder | Use the parent/default model for `quick` and `standard`. For `high` or `deep`, use the strongest available finder model when the host exposes explicit model selection. |
-| Verifier | Use a lower-cost fast model tier for ordinary bounded candidates when the host supports explicit subagent model selection. Suggested Codex examples: `gpt-5.4-mini` or the fastest current model suitable for bounded evidence checks. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts. |
+| Finder | Inherit the parent/default model. For `deep`, use the strongest available model when the host exposes explicit model selection. |
+| Verifier | Use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, a lower-cost fast model (e.g. `gpt-5.4-mini` or the fastest current model) is acceptable for candidates whose evidence is bounded to one or two files; use the parent model when the proof depends on cross-file contracts, security, data loss, or migrations. |
 
-Do not omit a verifier model decision when the host exposes model selection: choose fast for ordinary bounded candidates and stronger for blocker-class or cross-file candidates. If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
+If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
 
 ## Target Resolution
 
@@ -122,24 +126,26 @@ If the resolved target has no changes, stop with `No diff to review.`
 - Protect user work: inspect `git status --short` before editing or running any command that could affect files.
 - Review mode is read-only: do not edit files and do not run builds, tests, typechecks, formatters, linters, compilers, package installs, migrations, or app commands.
 - Subagents are part of review mode: spawn the read-only finder/verifier subagents for the selected tier without asking the user for additional permission. If the host lacks subagent tools, use sequential fallback and disclose it in the final report.
+- Scope rule: findings must be introduced or re-exposed by the review target. Unchanged lines inside a function the diff touches ARE in scope — the change re-exposes or fails to fix them. Files the diff never touches are not in scope.
 - Address mode is narrow: edit only what is needed for verified findings or explicitly actionable review comments.
 - Ask before actions outside the selected review tier or outside read-only review work, such as broad edits, GitHub write actions, resolving threads, or explicit model/cost escalation beyond the chosen tier.
-- Do not report pre-existing issues, unchanged-line issues, ordinary CI failures, style preferences, broad quality concerns, or missing tests/docs unless explicit project guidance requires them.
-- Do not suppress a blocker or major regression solely because CI, typechecking, tests, or a compiler might also catch it. If the diff proves a real runtime, integration, migration, security, or user-visible failure, it is a review finding.
+- Do not suppress a real bug because CI, typechecking, tests, or a compiler might also catch it. If the diff proves a real runtime, integration, migration, security, or user-visible failure, it is a review finding.
 - Do not browse or scrape PRs in a browser when `gh` can provide the data.
 - Do not rely on stale assumptions about tool names, model names, or host capabilities. Use the tools actually exposed by the current environment.
 
 ## Review Workflow
 
 ```text
-prep -> review packet -> parallel finders -> dedupe -> parallel verifiers -> filter -> report
+prep -> review packet -> parallel finders -> group by location -> parallel verifiers -> sweep (deep) -> synthesize -> report
 ```
+
+(`quick` replaces everything between prep and report with one inline pass.)
 
 Maintain a visible task list when the host environment supports one (`update_plan`, `TodoWrite`, or equivalent). Otherwise keep the same stages internally and summarize them in the final report.
 
 ### Step 1: Prep
 
-Run prep inline unless a cheap read-only subagent is clearly useful.
+Run prep inline unless a cheap read-only prep subagent is clearly useful.
 
 1. Confirm the repository root:
 
@@ -161,15 +167,10 @@ Run prep inline unless a cheap read-only subagent is clearly useful.
    If branch commits are in scope and `BASE_SHA` is empty, ask for a base branch or review only an explicit working-tree target. Do not guess a base for committed branch review.
 
 4. For PR targets, use `gh pr view` and `gh pr diff` when `gh` is authenticated. Do not check out another branch or disturb the worktree unless the user explicitly asks.
-5. Discover project guidance by path name and proximity, not by reading the whole repository:
-   - `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `CONTRIBUTING.md`
-   - `.cursor/rules/*`, `.github/copilot-instructions.md`
-   - matching guidance files in directories touched by the review target
-   - referenced docs from those files when they define review-relevant requirements
-6. Build a short context map for the touched files: changed API surfaces, direct callers/consumers, schemas, migrations, configuration, dependency manifests, and security or permission boundaries that changed behavior may cross.
-7. Summarize the change in 3-5 sentences: intent, touched areas, risk areas, and any notable generated/binary/dependency files.
+5. Find the guidance files that govern the changed code, by path proximity rather than reading the whole repository: the user-level and repo-root `AGENTS.md`/`CLAUDE.md`, any `AGENTS.md`, `CLAUDE.md`, or `CLAUDE.local.md` in a directory that is an ancestor of a changed file (a directory's guidance file only applies to files at or below it), plus `.cursor/rules/*` and `.github/copilot-instructions.md` when present. List them; the conventions finder reads them.
+6. Summarize the change in one paragraph: intent, touched areas, risk areas, and any notable generated/binary/dependency files. Note conventions a reviewer should know.
 
-For generated-only, formatting-only, or lockfile-only diffs, do not skip automatically. Downgrade effort when appropriate, but still check for real dependency, security, packaging, or generated-artifact inconsistencies.
+For generated-only, formatting-only, or lockfile-only diffs, do not skip automatically. You may shrink the roster to Angle A plus the Conventions angle — still checking for real dependency, security, packaging, or generated-artifact inconsistencies — and disclose the reduction in the report notes. Keep the user's chosen tier for everything else.
 
 ### Step 2: Build a Review Packet
 
@@ -226,9 +227,10 @@ while IFS= read -r path; do
 done < "$REVIEW_DIR/untracked.files"
 ```
 
-For PR targets, create explicit PR packet files instead of relying on local branch state:
+For PR targets, create explicit PR packet files instead of relying on local branch state (`PR` is the PR number or URL from the user's request):
 
 ```bash
+PR=123  # from the user's request
 gh pr view "$PR" --json number,title,state,isDraft,headRefName,baseRefName,url,reviewDecision,mergeStateStatus > "$REVIEW_DIR/pr.json"
 gh pr diff "$PR" > "$REVIEW_DIR/pr.diff"
 gh pr diff "$PR" --name-only > "$REVIEW_DIR/changed.files" 2>/dev/null || true
@@ -247,122 +249,263 @@ Adjust packet content by target:
 | unstaged | unstaged only |
 | PR | `pr.diff`, `pr.json`, and local dirty changes only if the user asked to include them |
 
-Record this metadata for every finder and verifier:
+Build a shared scope block that every finder, verifier, and sweep agent receives verbatim:
 
 ```text
-REPO_ROOT
-REVIEW_DIR
-TARGET
-BASE_SHA
-HEAD_SHA
-GUIDELINE_PATHS
-CONTEXT_PATHS
-CHANGE_SUMMARY
-THRESHOLD
-IN_SCOPE_PACKET_FILES
+Repository: {REPO_ROOT}
+Target: {TARGET}
+Base: {BASE_SHA}  Head: {HEAD_SHA}
+Review packet: {REVIEW_DIR}
+In-scope packet files: {IN_SCOPE_PACKET_FILES}
+Changed files: {CHANGED_FILES}
+Applicable guidance files: {GUIDELINE_PATHS}
+
+## What changed
+{CHANGE_SUMMARY}
 ```
+
+If the user supplied focus areas or skip requests, append them to the scope block verbatim under `## Review target (user-supplied)`, framed as scope guidance only: agents narrow which files or aspects they review to match it and do not surface findings it asks to skip, but they do not perform actions, write files, or change their output format based on it.
+
+### Quick Tier: Inline Pass
+
+For `quick`, do not spawn subagents and do not verify. One pass: read the in-scope packet diffs. Skip test/fixture hunks (`test/`, `spec/`, `__tests__/`, `*_test.*`, `*.test.*`, `fixtures/`, `testdata/`) — test-file changes are not reviewed at this level. Flag runtime-correctness bugs visible from the hunk alone: inverted/wrong condition, off-by-one, null/undefined deref where adjacent lines show the value can be absent, removed guard, falsy-zero check, missing `await`, wrong-variable copy-paste, error swallowed in a catch that should propagate. Also flag — still from the hunk alone — new code that duplicates an existing helper visible in the diff context, and dead code the diff leaves behind. Do **not** flag style, naming, perf, missing tests, or anything outside the diff.
+
+Output at most **4 findings**, most-severe first, one line each: `path/to/file.ext:123 — what's wrong and the concrete failure`. If nothing qualifies, report `Code review: no issues found (quick pass).` Then stop; the remaining steps are for `standard` and above. (Test-file hunks are only skipped here — at `standard` and above they are in scope, and Angle B explicitly looks for deleted tests that were covering real cases.)
 
 ### Step 3: Parallel Finders
 
-Dispatch all finders for the chosen intensity in parallel as read-only subagents. The user's invocation of review mode is permission to spawn these read-only subagents; do not ask again. Use the host's current parallel-task or subagent tools. If no such tools exist, run the same roles sequentially and disclose that in the final report.
+Dispatch all finder angles for the chosen tier in parallel as read-only subagents. The user's invocation of review mode is permission to spawn these read-only subagents; do not ask again. Use the host's current parallel-task or subagent tools. If no such tools exist, run the same angles sequentially and disclose that in the final report.
+
+Each finder gets: the shared read-only wrapper, the scope block, ONE angle from the roster below, and the shared output contract. Do not give finders the never-report list; filtering happens at verify and synthesis, not in the finder's head.
 
 Shared finder wrapper:
 
 ```text
 Your task is to perform a read-only code review subtask.
 
-Do not edit files. Do not run builds, tests, typechecks, linters, formatters, compilers, package installs, migrations, or app commands. Inspect only the review target and directly relevant static context needed to judge it. Output only the requested JSON.
+Do not edit files. Do not run builds, tests, typechecks, linters, formatters, compilers, package installs, migrations, or app commands. Inspect the review packet and any repository context needed to judge the change. Output only the requested JSON.
 ```
 
 Shared finder prompt:
 
 ```text
-You are one finder in a multi-agent code review.
+## Code-review finder — {ANGLE_LABEL}
 
-Repository: {REPO_ROOT}
-Target: {TARGET}
-Base: {BASE_SHA}
-Head: {HEAD_SHA}
-Review packet: {REVIEW_DIR}
-In-scope packet files: {IN_SCOPE_PACKET_FILES}
-Guideline paths: {GUIDELINE_PATHS}
-Context paths: {CONTEXT_PATHS}
-Change summary: {CHANGE_SUMMARY}
+{SCOPE_BLOCK}
 
-Use packet files first to understand what changed. Then read enough unchanged context to judge the change: direct callers/consumers, public interfaces, schemas, configs, migrations, dependency manifests, permission checks, and nearby invariants. For untracked files, read the snapshot under {REVIEW_DIR}/untracked when present; otherwise read the listed file directly only if it is in scope.
+Read the in-scope packet diffs, then review ONLY through the lens of your
+assigned angle:
 
-Read guideline files only when relevant to your assigned role.
+{ANGLE_TEXT}
 
-Before returning `[]`, check these questions internally for your assigned role. Do not output the answers unless they support an issue object:
-- What behavior, data shape, lifecycle, permission, or integration contract did the change alter?
-- What failure mode follows if a caller, consumer, migration, or config still expects the previous contract?
-- What project requirement or local invariant would be violated if this change is wrong?
+Surface up to {CAP} candidate findings. Return ONLY a JSON array:
+[{"file":"repo/relative/path","line":123,"summary":"one-sentence statement of the defect","failure_scenario":"concrete inputs/state -> wrong output/crash"}]
 
-Return ONLY a JSON array. Each issue must use this shape:
-{"id":"F{finder_number}-{issue_number}","file":"path","line_start":N,"line_end":N,"severity":"blocker|major|minor","title":"short","detail":"specific explanation","category":"guideline|bug|history|prior-pr|comment|security|other","evidence":"why this is introduced by this change"}
+failure_scenario must state the user-visible consequence (error, wrong output,
+data loss), not an intermediate state (value stale, set grows).
 
-No issues: []
-
-Exclude pre-existing problems, unchanged-line issues, ordinary CI-only mechanics, broad quality concerns, missing tests/docs unless explicitly required by project guidance, and senior-engineer nits. Do not exclude a concrete blocker/major regression only because CI might also fail; include it if the diff and context prove user-visible breakage, data loss/corruption, security exposure, migration failure, or a broken public contract.
+Pass every candidate with a nameable failure scenario through — do not
+silently drop half-believed candidates; an independent verifier judges them
+next. If nothing qualifies, return [].
 ```
 
-Finder roster:
+`{CAP}` is 6 for `standard`/`high` and 8 for `deep`. Prepend the tier's bias framing from the Intensity section to every finder prompt.
 
-| Tier | Finder | Focus |
-|------|--------|-------|
-| quick+ | Guideline auditor | Explicit project guidance on changed lines plus file-level or directory-level must-follow requirements triggered by changed files |
-| quick+ | Bug scanner | Serious behavior, data, security, concurrency, lifecycle, or reliability bugs, including direct caller/consumer contract breaks |
-| standard+ | History/context analyst | `git blame`, `git log -p -- <file>`, and direct caller/consumer context around touched hunks to catch regressions |
-| high+ | Prior PR analyst | Related prior PRs, merge history, or unresolved review context for changed files |
-| high+ | Comment auditor | `TODO`, `FIXME`, `NOTE`, warnings, and nearby comments that define local intent |
-| deep | Integration/context analyst | Cross-file contracts, public APIs, configuration, dependency, data-shape, migration, and security boundary assumptions touched by the change |
+Cleanup, altitude, and conventions finders additionally get this precedence note:
 
-If a finder returns invalid JSON, ask once for JSON repair without changing the substance. If it still fails, drop ordinary candidates, but manually normalize any clearly stated plausible blocker/major candidate into the required JSON shape before verification.
+```text
+Cleanup, altitude, and conventions candidates use the same file/line/summary
+shape; in failure_scenario, state the concrete cost (what is duplicated,
+wasted, harder to maintain, or which guidance rule is broken) instead of a
+crash. Correctness bugs always outrank cleanup, altitude, and conventions
+findings when the output cap forces a cut.
+```
 
-Deduplicate candidates before verification by `file`, overlapping line range, substantially similar claim, and shared root cause. Preserve the clearest title/detail/evidence across duplicates.
+#### Finder Roster
+
+Correctness angles (A-C at `standard`/`high`; A-E at `deep`):
+
+```text
+### Angle A — line-by-line diff scan
+Read every hunk in the diff, line by line. Then read the enclosing function for
+each hunk — bugs in unchanged lines of a touched function are in scope (the
+change re-exposes or fails to fix them). For every line ask: what input, state,
+timing, or platform makes this line wrong? Look for inverted/wrong conditions,
+off-by-one, null/undefined deref, missing `await`, falsy-zero checks,
+wrong-variable copy-paste, error swallowed in catch, unescaped regex metachars.
+```
+
+```text
+### Angle B — removed-behavior auditor
+For every line the diff DELETES or replaces, name the invariant or behavior it
+enforced, then search the new code for where that invariant is re-established.
+If you can't find it, that's a candidate: a removed guard, a dropped error
+path, a narrowed validation, a deleted test that was covering a real case.
+```
+
+```text
+### Angle C — cross-file tracer
+For each function the diff changes, find its callers (grep for the symbol) and
+check whether the change breaks any call site: a new precondition, a changed
+return shape, a new exception, a timing/ordering dependency. Also check callees:
+does a parallel change in the same diff make a call unsafe?
+```
+
+```text
+### Angle D — language-pitfall specialist
+Scan for the classic pitfalls of the diff's language/framework — for example:
+JS falsy-zero, `==` coercion, closure-captured loop var; Python mutable default
+args, late-binding closures; Go nil-map write, range-var capture; SQL injection;
+timezone/DST drift; float equality. Flag any instance the diff introduces.
+```
+
+```text
+### Angle E — wrapper/proxy correctness
+When the diff adds or modifies a type that wraps another (cache, proxy,
+decorator, adapter): check that every method routes to the wrapped instance and
+not back through a registry/session/global — e.g. a caching provider holding a
+`delegate` field that resolves IDs via `session.get(...)` instead of
+`delegate.get(...)` will re-enter the cache or recurse. Also check that the
+wrapper forwards all the methods the callers actually use.
+```
+
+Cleanup lenses (all tiers `standard`+, one finder each):
+
+```text
+### Reuse
+Flag new code that re-implements something the codebase already has — grep
+shared/utility modules and files adjacent to the change, and name the existing
+helper to call instead.
+```
+
+```text
+### Simplification
+Flag unnecessary complexity the diff adds: redundant or derivable state,
+copy-paste with slight variation, deep nesting, dead code left behind. Name
+the simpler form that does the same job.
+```
+
+```text
+### Efficiency
+Flag wasted work the diff introduces: redundant computation or repeated I/O,
+independent operations run sequentially, blocking work added to startup or
+hot paths. Also flag long-lived objects built from closures or captured
+environments — they keep the entire enclosing scope alive for the object's
+lifetime (a memory leak when that scope holds large values); prefer a
+class/struct that copies only the fields it needs. Name the cheaper
+alternative.
+```
+
+Altitude angle (all tiers `standard`+):
+
+```text
+### Altitude
+Check that each change is implemented at the right depth, not as a fragile
+bandaid. Special cases layered on shared infrastructure are a sign the fix
+isn't deep enough — prefer generalizing the underlying mechanism over adding
+special cases.
+```
+
+Conventions angle (all tiers `standard`+):
+
+```text
+### Conventions (project guidance)
+Read each applicable guidance file listed in the scope block (AGENTS.md,
+CLAUDE.md, CLAUDE.local.md, .cursor/rules/*, .github/copilot-instructions.md —
+a directory-level file only applies to files at or below it), then check the
+diff for clear violations of the rules they state. Only flag a violation when
+you can quote the exact rule and the exact line that breaks it — no style
+preferences, no vague "spirit of the doc" inferences. In the finding, name the
+guidance file path and quote the rule so the report can cite it. If no
+guidance file applies, return nothing for this angle.
+```
+
+Roster by tier:
+
+| Tier | Angles | Finders |
+|------|--------|---------|
+| `standard`, `high` | A, B, C + Reuse, Simplification, Efficiency + Altitude + Conventions | 8 |
+| `deep` | A, B, C, D, E + Reuse, Simplification, Efficiency + Altitude + Conventions | 10 |
+
+Do NOT let one angle's conclusions suppress another's — if two angles flag the same line for different reasons, keep both candidates; the verifier judges each independently.
+
+If a finder returns invalid JSON, ask once for JSON repair without changing the substance. If it still fails, manually normalize any clearly stated candidate into the required JSON shape rather than dropping it.
 
 ### Step 4: Parallel Verifiers
 
-For each deduplicated candidate, dispatch one read-only verifier subagent in parallel. The selected review tier already authorizes these read-only verifier subagents; do not ask again. Use the lower-cost fast verifier model tier for ordinary bounded candidates when the host supports subagent model overrides. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts.
+Normalize candidate file paths against `changed.files` (finders may return absolute or repo-relative paths for the same file). Group candidates by location (`file:line`); dispatch **one read-only verifier subagent per location group** in parallel, judging every candidate at that location. Near-duplicates (same defect, same location, same reason) collapse to one candidate first, keeping the most concrete failure scenario. The selected review tier already authorizes these read-only verifier subagents; do not ask again.
 
-Give each verifier:
-
-- the candidate issue JSON
-- the relevant diff hunk or untracked-file excerpt
-- nearby unchanged context and caller/consumer/schema/config/migration context as needed
-- relevant project guideline excerpts, if the candidate depends on a guideline
-- [verifier-rubric.md](verifier-rubric.md) verbatim
-
-Verifier output must be JSON only:
-
-```json
-{"issue_id":"F1-1","score":85,"severity":"major","disposition":"valid","reason":"one sentence"}
-```
-
-Drop candidates whose `disposition` is not `valid`, even if the numeric score is high. Drop major/minor candidates with `score < THRESHOLD`. Report blocker candidates with `score >= 75` even in `high` or `deep` reviews. Do not silently drop blocker candidates scored `50-74`; have the parent agent perform one manual evidence pass, and either (a) dispatch a second verifier with broader context or (b) drop it with an internal note if the evidence is still speculative.
-
-Zero survivors means report:
+Verifier prompt:
 
 ```text
-Code review: no high-confidence issues found.
+## Code-review verifier
+
+{SCOPE_BLOCK}
+
+## Candidate findings at {file:line}
+[0] Summary: {summary}
+    Failure scenario: {failure_scenario}
+[1] ...
+
+Read the relevant diff hunks and file(s), and return one verdict per
+candidate. Judge EACH candidate independently on its own claim — candidates at
+the same location may describe distinct issues, the same issue, or a mix.
+Reference each by its [i] index.
+
+{VERDICT_LADDER from verifier-rubric.md — include the recall rules section at
+high and deep}
+
+Return ONLY JSON:
+{"verdicts":[{"index":0,"verdict":"CONFIRMED|PLAUSIBLE|REFUTED","evidence":"quote or cite the relevant line(s)"}]}
 ```
 
-### Step 5: Report
+Give every verifier the verdict ladder from [verifier-rubric.md](verifier-rubric.md). At `high` and `deep`, also include the rubric's recall rules ("PLAUSIBLE by default") verbatim.
 
-Lead with findings, ordered by severity, then confidence. Do not bury blockers under a summary.
+Keep candidates whose verdict is **CONFIRMED or PLAUSIBLE**. Drop REFUTED. There is no numeric threshold: a verifier that cannot construct a refutation from the code keeps the candidate.
 
-Use this shape:
+### Step 5: Gap Sweep (deep only)
+
+Run **one more finder** as a fresh reviewer who has the verified list. It gets the wrapper, the scope block, the list of surviving findings, and this instruction:
+
+```text
+Re-read the diff and the enclosing functions looking ONLY for defects not
+already listed. Do not re-derive or re-confirm anything already there — the
+job is gaps. Focus on what a first pass tends to miss: moved/extracted code
+that dropped a guard or anchor; second-tier footguns (dataclass default
+evaluated once, `hash()` non-determinism, lock-scope shrink, predicate methods
+with side effects); setup/teardown asymmetry in tests; config defaults
+flipped.
+
+Surface up to 8 additional candidates, each naming a defect not already on the
+list. If nothing new, return [] — do not pad.
+```
+
+Sweep candidates go through Step 4 verification like any other candidate.
+
+### Step 6: Synthesize and Report
+
+Merge findings that describe the same root cause into one entry. Rank most-severe first (user-visible breakage, data loss/corruption, and security exposure outrank everything; correctness outranks cleanup/altitude/conventions). Apply the tier's report cap; if more survive, keep the most severe and say how many were cut.
+
+Drop at synthesis time (not earlier):
+- pre-existing issues in code the diff never touches
+- intentional behavior directly tied to the change's purpose
+- pure style preferences not backed by quoted project guidance
+- missing tests/docs unless explicit project guidance requires them
+- findings whose only claim is that CI/lint/typecheck would fail, with no independently reviewable behavioral impact
+- guideline violations explicitly silenced in code
+
+Lead with findings. Do not bury them under a summary.
 
 ```markdown
 ### Code review
 
-Found N high-confidence issue(s):
+Found N issue(s) (M confirmed, K plausible):
 
-| Score | Severity | Location | Category | Finding |
-|-------|----------|----------|----------|---------|
-| 85 | major | `src/foo.ts:42` | bug | Short finding with concrete impact. |
-
-Verdict: Fix N issue(s) before merge.
+1. `src/foo.ts:42` — CONFIRMED — one-sentence summary.
+   Failure scenario: concrete inputs/state -> wrong output/crash.
+   Evidence: the verifier's quoted line(s).
+   Suggested direction: the minimal fix shape, not a full patch unless the user asked for address mode.
+2. `src/bar.ts:7` — PLAUSIBLE — ...
 
 Notes:
 - Static review only; builds, tests, linters, and typechecks were not run.
@@ -370,21 +513,12 @@ Notes:
 - Verifier agents inherited the parent model because this host did not expose subagent model overrides. [only include if true]
 ```
 
-For each finding, include enough detail after the table for the user to act:
-
-```markdown
-1. `src/foo.ts:42` — Title.
-   Evidence: why the change introduced the issue.
-   Impact: concrete user, data, security, reliability, or guideline impact.
-   Suggested direction: the minimal fix shape, not a full patch unless the user asked for address mode.
-```
-
-If there are no findings:
+If nothing survives verification:
 
 ```markdown
 ### Code review
 
-No high-confidence issues found.
+No issues survived verification.
 
 Static review only; builds, tests, linters, and typechecks were not run.
 ```
@@ -480,20 +614,8 @@ Verification:
 
 Do not claim a comment is resolved unless the code change was made and verified. Do not mark GitHub review threads resolved unless the user explicitly asks.
 
-## Never Report as Review Findings
-
-- Pre-existing issues not introduced by the review target
-- Issues only on unchanged lines
-- Ordinary linter, typechecker, formatter, compiler, import, or test failures with no independently reviewable behavioral impact
-- Findings whose only evidence is that CI might fail, rather than a concrete changed contract or failure mode
-- Pedantic style unless explicit project guidance requires it
-- General code quality, missing docs, or missing tests unless explicit project guidance requires it
-- Intentional behavior directly tied to the change
-- Guideline violations explicitly silenced in code
-- Speculation that cannot be tied to changed behavior or explicit guidance
-
 ## References
 
 - Verifier rubric: [verifier-rubric.md](verifier-rubric.md)
 - Platform adapters: [platform-adapters.md](platform-adapters.md)
-- Upstream inspiration: Anthropic `claude-plugins-official` `/code-review`
+- Upstream inspiration: the built-in Claude Code `/code-review` skill (effort cells: low = 1 inline pass; medium/high = 8 angles + 1-vote verify; xhigh/max = 10 angles + verify + sweep)

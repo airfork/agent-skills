@@ -10,7 +10,7 @@ Personal install paths:
 |-------------|------|
 | Codex | `~/.codex/skills/code-review/` |
 | Cursor | `~/.cursor/skills/code-review/` |
-| Claude Code | Prefer the official plugin; otherwise expose this workflow through `.claude/commands/code-review.md` and, optionally, `.claude/commands/address-review.md` |
+| Claude Code | Prefer the built-in `/code-review` skill; otherwise expose this workflow through `.claude/commands/code-review.md` and, optionally, `.claude/commands/address-review.md` |
 
 Preferred source-repo install:
 
@@ -41,10 +41,10 @@ Use different model policies for finder and verifier subtasks:
 
 | Role | Codex model policy |
 |------|--------------------|
-| Finder | Inherit the parent/default model for `quick` and `standard`. For `high` or `deep`, use an explicit stronger finder model when the current schema exposes one. |
-| Verifier | Use an explicit lower-cost fast model for ordinary bounded candidates when the current schema exposes model selection. Use the parent/default or stronger model for blocker/security/data-loss/migration candidates or candidates whose proof depends on cross-file contracts. |
+| Finder | Inherit the parent/default model. For `deep`, use an explicit stronger finder model when the current schema exposes one. |
+| Verifier | Use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, an explicit lower-cost fast model is acceptable for candidates whose evidence is bounded to one or two files; use the parent model when the proof depends on cross-file contracts, security, data loss, or migrations. |
 
-Do not omit the model decision for verifier subagents when the spawn/task tool supports one. If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
+If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
 
 Codex subagent wrapper:
 
@@ -66,19 +66,19 @@ Close or release subagents after collecting their final output when the host sup
 Cursor support should preserve the same stages:
 
 1. Build the review packet in the parent agent.
-2. Launch finder tasks in parallel with read-only instructions.
-3. Dedupe in the parent agent.
-4. Launch one verifier task per deduped candidate.
-5. Report only verified findings.
+2. Launch finder angle tasks in parallel with read-only instructions.
+3. Group candidates by location in the parent agent.
+4. Launch one verifier task per location group with the verdict ladder.
+5. Report only findings whose verdict is CONFIRMED or PLAUSIBLE.
 6. For address mode, patch only verified/applicable findings and run narrow verification when safe.
 
-Use Cursor's task/subagent mechanism when available. If Cursor exposes model selection, use the default/strong model for finders and a fast model for bounded verifiers. Avoid hard-coding model slugs unless Cursor's current UI or tool schema lists them.
+Use Cursor's task/subagent mechanism when available. If Cursor exposes model selection, follow the same policy as the Codex adapter: parent/default models throughout, a fast model only for bounded `standard`-tier verifiers. Avoid hard-coding model slugs unless Cursor's current UI or tool schema lists them.
 
 If Cursor supports slash-command frontmatter and you want `/code-review` or `/address-review` to run only on explicit invocation, add Cursor-specific frontmatter in the installed Cursor copy rather than the portable source.
 
 ## Claude Code Adapter
 
-Claude Code already has an official `code-review` plugin. Prefer that plugin when exact Claude behavior is desired.
+Claude Code has a built-in `/code-review` skill with effort levels (`low` through `max`); this skill's tiers mirror its structure (`quick` ≈ low, `standard`/`high` ≈ medium/high, `deep` ≈ xhigh/max). Prefer the built-in skill in Claude Code when exact Claude behavior is desired.
 
 To route Claude Code to this portable workflow, create commands like:
 
@@ -98,7 +98,7 @@ description: Address verified review findings using the portable code-review ski
 Follow the code-review skill at <installed path>/SKILL.md in address mode.
 ```
 
-Do not claim exact parity with the official plugin unless the command has been compared against the upstream file for the current version.
+Do not claim exact parity with the built-in skill unless this workflow has been compared against the built-in prompt text for the current Claude Code version.
 
 ## GitHub CLI
 

@@ -49,5 +49,5 @@ skills:
       cursor:
         enabled: false
         mode: symlink
-    description: Severity-aware Codex-first workflow for thorough review and verified finding remediation, with Cursor adapter notes.
-    notes: Finalized under the codex-cursor category and installed into Codex through a managed symlink. Default prompt and recommended tier favor high-thoroughness review.
+    description: Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation and Cursor adapter notes.
+    notes: Finalized under the codex-cursor category and installed into Codex through a managed symlink. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep).

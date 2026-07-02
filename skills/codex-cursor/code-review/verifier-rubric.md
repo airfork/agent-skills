@@ -1,47 +1,50 @@
-# Verifier Confidence Rubric
+# Verifier Verdict Rubric
 
-Give this rubric verbatim to each verifier subagent.
+Give the verdict ladder to every verifier subagent verbatim. At `high` and `deep`, also include the recall rules section verbatim.
 
 ## Task
 
-Verify ONE candidate issue from a code-review finder. Read the candidate, the relevant diff hunk or untracked-file excerpt, nearby context, relevant caller/consumer/schema/config/migration context, and any cited project guideline excerpts. Return confidence 0-100.
+Verify the candidate issue(s) at ONE location from a code-review finder. Read the candidates, the relevant diff hunks, the surrounding file(s), and any caller/consumer/schema/config/migration or guidance context the claims depend on. Judge each candidate independently on its own claim and return one verdict per candidate.
 
-Score confidence in whether the issue is real, introduced by the review target, and reportable. Do not encode impact in the score; use severity for impact.
+There is no numeric score. The burden of proof is on refuting: a verdict of REFUTED must be constructible from the code, not from doubt.
 
-## Score Calibration
+## Verdict Ladder
 
-- **0** - False positive, pre-existing, unrelated to this change, or based only on unchanged lines.
-- **25** - Plausible but not verified; depends on assumptions not present in the diff, context, or guidelines.
-- **50** - Some evidence supports the issue, but a key link still depends on an assumption or incomplete context.
-- **75** - Highly confident; the diff plus context or an explicit guideline strongly supports a real introduced issue.
-- **90** - Very high confidence; the issue is directly evidenced by the diff plus context and is reportable.
-- **100** - Certain; the evidence proves the issue will occur or proves an explicit guideline violation.
+```text
+- **CONFIRMED** — can name the inputs/state that trigger it and the wrong
+  output or crash. Quote the line.
+- **PLAUSIBLE** — mechanism is real, trigger is uncertain (timing, env,
+  config). State what would confirm it.
+- **REFUTED** — factually wrong (code doesn't say that) or guarded elsewhere.
+  Quote the line that proves it.
+```
+
+## Recall Rules (`high` and `deep` only)
+
+```text
+**PLAUSIBLE by default** — do not refute a candidate for being "speculative" or
+"depends on runtime state" when the state is realistic: concurrency races,
+nil/undefined on a rare-but-reachable path (error handler, cold cache, missing
+optional field), falsy-zero treated as missing, off-by-one on a boundary the
+code does not exclude, retry storms / partial failures, regex/allowlist that
+lost an anchor. These are PLAUSIBLE.
+**REFUTED** only when constructible from the code: factually wrong (quote the
+actual line); provably impossible (type/constant/invariant — show it); already
+handled in this diff (cite the guard); or pure style with no observable effect.
+```
 
 ## Rules
 
-- Verify only the review target, including untracked files when explicitly in scope.
-- For guideline issues, the guideline must explicitly mention the concern. Do not infer policy from vague language.
-- Do not score ordinary build, lint, type, import, format, or test failures whose only evidence is "CI will fail." Do score them when the diff and context prove a real runtime, integration, migration, security, or user-visible failure.
-- Do not score unchanged-line issues or pre-existing problems.
-- Do not reward broad quality concerns, senior-engineer nits, missing docs, or missing tests unless explicit project guidance requires them.
-- If the evidence would require editing code, running the app, or relying on undocumented product intent, lower the score unless the diff plus static context is decisive.
-- Use open verification questions before scoring severe candidates: "What failure mode follows from this change?", "Which caller/consumer contract is broken?", or "Which explicit requirement is violated?"
-- Keep false-positive control for minor/style/quality concerns. For blocker-class candidates, prefer a lower score with a clear reason over dismissing the candidate because the proof is cross-file.
-
-## Severity
-
-Return one of:
-
-- `blocker`: likely user-visible breakage, data loss/corruption, security exposure, migration failure, or violation of a must-follow project rule.
-- `major`: real behavioral, reliability, integration, or explicit-guideline issue worth fixing before merge.
-- `minor`: valid but low-impact issue. Use sparingly; most minor issues should score below the reporting threshold.
+- Verify only the review target, including untracked files when explicitly in scope. Unchanged lines inside a function the diff touches are in scope; files the diff never touches are not.
+- For conventions candidates, the guidance file must explicitly state the rule. Quote it. Do not infer policy from vague language.
+- For cleanup/altitude/conventions candidates, the failure scenario is a concrete cost (duplication, wasted work, maintainability, quoted rule broken) rather than a crash; judge whether that cost is real, not whether it crashes.
+- Evidence must quote or cite the relevant line(s). A REFUTED verdict without a quoted guard, type, or contradicting line is not a refutation — return PLAUSIBLE instead.
+- Do not confirm a candidate whose only claim is that CI, lint, or typecheck would fail; synthesis drops those. Do confirm it when the diff and context prove a real runtime, integration, migration, security, or user-visible failure.
 
 ## Output
 
-JSON only:
+JSON only, one verdict per candidate index:
 
 ```json
-{"issue_id":"<id>","score":<0-100>,"severity":"blocker|major|minor","disposition":"valid|false-positive|pre-existing|unchanged-line|speculative|ordinary-ci","reason":"<one sentence>"}
+{"verdicts":[{"index":0,"verdict":"CONFIRMED|PLAUSIBLE|REFUTED","evidence":"quote or cite the relevant line(s)"}]}
 ```
-
-Use `valid` only for real introduced reportable issues. Use the other dispositions to make drop reasons machine-readable.
