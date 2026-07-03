@@ -525,6 +525,8 @@ Drop at synthesis time (not earlier):
 - findings whose only claim is that CI/lint/typecheck would fail, with no independently reviewable behavioral impact
 - guideline violations explicitly silenced in code
 
+Cleanup, altitude, and conventions candidates are NOT in that drop list. They go through verification and into the report like correctness candidates — ranked below correctness, cut first at the cap. Do not drop a cleanup candidate for "lacking behavioral impact" or being "cleanup-only": its failure scenario is a concrete cost (duplication, wasted work, quoted rule broken), not a crash, and that is exactly what the verifier judges.
+
 Lead with findings. Do not bury them under a summary. Use bullets for end-state accounting; do not switch to a table.
 
 ```markdown
