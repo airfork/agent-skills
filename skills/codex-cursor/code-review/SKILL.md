@@ -405,8 +405,9 @@ Cleanup lenses (all tiers `standard`+, one finder each):
 ```text
 ### Reuse
 Flag new code that re-implements something the codebase already has — grep
-shared/utility modules and files adjacent to the change, and name the existing
-helper to call instead.
+shared/utility modules, files adjacent to the change, and the changed files
+themselves (a duplicate helper often already exists elsewhere in the same
+file), and name the existing helper to call instead.
 ```
 
 ```text

@@ -39,6 +39,7 @@ handled in this diff (cite the guard); or pure style with no observable effect.
 - For conventions candidates, the guidance file must explicitly state the rule. Quote it. Do not infer policy from vague language.
 - For cleanup/altitude/conventions candidates, the failure scenario is a concrete cost (duplication, wasted work, maintainability, quoted rule broken) rather than a crash; judge whether that cost is real, not whether it crashes.
 - Evidence must quote or cite the relevant line(s). A REFUTED verdict without a quoted guard, type, or contradicting line is not a refutation — return PLAUSIBLE instead.
+- Do not CONFIRM a failure scenario the code at that location cannot actually produce. Before confirming, check that the claimed execution path is live: if a different defect at the same location contradicts the scenario (for example, the claimed retry/fallback/handler can never run because the code returns or throws before it), judge the candidate on what the code really does and name the contradicting defect in the evidence so synthesis can surface it.
 - Do not confirm a candidate whose only claim is that CI, lint, or typecheck would fail; synthesis drops those. Do confirm it when the diff and context prove a real runtime, integration, migration, security, or user-visible failure.
 
 ## Output
