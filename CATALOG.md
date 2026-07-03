@@ -15,6 +15,7 @@ This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
 
 | Skill | Path | Category | Status | Install | Recommended tier | Description |
 |-------|------|----------|--------|---------|------------------|-------------|
+| `adversarial-review` | `skills/general/adversarial-review/` | `general` | Active | Codex enabled; Claude manual/personal-skill install; Cursor disabled | `deep`; heavy mode `ultracode` for Claude-only UltraCode runs | Cross-platform adversarial review workflow for specs and implementation plans, using fresh-context attack angles, refute-or-promote culling, revise/reject loops, and resolution verification before implementation. |
 | `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex enabled; Cursor disabled | `deep`; use `standard` only for lower-cost routine reviews | Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation and opt-in fix/commit/push/PR flags. |
 
 ## Category Backlog
