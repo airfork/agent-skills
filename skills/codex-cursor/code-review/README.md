@@ -86,9 +86,9 @@ Flags may appear anywhere in the prompt:
 
 The action chain is always `review -> fix -> verify -> commit -> push -> PR/comment`. The skill does not support convenience flags for force-push, no-verify, stash, merge, or thread resolution; those require explicit natural-language requests.
 
-## Model Policy
+## Model And Effort Policy
 
-Finder subagents inherit the parent/default model; use a stronger model at `deep` when the host exposes one. Verifier subagents use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, a lower-cost fast model is acceptable for candidates whose evidence is bounded to one or two files.
+Finder and verifier subagents inherit the parent/default model but must run at elevated reasoning effort: `high` for `standard`/`high` tiers, `xhigh` (or the host maximum) for `deep`. In Codex this is done by spawning the named agents from `agents/codex/` (install them into `~/.codex/agents/`). Verifiers are never downgraded to a faster model at any tier — verifier quality directly controls what survives.
 
 ## Design checks
 

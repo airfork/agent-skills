@@ -127,15 +127,17 @@ Bias framing, prepended to every finder prompt at that tier:
 
 Verifiers receive the bias through the rubric instead: at `high` and `deep` they get the recall rules ("PLAUSIBLE by default"); at `standard` they get the verdict ladder alone. No tier pre-filters in the finder's head — finders at every tier pass candidates through; verification and synthesis decide what survives.
 
-## Subagent Model Policy
+## Subagent Model And Effort Policy
 
-| Role | Model policy |
-|------|--------------|
+Review depth tracks reasoning effort at least as much as prompt structure. The tier must raise the reasoning effort of finder and verifier subagents, not only the roster size — mirroring the Claude built-in skill, where the effort level is literally the model's reasoning-effort setting.
+
+| Role | Policy |
+|------|--------|
 | Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
-| Finder | Inherit the parent/default model. For `deep`, use the strongest available model when the host exposes explicit model selection. |
-| Verifier | Use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, a lower-cost fast model (e.g. `gpt-5.4-mini` or the fastest current model) is acceptable for candidates whose evidence is bounded to one or two files; use the parent model when the proof depends on cross-file contracts, security, data loss, or migrations. |
+| Finder | Inherit the parent/default model at **high** reasoning effort for `standard`/`high`, and **xhigh** (or the host's maximum) for `deep`. In Codex, spawn the named `review-finder` agent (`review-finder-deep` at `deep`); the agent definitions in [agents/codex/](agents/codex/) pin the effort and a read-only sandbox. |
+| Verifier | Same model and effort policy as finders at every tier — never a downgraded or "fast" model. A single REFUTED vote kills a finding, so verifier quality directly controls what survives. In Codex, spawn `review-verifier` (`review-verifier-deep` at `deep`). |
 
-If the host cannot set subagent models, continue with inherited models and disclose that limitation in the final notes.
+If the host cannot set subagent models or reasoning effort, continue with inherited settings and disclose that limitation in the final notes.
 
 ## Target Resolution
 

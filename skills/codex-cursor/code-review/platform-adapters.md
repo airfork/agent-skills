@@ -37,14 +37,22 @@ Typical mapping:
 | Wait for results | Collect all outputs before dedupe or filtering |
 | Clean up | Close completed agents/tasks if the host exposes an explicit close operation |
 
-Use different model policies for finder and verifier subtasks:
+Install the named agent definitions from `agents/codex/` into `~/.codex/agents/` (one-time step; `scripts/sync-skills` does not copy them):
 
-| Role | Codex model policy |
-|------|--------------------|
-| Finder | Inherit the parent/default model. For `deep`, use an explicit stronger finder model when the current schema exposes one. |
-| Verifier | Use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, an explicit lower-cost fast model is acceptable for candidates whose evidence is bounded to one or two files; use the parent model when the proof depends on cross-file contracts, security, data loss, or migrations. |
+```bash
+cp <skill source>/agents/codex/*.toml ~/.codex/agents/
+```
 
-If the host cannot set per-subagent models, continue with inherited models and disclose that in the final report.
+They pin `sandbox_mode = "read-only"` and per-role reasoning effort, and inherit the session model:
+
+| Role | Named agent | Reasoning effort |
+|------|-------------|------------------|
+| Finder (`standard`, `high`) | `review-finder` | `high` |
+| Finder (`deep`) | `review-finder-deep` | `xhigh` |
+| Verifier (`standard`, `high`) | `review-verifier` | `high` |
+| Verifier (`deep`) | `review-verifier-deep` | `xhigh` |
+
+Spawn finders and verifiers as these named agents. Never substitute a downgraded or "fast" model for verifiers at any tier — verifier quality directly controls what survives. If the named agents are not installed and the host cannot set per-subagent reasoning effort, continue with inherited settings and disclose that in the final report.
 
 Codex subagent wrapper:
 
@@ -72,7 +80,7 @@ Cursor support should preserve the same stages:
 5. Report only findings whose verdict is CONFIRMED or PLAUSIBLE.
 6. For address mode, patch only verified/applicable findings and run narrow verification when safe.
 
-Use Cursor's task/subagent mechanism when available. If Cursor exposes model selection, follow the same policy as the Codex adapter: parent/default models throughout, a fast model only for bounded `standard`-tier verifiers. Avoid hard-coding model slugs unless Cursor's current UI or tool schema lists them.
+Use Cursor's task/subagent mechanism when available. If Cursor exposes model or reasoning-effort selection, follow the same policy as the Codex adapter: parent/default models with high effort at `standard`/`high` and maximum effort at `deep`, for finders and verifiers alike — never a downgraded model for verifiers. Avoid hard-coding model slugs unless Cursor's current UI or tool schema lists them.
 
 If Cursor supports slash-command frontmatter and you want `/code-review` or `/address-review` to run only on explicit invocation, add Cursor-specific frontmatter in the installed Cursor copy rather than the portable source.
 
