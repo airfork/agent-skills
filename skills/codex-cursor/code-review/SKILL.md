@@ -30,8 +30,8 @@ Use $code-review to address the verified findings from the last code review.
 Use $code-review to address actionable review comments on PR #123.
 Use $code-review to review the working tree with standard intensity, then address all applicable verified findings and run targeted verification.
 Use $code-review --fix --commit to review the working tree with high intensity, address applicable findings, verify, and commit.
-Use $code-review --fix --commit --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
-Use $code-review --fix --commit --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
+Use $code-review --fix --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
+Use $code-review --fix --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
 ```
 
 Natural-language requests also apply:
@@ -51,17 +51,17 @@ Accept flags anywhere in the user's prompt. Flags are opt-in action gates; they 
 |------|---------|
 | `--fix` | After review, enter address mode for verified findings that still apply and are safe to fix. |
 | `--commit` | After successful address/review verification, commit the in-scope changes. |
-| `--push` | After a successful commit or clean branch review, push the current branch. |
-| `--pr` | Push the current branch and create a PR. Implies `--push`; create a draft PR unless the user explicitly asks for ready-for-review. |
+| `--push` | Push the current branch after successful verification. Implies `--commit`: if in-scope changes are uncommitted, commit them first so the push includes them. |
+| `--pr` | Push the current branch and create a PR. Implies `--push` and `--commit`; create a draft PR unless the user explicitly asks for ready-for-review. |
 | `--comment` | For PR targets only, post the final review report as a PR comment after review. |
 
 Action order is always: `review -> fix -> verify -> commit -> push -> PR/comment`.
 
 Rules:
+- Implication chain: `--pr` implies `--push`, and `--push` implies `--commit`. A flag grants every action it implies, under the same verification gate — do not stop and ask for the implied flag. No flag implies `--fix`; fixes happen only with `--fix` or an equally explicit request.
 - `--fix` never applies unverified or stale findings.
-- `--commit` may commit existing in-scope changes after a clean review, plus any fixes just made. Do not include unrelated dirty files; if the commit cannot be isolated safely, stop and ask.
+- `--commit` (given or implied) may commit existing in-scope changes after a clean review, plus any fixes just made. Do not include unrelated dirty files; if the commit cannot be isolated safely, stop and ask.
 - `--push` never force-pushes. If no upstream exists, use `git push -u origin HEAD` unless project guidance says otherwise.
-- `--pr` does not imply `--fix` or `--commit`. If uncommitted changes remain, stop before pushing and say to rerun with `--commit` or commit manually.
 - If verification fails or is blocked, do not commit, push, comment, or create a PR unless the user explicitly said to proceed despite that exact failure.
 - Do not add dangerous convenience flags such as `--force`, `--no-verify`, `--stash`, or `--merge`. Require explicit natural language for those operations.
 
@@ -96,12 +96,15 @@ Targets:
   unstaged                     Review unstaged changes only.
   pr #123 | <PR URL>            Review pull request diff and metadata via gh.
 
+Flags imply their prerequisites: --pr implies --push and --commit;
+--push implies --commit. --fix is never implied.
+
 Examples:
   Use $code-review to review staged changes with quick intensity.
   Use $code-review to review the working tree with standard intensity.
   Use $code-review to review PR #123 with high intensity.
   Use $code-review to review branch changes with deep intensity.
-  Use $code-review --fix --commit --pr to review branch changes with high intensity.
+  Use $code-review --fix --pr to review branch changes with high intensity.
 ```
 
 Do not silently default to `standard` for review requests. For an explicit `$code-review` invocation without a tier, print the help text verbatim and stop. For natural-language review requests without a tier, ask the user conversationally to choose one (summarizing the four tiers) unless the surrounding instructions clearly provide a tier.
@@ -626,8 +629,8 @@ Only run these steps when requested by flags or equally explicit natural languag
 
 1. Re-run `git status --short` and identify files changed before this workflow versus files changed by address mode.
 2. Use verification from Step D as the gate. If verification failed or was blocked, stop before GitHub or git write actions unless the user explicitly accepts that failure.
-3. For `--commit`, stage only in-scope files and create a concise human-authored commit message. Do not include AI attribution trailers or bylines.
-4. For `--push`, run a normal push for the current branch. If there is no upstream, use `git push -u origin HEAD` unless project guidance says otherwise.
+3. For `--commit` — given directly or implied by `--push`/`--pr` — stage only in-scope files and create a concise human-authored commit message. Do not include AI attribution trailers or bylines.
+4. For `--push` — given directly or implied by `--pr` — commit any uncommitted in-scope changes first (step 3), then run a normal push for the current branch. If there is no upstream, use `git push -u origin HEAD` unless project guidance says otherwise.
 5. For `--pr`, create a draft PR after push unless the user explicitly asked for a ready PR. Search for and use the repository's PR template if present.
 6. For `--comment`, post the final review or address report to the PR only after local reporting is complete.
 

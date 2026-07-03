@@ -108,7 +108,7 @@ PR targets, PR review comments, prior PR context, optional PR comments, and `--p
 gh auth status
 ```
 
-Use `gh pr view`, `gh pr diff`, `gh pr comment`, `gh pr create`, and `gh api` as appropriate. `--pr` implies a normal push before PR creation, but does not imply `--fix` or `--commit`; stop if uncommitted changes remain. Do not check out branches, stash changes, force-push, or mark threads resolved unless the user explicitly asks.
+Use `gh pr view`, `gh pr diff`, `gh pr comment`, `gh pr create`, and `gh api` as appropriate. `--pr` implies committing in-scope changes and a normal push before PR creation (it never implies `--fix`). Do not check out branches, stash changes, force-push, or mark threads resolved unless the user explicitly asks.
 
 ## Sequential Fallback
 

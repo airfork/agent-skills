@@ -35,8 +35,8 @@ Use $code-review to review the working tree with standard intensity.
 Use $code-review to review PR #123 with high intensity.
 Use $code-review to review branch changes with deep intensity.
 Use $code-review --fix --commit to review the working tree with high intensity, address applicable findings, verify, and commit.
-Use $code-review --fix --commit --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
-Use $code-review --fix --commit --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
+Use $code-review --fix --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
+Use $code-review --fix --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
 ```
 
 Review first, then fix every verified finding that is safe to address:
@@ -80,8 +80,8 @@ Flags may appear anywhere in the prompt:
 |------|----------|
 | `--fix` | Fix verified findings that still apply and are safe to address. |
 | `--commit` | Commit in-scope changes after successful verification. |
-| `--push` | Push the current branch after successful verification/commit. |
-| `--pr` | Push and open a draft PR; implies `--push` but not `--fix` or `--commit`. |
+| `--push` | Push the current branch after successful verification; implies `--commit` for in-scope changes. |
+| `--pr` | Push and open a draft PR; implies `--push` and `--commit`, never `--fix`. |
 | `--comment` | For PR targets, post the final report as a PR comment. |
 
 The action chain is always `review -> fix -> verify -> commit -> push -> PR/comment`. The skill does not support convenience flags for force-push, no-verify, stash, merge, or thread resolution; those require explicit natural-language requests.
@@ -94,7 +94,7 @@ Finder subagents inherit the parent/default model; use a stronger model at `deep
 
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
-- `--fix`, `--commit`, `--push`, `--pr`, and `--comment` are explicit action gates; `--pr` implies push but does not imply fix or commit.
+- `--fix`, `--commit`, `--push`, `--pr`, and `--comment` are explicit action gates with an implication chain: `--pr` implies `--push`, `--push` implies `--commit`; no flag implies `--fix`.
 - Final reports use stable bullet sections for `Review`, `Fixed`, `Reported, not code-fixed`, `Verification`, and `Git` instead of ad hoc tables.
 - Dirty worktree and untracked files are included when in scope.
 - Finders never see the never-report list; filtering happens at verify and synthesis so half-believed candidates reach an independent verifier.
