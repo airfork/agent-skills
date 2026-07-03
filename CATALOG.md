@@ -15,7 +15,7 @@ This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
 
 | Skill | Path | Category | Status | Install | Recommended tier | Description |
 |-------|------|----------|--------|---------|------------------|-------------|
-| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex enabled; Cursor disabled | `deep`; use `standard` only for lower-cost routine reviews | Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation. |
+| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex enabled; Cursor disabled | `deep`; use `standard` only for lower-cost routine reviews | Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation and opt-in fix/commit/push/PR flags. |
 
 ## Category Backlog
 

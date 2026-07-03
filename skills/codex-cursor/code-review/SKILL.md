@@ -13,7 +13,7 @@ Codex-first workflow for two related jobs:
 1. **Review mode**: inspect a diff with independent method-based finder angles, verify each candidate with a verdict ladder, and report what survives.
 2. **Address mode**: take verified review findings or PR review comments, re-check that they still apply, make the smallest safe fixes, and verify the result.
 
-Review mode is read-only. It is not limited to reading the diff text: agents may read unchanged files, callers, consumers, schemas, configs, migrations, and nearby project guidance when that context is needed to judge the changed lines. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never commit, push, merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks.
+Review mode is read-only. It is not limited to reading the diff text: agents may read unchanged files, callers, consumers, schemas, configs, migrations, and nearby project guidance when that context is needed to judge the changed lines. Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier; do not ask for extra permission before spawning those subagents. Address mode may edit files, but only to resolve verified findings. Never merge, rebase, stash, clean, or mark PR comments resolved unless the user explicitly asks. Commit, push, and PR creation are allowed only through the flags below or an equally explicit natural-language request.
 For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
 ## Invocation
@@ -29,6 +29,9 @@ Use $code-review to review branch changes with deep intensity.
 Use $code-review to address the verified findings from the last code review.
 Use $code-review to address actionable review comments on PR #123.
 Use $code-review to review the working tree with standard intensity, then address all applicable verified findings and run targeted verification.
+Use $code-review --fix --commit to review the working tree with high intensity, address applicable findings, verify, and commit.
+Use $code-review --fix --commit --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
+Use $code-review --fix --commit --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
 ```
 
 Natural-language requests also apply:
@@ -39,6 +42,28 @@ Natural-language requests also apply:
 - "fix the PR comments"
 
 When the user asks for review and fixes in the same turn, run the review first. Continue into address mode only for findings that survive verification.
+
+## Flags
+
+Accept flags anywhere in the user's prompt. Flags are opt-in action gates; they do not change the selected review tier or target.
+
+| Flag | Meaning |
+|------|---------|
+| `--fix` | After review, enter address mode for verified findings that still apply and are safe to fix. |
+| `--commit` | After successful address/review verification, commit the in-scope changes. |
+| `--push` | After a successful commit or clean branch review, push the current branch. |
+| `--pr` | Push the current branch and create a PR. Implies `--push`; create a draft PR unless the user explicitly asks for ready-for-review. |
+| `--comment` | For PR targets only, post the final review report as a PR comment after review. |
+
+Action order is always: `review -> fix -> verify -> commit -> push -> PR/comment`.
+
+Rules:
+- `--fix` never applies unverified or stale findings.
+- `--commit` may commit existing in-scope changes after a clean review, plus any fixes just made. Do not include unrelated dirty files; if the commit cannot be isolated safely, stop and ask.
+- `--push` never force-pushes. If no upstream exists, use `git push -u origin HEAD` unless project guidance says otherwise.
+- `--pr` does not imply `--fix` or `--commit`. If uncommitted changes remain, stop before pushing and say to rerun with `--commit` or commit manually.
+- If verification fails or is blocked, do not commit, push, comment, or create a PR unless the user explicitly said to proceed despite that exact failure.
+- Do not add dangerous convenience flags such as `--force`, `--no-verify`, `--stash`, or `--merge`. Require explicit natural language for those operations.
 
 ## Tier Parsing And Help
 
@@ -55,7 +80,7 @@ If the user asks for review without a recognizable tier, or if the request only 
 
 ```text
 Usage:
-  Use $code-review to review <target> with <quick|standard|high|deep> intensity.
+  Use $code-review [--fix] [--commit] [--push|--pr] [--comment] to review <target> with <quick|standard|high|deep> intensity.
 
 Tiers:
   quick     One inline diff pass, no subagents. Small, low-risk diffs.
@@ -76,6 +101,7 @@ Examples:
   Use $code-review to review the working tree with standard intensity.
   Use $code-review to review PR #123 with high intensity.
   Use $code-review to review branch changes with deep intensity.
+  Use $code-review --fix --commit --pr to review branch changes with high intensity.
 ```
 
 Do not silently default to `standard` for review requests. For an explicit `$code-review` invocation without a tier, print the help text verbatim and stop. For natural-language review requests without a tier, ask the user conversationally to choose one (summarizing the four tiers) unless the surrounding instructions clearly provide a tier.
@@ -128,7 +154,7 @@ If the resolved target has no changes, stop with `No diff to review.`
 - Subagents are part of review mode: spawn the read-only finder/verifier subagents for the selected tier without asking the user for additional permission. If the host lacks subagent tools, use sequential fallback and disclose it in the final report.
 - Scope rule: findings must be introduced or re-exposed by the review target. Unchanged lines inside a function the diff touches ARE in scope — the change re-exposes or fails to fix them. Files the diff never touches are not in scope.
 - Address mode is narrow: edit only what is needed for verified findings or explicitly actionable review comments.
-- Ask before actions outside the selected review tier or outside read-only review work, such as broad edits, GitHub write actions, resolving threads, or explicit model/cost escalation beyond the chosen tier.
+- Ask before actions outside the selected review tier, requested flags, or read-only review work, such as broad edits, unflagged GitHub write actions, resolving threads, or explicit model/cost escalation beyond the chosen tier.
 - Do not suppress a real bug because CI, typechecking, tests, or a compiler might also catch it. If the diff proves a real runtime, integration, migration, security, or user-visible failure, it is a review finding.
 - Do not browse or scrape PRs in a browser when `gh` can provide the data.
 - Do not rely on stale assumptions about tool names, model names, or host capabilities. Use the tools actually exposed by the current environment.
@@ -494,7 +520,7 @@ Drop at synthesis time (not earlier):
 - findings whose only claim is that CI/lint/typecheck would fail, with no independently reviewable behavioral impact
 - guideline violations explicitly silenced in code
 
-Lead with findings. Do not bury them under a summary.
+Lead with findings. Do not bury them under a summary. Use bullets for end-state accounting; do not switch to a table.
 
 ```markdown
 ### Code review
@@ -523,14 +549,16 @@ No issues survived verification.
 Static review only; builds, tests, linters, and typechecks were not run.
 ```
 
-For local reviews, report in chat only. For PR targets, comment on GitHub only if the user explicitly asked for a PR comment or the surrounding workflow requires it.
+For local reviews, report in chat only. For PR targets, comment on GitHub only if the user explicitly asked for a PR comment, used `--comment`, or the surrounding workflow requires it.
+
+When `--fix`, `--commit`, `--push`, `--pr`, or `--comment` is present, continue to the relevant action workflow after reporting the review findings. Do not end after review unless there are no safe next actions under the requested flags.
 
 ## Address Review Workflow
 
 Use this workflow when the user asks to address, fix, resolve, or implement review feedback.
 
 ```text
-collect findings -> re-check applicability -> plan edits -> patch narrowly -> verify -> summarize
+collect findings -> re-check applicability -> plan edits -> patch narrowly -> verify -> optional commit/push/PR/comment -> summarize
 ```
 
 ### Step A: Collect Findings
@@ -592,24 +620,49 @@ Examples of acceptable targeted verification when available:
 
 If no safe targeted verification is available, inspect the patched diff manually and say that no automated check was run.
 
-### Step E: Address Report
+### Step E: Optional Git And PR Actions
+
+Only run these steps when requested by flags or equally explicit natural language.
+
+1. Re-run `git status --short` and identify files changed before this workflow versus files changed by address mode.
+2. Use verification from Step D as the gate. If verification failed or was blocked, stop before GitHub or git write actions unless the user explicitly accepts that failure.
+3. For `--commit`, stage only in-scope files and create a concise human-authored commit message. Do not include AI attribution trailers or bylines.
+4. For `--push`, run a normal push for the current branch. If there is no upstream, use `git push -u origin HEAD` unless project guidance says otherwise.
+5. For `--pr`, create a draft PR after push unless the user explicitly asked for a ready PR. Search for and use the repository's PR template if present.
+6. For `--comment`, post the final review or address report to the PR only after local reporting is complete.
+
+### Step F: Final Report
 
 Use this shape:
 
 ```markdown
-### Addressed review findings
+Review: 8 finder angles -> 8 verified candidates -> 6 CONFIRMED, 1 PLAUSIBLE, 1 REFUTED (dropped).
 
-Changed:
+Fixed (2 findings):
 - `src/foo.ts`: fixed the null path from finding 1.
 - `src/bar.ts`: aligned request validation with project guidance.
 
-Not changed:
+Reported, not code-fixed (2 findings):
 - Finding 3: stale; referenced code no longer exists.
 - Finding 4: needs product decision about retry behavior.
 
 Verification:
 - Ran `npm test -- foo.test.ts` successfully.
 - Did not run full test suite.
+
+Git:
+- Commit: `abc1234` Fix reviewed null handling. [only include if committed]
+- Push: `origin/my-branch`. [only include if pushed]
+- PR: https://github.com/org/repo/pull/123 [only include if created]
+```
+
+Always include the headings that apply, in this order: `Review`, `Fixed`, `Reported, not code-fixed`, `Verification`, `Git`. Omit a heading only when it has no content. Keep this shape even when the run found nothing to fix:
+
+```markdown
+Review: no issues survived verification.
+
+Verification:
+- Static review only; builds, tests, linters, and typechecks were not run.
 ```
 
 Do not claim a comment is resolved unless the code change was made and verified. Do not mark GitHub review threads resolved unless the user explicitly asks.

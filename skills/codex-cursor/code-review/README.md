@@ -34,6 +34,9 @@ Use $code-review to review staged changes with quick intensity.
 Use $code-review to review the working tree with standard intensity.
 Use $code-review to review PR #123 with high intensity.
 Use $code-review to review branch changes with deep intensity.
+Use $code-review --fix --commit to review the working tree with high intensity, address applicable findings, verify, and commit.
+Use $code-review --fix --commit --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
+Use $code-review --fix --commit --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
 ```
 
 Review first, then fix every verified finding that is safe to address:
@@ -60,7 +63,7 @@ Use $code-review to address actionable review comments on PR #123. Re-check each
 
 In Codex, invoke the skill with `$code-review`. Review prompts must name an explicit tier: `quick`, `standard`, `high`, or `deep`. If the prompt asks for review but only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print the help text from `SKILL.md` and stop instead of running a default review.
 
-Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier. The skill should not ask again before spawning those subagents; only ask before work outside the user-requested scope, such as unrequested edits, broad refactors, GitHub write actions, or explicit model/cost escalation beyond the chosen tier.
+Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier. The skill should not ask again before spawning those subagents; only ask before work outside the user-requested scope or requested flags, such as unrequested edits, broad refactors, unflagged GitHub write actions, or explicit model/cost escalation beyond the chosen tier.
 
 | Tier | Cost | Structure | Report cap |
 |------|------|-----------|------------|
@@ -71,6 +74,18 @@ Invoking review mode grants permission to spawn the read-only finder and verifie
 
 Targets may be omitted from a tiered review request. With no target, review committed branch diff plus staged, unstaged, and untracked files.
 
+Flags may appear anywhere in the prompt:
+
+| Flag | Behavior |
+|------|----------|
+| `--fix` | Fix verified findings that still apply and are safe to address. |
+| `--commit` | Commit in-scope changes after successful verification. |
+| `--push` | Push the current branch after successful verification/commit. |
+| `--pr` | Push and open a draft PR; implies `--push` but not `--fix` or `--commit`. |
+| `--comment` | For PR targets, post the final report as a PR comment. |
+
+The action chain is always `review -> fix -> verify -> commit -> push -> PR/comment`. The skill does not support convenience flags for force-push, no-verify, stash, merge, or thread resolution; those require explicit natural-language requests.
+
 ## Model Policy
 
 Finder subagents inherit the parent/default model; use a stronger model at `deep` when the host exposes one. Verifier subagents use the parent/default model at `high` and `deep` — verifier quality directly controls what survives. At `standard`, a lower-cost fast model is acceptable for candidates whose evidence is bounded to one or two files.
@@ -79,6 +94,8 @@ Finder subagents inherit the parent/default model; use a stronger model at `deep
 
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
+- `--fix`, `--commit`, `--push`, `--pr`, and `--comment` are explicit action gates; `--pr` implies push but does not imply fix or commit.
+- Final reports use stable bullet sections for `Review`, `Fixed`, `Reported, not code-fixed`, `Verification`, and `Git` instead of ad hoc tables.
 - Dirty worktree and untracked files are included when in scope.
 - Finders never see the never-report list; filtering happens at verify and synthesis so half-believed candidates reach an independent verifier.
 - Verification is a 3-state verdict ladder with the burden of proof on refuting; at `high`/`deep` the recall rules make PLAUSIBLE the default for realistic runtime states.

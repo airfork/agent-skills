@@ -27,7 +27,7 @@ If installing into multiple environments, keep environment-specific command/fron
 
 Use the parallel task or subagent tools exposed by the current Codex environment. The exact names can vary, so inspect the available tool schema instead of hard-coding names.
 
-Invoking `$code-review` in review mode authorizes the read-only finder and verifier subagents required by the selected tier. Do not ask the user for additional permission before spawning those subagents. Ask only before actions outside the user-requested scope, such as unrequested edits, broad refactors, GitHub write actions, resolving review threads, or explicit model/cost escalation beyond the chosen tier.
+Invoking `$code-review` in review mode authorizes the read-only finder and verifier subagents required by the selected tier. Do not ask the user for additional permission before spawning those subagents. Ask only before actions outside the user-requested scope or requested flags, such as unrequested edits, broad refactors, unflagged GitHub write actions, resolving review threads, or explicit model/cost escalation beyond the chosen tier.
 
 Typical mapping:
 
@@ -102,13 +102,13 @@ Do not claim exact parity with the built-in skill unless this workflow has been 
 
 ## GitHub CLI
 
-PR targets, PR review comments, prior PR context, and optional PR comments need `gh` authenticated:
+PR targets, PR review comments, prior PR context, optional PR comments, and `--pr` PR creation need `gh` authenticated:
 
 ```bash
 gh auth status
 ```
 
-Use `gh pr view`, `gh pr diff`, `gh pr comment`, and `gh api` as appropriate. Do not check out branches, stash changes, or mark threads resolved unless the user explicitly asks.
+Use `gh pr view`, `gh pr diff`, `gh pr comment`, `gh pr create`, and `gh api` as appropriate. `--pr` implies a normal push before PR creation, but does not imply `--fix` or `--commit`; stop if uncommitted changes remain. Do not check out branches, stash changes, force-push, or mark threads resolved unless the user explicitly asks.
 
 ## Sequential Fallback
 
