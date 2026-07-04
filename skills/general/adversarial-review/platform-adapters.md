@@ -10,13 +10,15 @@ Personal install paths:
 |-------------|------------|
 | Codex | `~/.codex/skills/adversarial-review/` |
 | Codex alternate scanned root | `~/.agents/skills/adversarial-review/` |
-| Claude Code | personal skill or command path for `/adversarial-review` |
+| Claude Code | `~/.claude/skills/adversarial-review/` |
 
-Preferred repo-managed Codex install:
+Preferred repo-managed installs:
 
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
+scripts/sync-skills --target claude --dry-run
+scripts/sync-skills --target claude --apply
 ```
 
 During implementation on 2026-07-03, `codex-cli 0.142.5` prompt-input output showed Codex scanning both `~/.agents/skills` and the repo-managed `~/.codex/skills` symlink for `code-review`. This repo's `scripts/sync-skills` still targets `~/.codex/skills` for Codex installs.

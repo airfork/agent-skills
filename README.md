@@ -39,16 +39,18 @@ See `CATALOG.md` for the current skill list. The `code-review` skill is finalize
 
 Use managed per-skill symlinks for local installs. A skill is installed only when `skills.yaml` explicitly enables the target under `install`.
 
-Preview Codex installs:
+Preview installs:
 
 ```bash
 scripts/sync-skills --target codex --dry-run
+scripts/sync-skills --target claude --dry-run
 ```
 
-Apply Codex installs:
+Apply installs:
 
 ```bash
 scripts/sync-skills --target codex --apply
+scripts/sync-skills --target claude --apply
 ```
 
 The script refuses to overwrite unmanaged files or directories unless `--force` is passed. Use `--prune` to remove repo-managed symlinks that are no longer selected for a target.

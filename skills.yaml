@@ -46,11 +46,14 @@ skills:
       codex:
         enabled: true
         mode: symlink
+      claude:
+        enabled: true
+        mode: symlink
       cursor:
         enabled: false
         mode: symlink
     description: Cross-platform adversarial review workflow for specs and implementation plans, using fresh-context attack angles, refute-or-promote culling, revise/reject loops, and resolution verification before implementation.
-    notes: Place in general because the portable core targets Codex and Claude Code. Codex installs the skill folder through scripts/sync-skills; Claude install is manual/personal-skill only in this repo; Codex named-agent TOMLs require a separate, explicit copy to ~/.codex/agents/.
+    notes: Place in general because the portable core targets Codex and Claude Code. Install the skill folder through scripts/sync-skills for Codex and Claude; Codex named-agent TOMLs require a separate, explicit copy to ~/.codex/agents/.
 
   - name: code-review
     path: skills/codex-cursor/code-review

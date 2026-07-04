@@ -100,6 +100,8 @@ Use `scripts/sync-skills` to manage links:
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
+scripts/sync-skills --target claude --dry-run
+scripts/sync-skills --target claude --apply
 scripts/sync-skills --target cursor --dry-run
 ```
 
@@ -115,5 +117,5 @@ Before committing a skill change:
 4. Confirm install targets are disabled for drafts and enabled only for intentional global installs.
 5. Validate `skills.yaml` syntax.
 6. Run any skill-specific validation or smoke test.
-7. Run `scripts/sync-skills --target codex --dry-run` when install metadata changed.
+7. Run `scripts/sync-skills --dry-run` for each affected install target when install metadata changed.
 8. Check `git status --short` so unrelated work is not accidentally swept in.

@@ -80,6 +80,29 @@ class SyncSkillsTest < Minitest::Test
     assert_equal File.join(@repo, "skills/general/active-skill"), File.readlink(link_path)
   end
 
+  def test_claude_target_uses_same_install_metadata
+    create_skill("skills/general/claude-skill", name: "claude-skill")
+    write_manifest(<<~YAML)
+      schema_version: 1
+      skills:
+        - name: claude-skill
+          path: skills/general/claude-skill
+          status: active
+          install:
+            claude:
+              enabled: true
+              mode: symlink
+    YAML
+
+    stdout, stderr, status = run_sync("--target", "claude", "--apply")
+
+    assert status.success?, stderr
+    assert_includes stdout, "Linked claude-skill"
+    link_path = File.join(@dest, "claude-skill")
+    assert File.symlink?(link_path), "expected #{link_path} to be a symlink"
+    assert_equal File.join(@repo, "skills/general/claude-skill"), File.readlink(link_path)
+  end
+
   def test_skips_skills_without_explicit_target_install
     create_skill("skills/general/draft-skill", name: "draft-skill")
     write_manifest(<<~YAML)

@@ -6,7 +6,8 @@ require "yaml"
 
 DEFAULT_DESTINATIONS = {
   "codex" => "~/.codex/skills",
-  "cursor" => "~/.cursor/skills"
+  "cursor" => "~/.cursor/skills",
+  "claude" => "~/.claude/skills"
 }.freeze
 
 def inside_directory?(path, root)
@@ -49,7 +50,7 @@ options = {
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: scripts/sync-skills [options]"
 
-  opts.on("--target TARGET", "Install target: codex or cursor. Default: codex.") do |target|
+  opts.on("--target TARGET", "Install target: codex, cursor, or claude. Default: codex.") do |target|
     options[:target] = target
   end
 

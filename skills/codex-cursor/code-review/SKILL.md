@@ -612,6 +612,7 @@ Make the smallest coherent change for each applicable finding.
 - Do not add dependencies unless the finding cannot be fixed safely without them.
 - Do not rewrite tests or snapshots unless the review finding specifically requires that.
 - Keep unrelated user changes intact.
+- Maintain an applied-fix log while editing. For each fix, record the finding or PR comment it addressed, every file intentionally changed for that fix, and one concrete sentence describing what changed.
 
 If multiple fixes touch the same code, combine them only when it reduces risk or avoids conflicting edits.
 
@@ -641,14 +642,20 @@ Only run these steps when requested by flags or equally explicit natural languag
 
 ### Step F: Final Report
 
+The final report must give the user an audit trail for address mode. If any file was edited, the `Fixed` section is mandatory even when verification or later git actions fail. Use one bullet per applied fix. Each bullet must name the finding or PR comment, the changed file(s), and the concrete code change. Do not collapse the fixed-items list into a generic "addressed review comments" statement.
+
 Use this shape:
 
 ```markdown
 Review: 8 finder angles -> 8 verified candidates -> 6 CONFIRMED, 1 PLAUSIBLE, 1 REFUTED (dropped).
 
 Fixed (2 findings):
-- `src/foo.ts`: fixed the null path from finding 1.
-- `src/bar.ts`: aligned request validation with project guidance.
+- Finding 1: fixed the null path.
+  Changed files: `src/foo.ts`
+  Change: added the missing guard before dereferencing the optional value.
+- PR comment https://github.com/org/repo/pull/123#discussion_r456: aligned request validation with project guidance.
+  Changed files: `src/bar.ts`, `src/bar.test.ts`
+  Change: rejected blank request IDs and added the regression coverage requested by the comment.
 
 Reported, not code-fixed (2 findings):
 - Finding 3: stale; referenced code no longer exists.
@@ -672,6 +679,8 @@ Review: no issues survived verification.
 Verification:
 - Static review only; builds, tests, linters, and typechecks were not run.
 ```
+
+If multiple findings are resolved by one shared code edit, still list each finding separately in `Fixed`, and use the same `Changed files:` list for each bullet. If an attempted fix was reverted or abandoned, do not put it in `Fixed`; put it under `Reported, not code-fixed` with the reason.
 
 Do not claim a comment is resolved unless the code change was made and verified. Do not mark GitHub review threads resolved unless the user explicitly asks.
 

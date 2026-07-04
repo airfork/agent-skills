@@ -95,7 +95,7 @@ Finder and verifier subagents inherit the parent/default model but must run at e
 - Review mode stays read-only.
 - Address mode edits only verified/applicable findings.
 - `--fix`, `--commit`, `--push`, `--pr`, and `--comment` are explicit action gates with an implication chain: `--pr` implies `--push`, `--push` implies `--commit`; no flag implies `--fix`.
-- Final reports use stable bullet sections for `Review`, `Fixed`, `Reported, not code-fixed`, `Verification`, and `Git` instead of ad hoc tables.
+- Final reports use stable bullet sections for `Review`, `Fixed`, `Reported, not code-fixed`, `Verification`, and `Git` instead of ad hoc tables; address-mode reports must list every applied fix with the finding or PR comment, changed files, and concrete change.
 - Dirty worktree and untracked files are included when in scope.
 - Finders never see the never-report list; filtering happens at verify and synthesis so half-believed candidates reach an independent verifier.
 - Verification is a 3-state verdict ladder with the burden of proof on refuting; at `high`/`deep` the recall rules make PLAUSIBLE the default for realistic runtime states.
