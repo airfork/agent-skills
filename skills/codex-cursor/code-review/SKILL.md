@@ -18,7 +18,7 @@ For non-Codex environments, see [platform-adapters.md](platform-adapters.md).
 
 ## Invocation
 
-Codex installs this as one skill named `$code-review`; address mode is not a separate Codex command or skill.
+Codex and Gemini install this as one skill named `code-review`; address mode is not a separate command or skill.
 Use these prompt shapes:
 
 ```text
@@ -32,6 +32,8 @@ Use $code-review to review the working tree with standard intensity, then addres
 Use $code-review --fix --commit to review the working tree with high intensity, address applicable findings, verify, and commit.
 Use $code-review --fix --push to review staged changes with standard intensity, fix applicable findings, commit, and push.
 Use $code-review --fix --pr to review branch changes with high intensity, fix applicable findings, commit, push, and open a draft PR.
+Activate code-review to review staged changes with quick intensity.
+Activate code-review to review the working tree with standard intensity.
 ```
 
 Natural-language requests also apply:

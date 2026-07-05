@@ -18,18 +18,22 @@ model_tiers:
   fast:
     codex: GPT-5.4 mini
     claude: Sonnet medium
+    gemini: Gemini CLI default low-effort model
     use_for: Small edits, simple transforms, and quick checks.
   standard:
     codex: GPT-5.5 medium
     claude: Sonnet high
+    gemini: Gemini CLI default model
     use_for: Normal skill execution and repo-aware work.
   deep:
     codex: GPT-5.5 high
     claude: Opus 4.8 high
+    gemini: Gemini CLI highest available reasoning model
     use_for: Broad reviews, ambiguous planning, architecture, and high-risk work.
   ultracode:
     codex: null
     claude: Opus 4.8 high with UltraCode
+    gemini: null
     use_for: Claude-only workflows that explicitly benefit from UltraCode.
 
 skills:
@@ -40,6 +44,7 @@ skills:
     interfaces:
       - claude
       - codex
+      - gemini
     recommended_model_tier: deep
     heavy_model_tier: ultracode
     install:
@@ -52,8 +57,11 @@ skills:
       cursor:
         enabled: false
         mode: symlink
+      gemini:
+        enabled: true
+        mode: symlink
     description: Cross-platform adversarial review workflow for specs and implementation plans, using fresh-context attack angles, refute-or-promote culling, revise/reject loops, and resolution verification before implementation.
-    notes: Place in general because the portable core targets Codex and Claude Code. Install the skill folder through scripts/sync-skills for Codex and Claude; Codex named-agent TOMLs require a separate, explicit copy to ~/.codex/agents/.
+    notes: Place in general because the portable core targets Codex, Claude Code, and Gemini/Antigravity. Install the skill folder through scripts/sync-skills for Codex, Claude, and Gemini; Codex named-agent TOMLs require a separate, explicit copy to ~/.codex/agents/.
 
   - name: code-review
     path: skills/codex-cursor/code-review
@@ -62,6 +70,7 @@ skills:
     interfaces:
       - codex
       - cursor
+      - gemini
     recommended_model_tier: deep
     heavy_model_tier: deep
     install:
@@ -71,5 +80,8 @@ skills:
       cursor:
         enabled: false
         mode: symlink
+      gemini:
+        enabled: true
+        mode: symlink
     description: Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation, opt-in fix/commit/push/PR flags, and Cursor adapter notes.
-    notes: Finalized under the codex-cursor category and installed into Codex through a managed symlink. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep). Flags support --fix, --commit, --push, --pr, and --comment with verification-gated git/GitHub actions.
+    notes: Finalized under the codex-cursor category and installed into Codex and Gemini through managed symlinks. The portable workflow can run on Gemini/Antigravity through activate_skill plus sequential or available-subagent fallback; do not create a Gemini-specific copy. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep). Flags support --fix, --commit, --push, --pr, and --comment with verification-gated git/GitHub actions.

@@ -10,6 +10,7 @@ Personal install paths:
 |-------------|------|
 | Codex | `~/.codex/skills/code-review/` |
 | Cursor | `~/.cursor/skills/code-review/` |
+| Gemini/Antigravity | `~/.gemini/config/skills/code-review/` |
 | Claude Code | Prefer the built-in `/code-review` skill; otherwise expose this workflow through `.claude/commands/code-review.md` and, optionally, `.claude/commands/address-review.md` |
 
 Preferred source-repo install:
@@ -17,11 +18,17 @@ Preferred source-repo install:
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
+scripts/sync-skills --target gemini --dry-run
+scripts/sync-skills --target gemini --apply
 ```
 
 For Cursor, enable `install.cursor.enabled` in `skills.yaml`, then run `scripts/sync-skills --target cursor --apply`.
 
 If installing into multiple environments, keep environment-specific command/frontmatter files outside the portable source or generate them during install.
+
+Gemini/Antigravity treats `~/.gemini/config/` as a global customization root and
+loads skills from its `skills/` directory. Do not create a Gemini-specific
+`code-review` copy; install this same source folder with the `gemini` target.
 
 ## Codex Adapter
 
@@ -114,6 +121,26 @@ Follow the code-review skill at <installed path>/SKILL.md in address mode.
 ```
 
 Do not claim exact parity with the built-in skill unless this workflow has been compared against the built-in prompt text for the current Claude Code version.
+
+## Gemini/Antigravity Adapter
+
+Invoke through the skill activation mechanism or natural language that clearly
+names `code-review`.
+
+Preserve the same stages as the portable workflow:
+
+1. Build the review packet in the parent agent.
+2. Launch finder angle tasks in parallel when the host provides independent
+   agent/task dispatch.
+3. Group candidates by location in the parent agent.
+4. Launch one verifier task per location group when available.
+5. Report only findings whose verdict is CONFIRMED or PLAUSIBLE.
+6. For address mode, patch only verified/applicable findings and run narrow
+   verification when safe.
+
+If Gemini cannot launch independent subagents or pin model effort by role, use
+the sequential fallback and disclose it in the final report. Never downgrade
+verifier quality just because the adapter is running in Gemini.
 
 ## GitHub CLI
 

@@ -22,12 +22,12 @@ Root-level skill folders are allowed temporarily for drafts. Move finalized skil
 
 Use these labels in `CATALOG.md` and `skills.yaml`:
 
-| Tier | Codex/OpenAI default | Claude default | Use for |
-|------|---------------------|----------------|---------|
-| `fast` | GPT-5.4 mini | Sonnet medium | Small edits, simple transforms, quick checks. |
-| `standard` | GPT-5.5 medium | Sonnet high | Normal skill execution and repo-aware work. |
-| `deep` | GPT-5.5 high | Opus 4.8 high | Broad reviews, ambiguous planning, architecture, high-risk work. |
-| `ultracode` | N/A | Opus 4.8 high with UltraCode | Claude-only workflows that benefit from UltraCode explicitly. |
+| Tier | Codex/OpenAI default | Claude default | Gemini default | Use for |
+|------|---------------------|----------------|----------------|---------|
+| `fast` | GPT-5.4 mini | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |
+| `standard` | GPT-5.5 medium | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |
+| `deep` | GPT-5.5 high | Opus 4.8 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |
+| `ultracode` | N/A | Opus 4.8 high with UltraCode | N/A | Claude-only workflows that benefit from UltraCode explicitly. |
 
 Model names are local operating labels. Update them when the available model menu changes.
 
@@ -44,6 +44,7 @@ Preview installs:
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target claude --dry-run
+scripts/sync-skills --target gemini --dry-run
 ```
 
 Apply installs:
@@ -51,6 +52,7 @@ Apply installs:
 ```bash
 scripts/sync-skills --target codex --apply
 scripts/sync-skills --target claude --apply
+scripts/sync-skills --target gemini --apply
 ```
 
 The script refuses to overwrite unmanaged files or directories unless `--force` is passed. Use `--prune` to remove repo-managed symlinks that are no longer selected for a target.

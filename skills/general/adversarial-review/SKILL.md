@@ -30,6 +30,13 @@ Claude Code:
 /adversarial-review docs/spec.md docs/plan.md --ultra
 ```
 
+Gemini/Antigravity:
+
+```text
+Activate adversarial-review for docs/spec.md docs/plan.md
+Run adversarial-review on docs/spec.md docs/plan.md --high
+```
+
 Natural-language equivalents apply, such as "run adversarial review on the payments spec and plan."
 
 Inputs are repository files only: a spec, a plan, or both. Do not review pasted text, tickets, or external docs in v1. If both a spec and plan are present, enable the coverage mapper and spec-plan drift angles. If only a plan is present, enable feasibility checks. If only a spec is present, skip plan-only angles.

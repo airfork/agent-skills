@@ -11,6 +11,7 @@ Personal install paths:
 | Codex | `~/.codex/skills/adversarial-review/` |
 | Codex alternate scanned root | `~/.agents/skills/adversarial-review/` |
 | Claude Code | `~/.claude/skills/adversarial-review/` |
+| Gemini/Antigravity | `~/.gemini/config/skills/adversarial-review/` |
 
 Preferred repo-managed installs:
 
@@ -19,7 +20,13 @@ scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
 scripts/sync-skills --target claude --dry-run
 scripts/sync-skills --target claude --apply
+scripts/sync-skills --target gemini --dry-run
+scripts/sync-skills --target gemini --apply
 ```
+
+Gemini/Antigravity treats `~/.gemini/config/` as a global customization root and
+loads skills from its `skills/` directory. Do not create Gemini-specific copies
+of general skills; install the same source skill folder with the `gemini` target.
 
 During implementation on 2026-07-03, `codex-cli 0.142.5` prompt-input output showed Codex scanning both `~/.agents/skills` and the repo-managed `~/.codex/skills` symlink for `code-review`. This repo's `scripts/sync-skills` still targets `~/.codex/skills` for Codex installs.
 
@@ -92,6 +99,16 @@ For `--ultra`, run the pipeline as an ultracode Workflow:
 - Optional cross-model arbitration when available.
 
 Do not claim Codex parity for `--ultra`.
+
+## Gemini/Antigravity
+
+Invoke through the skill activation mechanism or natural language that clearly
+names `adversarial-review`.
+
+Run the same workflow and role boundaries as the portable core. If Gemini cannot
+spawn independent subagents or cannot pin xhigh effort per role, use the
+sequential fallback and disclose the limitation in the report. Never treat
+Gemini support as a reason to add a separate Gemini-only skill package.
 
 ## Sequential Fallback
 

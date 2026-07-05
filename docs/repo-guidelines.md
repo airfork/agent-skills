@@ -10,7 +10,7 @@ Use one of these categories for finalized skills:
 
 | Category | Path | Use when |
 |----------|------|----------|
-| `general` | `skills/general/<skill-name>/` | The skill is portable across Codex, Cursor, Claude, and other agents with minimal adaptation. |
+| `general` | `skills/general/<skill-name>/` | The skill is portable across Codex, Cursor, Claude, Gemini/Antigravity, and other agents with minimal adaptation. |
 | `codex-cursor` | `skills/codex-cursor/<skill-name>/` | The skill depends on Codex/Cursor behaviors, tool names, or workflows. |
 | `claude` | `skills/claude/<skill-name>/` | The skill is Claude-only, such as Claude Code commands or Claude-specific tool assumptions. |
 | `claude-ultracode` | `skills/claude-ultracode/<skill-name>/` | The skill is Claude-only and explicitly expects UltraCode, or is materially better with UltraCode. |
@@ -67,12 +67,13 @@ Only include folders that are actually needed. Keep `SKILL.md` focused and move 
 
 Use managed per-skill symlinks for local global installs.
 
-Do not symlink an entire category folder or this repository into `~/.codex/skills`, `~/.cursor/skills`, or another global skill directory. Global skill discovery expects individual skill folders, and whole-directory linking makes drafts too easy to activate accidentally.
+Do not symlink an entire category folder or this repository into `~/.codex/skills`, `~/.cursor/skills`, `~/.gemini/config/skills`, or another global skill directory. Global skill discovery expects individual skill folders, and whole-directory linking makes drafts too easy to activate accidentally.
 
 The source of truth stays in this repository. Installed global skills should point back to the source skill folder:
 
 ```text
 ~/.codex/skills/<skill-name> -> /Users/tunji/skills/<source-path>
+~/.gemini/config/skills/<skill-name> -> /Users/tunji/skills/<source-path>
 ```
 
 Install policy is explicit in `skills.yaml`:
@@ -84,6 +85,9 @@ install:
     mode: symlink
   cursor:
     enabled: false
+    mode: symlink
+  gemini:
+    enabled: true
     mode: symlink
 ```
 
@@ -103,6 +107,8 @@ scripts/sync-skills --target codex --apply
 scripts/sync-skills --target claude --dry-run
 scripts/sync-skills --target claude --apply
 scripts/sync-skills --target cursor --dry-run
+scripts/sync-skills --target gemini --dry-run
+scripts/sync-skills --target gemini --apply
 ```
 
 The sync script reads `skills.yaml`, validates each selected skill has a `SKILL.md`, and creates one symlink per selected skill. It supports `--prune` for removing repo-managed symlinks that are no longer selected.
