@@ -64,9 +64,12 @@ skill-name/
   references/
   scripts/
   assets/
+  state/      # optional: mutable runtime data, git-ignored
 ```
 
 Only include folders that are actually needed. Keep `SKILL.md` focused and move bulky optional context into `references/`.
+
+`state/` is for mutable data a skill accumulates at runtime (progress files, generated artifacts, logs). It is covered by the root `.gitignore` rule `skills/**/state/`, travels with symlink installs, and must never hold instructions or reference material the skill needs to function from a fresh clone.
 
 ## Global Skill Installs
 

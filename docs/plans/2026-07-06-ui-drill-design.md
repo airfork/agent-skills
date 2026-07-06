@@ -67,6 +67,15 @@ Per exercise:
 
 Early in each module, some exercises are **taught examples**: the tutor walks through the critique itself, modeling the language before asking the user to produce it. The taught:tested ratio shifts test-heavy as the module progresses.
 
+## Mockup generation and quality
+
+The grading model assumes everything not deliberately broken is clean, so mockup quality is structural, not aspirational:
+
+- **Fixed-version-first**: each exercise generates the *clean* mockup first, then derives the flawed version by applying the planted flaws as minimal, enumerated mutations. The answer key is exactly the mutation list; the flawed version is by construction "a good design with N specific things wrong," and the reveal diff is apples-to-apples.
+- **Shared base kit**: `references/mockup-kit.css` defines a small design system (spacing scale, type scale, neutral palette + accent, button/input/card components with hover/focus/disabled states) that every mockup builds on. This keeps baseline quality consistent ("modern and designed") and mirrors the pedagogy: planting a flaw = deviating from the system, fixing it = returning to it.
+- **Pre-send checklist** in SKILL.md: before sending, the tutor verifies the mockup renders without breakage, uses realistic content (no lorem-ipsum filler), and contains no kit violations outside the planted mutations.
+- **Safety valve**: the false-positive rule already credits defensible unplanted catches; if a mockup turns out broken or ambiguous mid-exercise, the tutor says so and regenerates rather than defending it.
+
 ## Student model and personalization
 
 `student.md` is a tutor's notebook, not a log. After each session the skill **rewrites** it (bounded, ~150 lines) rather than appending. It holds:

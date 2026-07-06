@@ -8,6 +8,7 @@ This repository stores custom agent skills and related authoring guidance.
 - When adding, moving, renaming, or retiring a skill, update both `CATALOG.md` and `skills.yaml` in the same change.
 - When changing global install behavior, update `skills.yaml`, update the catalog's install status, and run `scripts/sync-skills --dry-run` for each affected target (`codex`, `claude`, or `cursor`).
 - Keep individual skill folders lean: `SKILL.md` plus required `agents/`, `scripts/`, `references/`, or `assets/` resources. Avoid extra docs inside a skill unless that skill requires them as references.
+- A skill may keep mutable runtime data in a `state/` subfolder inside its skill directory. All such folders are git-ignored by the root rule `skills/**/state/`; never commit state, and never store skill instructions or references there.
 - Use the category folders under `skills/` for finalized placement:
   - `skills/general/`
   - `skills/codex-cursor/`

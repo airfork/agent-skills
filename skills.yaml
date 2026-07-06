@@ -85,3 +85,27 @@ skills:
         mode: symlink
     description: Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation, opt-in fix/commit/push/PR flags, and Cursor adapter notes.
     notes: Finalized under the codex-cursor category and installed into Codex and Gemini through managed symlinks. The portable workflow can run on Gemini/Antigravity through activate_skill plus sequential or available-subagent fallback; do not create a Gemini-specific copy. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep). Flags support --fix, --commit, --push, --pr, and --comment with verification-gated git/GitHub actions.
+
+  - name: ui-drill
+    path: skills/claude/ui-drill
+    category: claude
+    status: active
+    interfaces:
+      - claude
+    recommended_model_tier: standard
+    heavy_model_tier: standard
+    install:
+      codex:
+        enabled: false
+        mode: symlink
+      claude:
+        enabled: true
+        mode: symlink
+      cursor:
+        enabled: false
+        mode: symlink
+      gemini:
+        enabled: false
+        mode: symlink
+    description: Personal UI/UX critique tutoring course that generates deliberately flawed mockups, grades perception and articulation separately, and adapts a nine-module curriculum via a persistent student model.
+    notes: Claude-only; relies on Claude Code side-panel HTML rendering (SendUserFile) and conversational tutoring. Mutable learner state lives in the skill's git-ignored state/ subfolder (first use of the skills/**/state/ convention) with a session-end mirror to ~/.local/state/ui-drill/. Design doc at docs/plans/2026-07-06-ui-drill-design.md; ultra adversarial review passed (see the -review.md companion).

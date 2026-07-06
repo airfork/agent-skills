@@ -22,6 +22,7 @@ folder.
 |-------|----------|---------|------------------|---------|
 | `adversarial-review` | `general` | Codex, Claude, Gemini | `deep` | Fresh-context critique of specs, plans, migration plans, architecture designs, and other planning docs before implementation. |
 | `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
+| `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
 
 ## `adversarial-review`
 
@@ -154,6 +155,45 @@ review -> fix -> verify -> commit -> push -> PR/comment
 
 The skill does not support convenience flags such as `--force`, `--no-verify`,
 `--stash`, or `--merge`. Those operations require explicit natural language.
+
+## `ui-drill`
+
+Use `ui-drill` (Claude Code only) to run a tutoring session in your ongoing
+UI/UX critique course. It is a personal learning tool, not a review tool — for
+critiquing your own projects use design-review skills instead.
+
+### Invocation
+
+```text
+/ui-drill
+```
+
+Natural-language equivalents also apply, such as:
+
+```text
+Let's do a UI drill session.
+Continue my UI critique course.
+```
+
+No flags or tiers. Each session picks up from the persistent student model; the
+curriculum and difficulty are managed by the skill, not by invocation options.
+
+### Session Shape
+
+Each session runs 3–4 exercises. Per exercise: a generated flawed mockup is
+rendered in the side panel → you critique it in prose → Socratic discussion
+(nothing revealed) → on your go, the reveal with the fixed version, canonical
+terms, and grading → open chat until you call for the next exercise.
+
+### Action Rules
+
+- Reads and writes only inside the skill's `state/` folder (git-ignored) plus a
+  session-end mirror to `~/.local/state/ui-drill/`.
+- Output files: exercise HTML mockups, session summaries, and student-model
+  snapshots under `state/exercises/`; the evolving `state/student.md`.
+- Sends mockups to the side panel via file rendering; no network, git, or
+  GitHub actions.
+- Single-machine tool: state does not sync across machines.
 
 ## Updating This File
 
