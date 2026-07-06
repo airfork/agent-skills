@@ -35,6 +35,11 @@ Update both:
 - `CATALOG.md` for human browsing
 - `skills.yaml` for tooling and structured indexing
 
+Update `USAGE.md` in the same change whenever a skill's invocation syntax,
+flags, tiers, targets, accepted inputs, action permissions, or output files
+change. Users should not need to inspect individual skill folders to discover a
+skill's supported usage surface.
+
 ## Model Tiers
 
 Use stable tier labels in metadata, with current model examples in the README:
@@ -120,8 +125,9 @@ Before committing a skill change:
 1. Confirm the skill path is intentional.
 2. Update `CATALOG.md`.
 3. Update `skills.yaml`.
-4. Confirm install targets are disabled for drafts and enabled only for intentional global installs.
-5. Validate `skills.yaml` syntax.
-6. Run any skill-specific validation or smoke test.
-7. Run `scripts/sync-skills --dry-run` for each affected install target when install metadata changed.
-8. Check `git status --short` so unrelated work is not accidentally swept in.
+4. Update `USAGE.md` if the user-facing usage surface changed.
+5. Confirm install targets are disabled for drafts and enabled only for intentional global installs.
+6. Validate `skills.yaml` syntax.
+7. Run any skill-specific validation or smoke test.
+8. Run `scripts/sync-skills --dry-run` for each affected install target when install metadata changed.
+9. Check `git status --short` so unrelated work is not accidentally swept in.

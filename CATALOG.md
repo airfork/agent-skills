@@ -1,6 +1,8 @@
 # Skill Catalog
 
-This catalog is the human-readable index. Keep it in sync with `skills.yaml`.
+This catalog is the human-readable inventory. Keep it in sync with `skills.yaml`.
+For invocation syntax, flags, tiers, targets, and action permissions, see
+`USAGE.md`.
 
 ## Model Tier Key
 

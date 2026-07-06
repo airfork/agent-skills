@@ -11,6 +11,7 @@ Private source repo for custom agent skills, drafts, and shared authoring conven
 | `skills/claude/` | Claude-only skills, commands, or workflows. |
 | `skills/claude-ultracode/` | Claude workflows that specifically assume UltraCode is available or useful. |
 | `CATALOG.md` | Human-readable skill inventory, status, and model guidance. |
+| `USAGE.md` | Human-readable invocation reference, flags, tiers, targets, and action permissions. |
 | `skills.yaml` | Machine-readable index for scripts, agents, or future tooling. |
 | `docs/repo-guidelines.md` | Repository conventions and authoring rules. |
 | `scripts/sync-skills` | Manifest-driven installer for per-skill symlinks into global skill directories. |
@@ -33,7 +34,7 @@ Model names are local operating labels. Update them when the available model men
 
 ## Current Inventory
 
-See `CATALOG.md` for the current skill list. The `code-review` skill is finalized under `skills/codex-cursor/code-review/` and installed into Codex through a managed symlink.
+See `CATALOG.md` for the current skill list. See `USAGE.md` for the top-level usage reference, including invocation syntax, flags, tiers, targets, and action permissions. The `code-review` skill is finalized under `skills/codex-cursor/code-review/` and installed into Codex through a managed symlink.
 
 ## Installing Skills Locally
 
