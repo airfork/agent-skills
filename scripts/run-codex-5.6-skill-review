@@ -41,19 +41,29 @@ cli_version, version_status = Open3.capture2e("codex", "--version")
 abort cli_version unless version_status.success?
 cli_version = cli_version.strip
 
+packet_scope = [
+  "docs/plans/2026-07-12-codex-5.6-skill-compatibility-design.md",
+  "README.md",
+  "CATALOG.md",
+  "skills.yaml",
+  "test/model_tier_contract_test.rb",
+  "skills/codex-cursor/code-review",
+  "skills/general/adversarial-review",
+]
+packet_status_output, packet_status = Open3.capture2e(
+  "git", "-C", worktree, "status", "--porcelain", "--", *packet_scope
+)
+unless packet_status.success? && packet_status_output.empty?
+  abort "Review packet scope is dirty; report was not replaced\n#{packet_status_output}"
+end
+
 package_paths, git_status = Open3.capture2e(
   "git", "-C", worktree, "ls-files", "--",
   "skills/codex-cursor/code-review/**",
   "skills/general/adversarial-review/**",
 )
 abort package_paths unless git_status.success?
-packet_paths = [
-  "docs/plans/2026-07-12-codex-5.6-skill-compatibility-design.md",
-  "README.md",
-  "CATALOG.md",
-  "skills.yaml",
-  "test/model_tier_contract_test.rb",
-] + package_paths.lines.map(&:strip).reject(&:empty?)
+packet_paths = packet_scope.first(5) + package_paths.lines.map(&:strip).reject(&:empty?)
 packet = packet_paths.uniq.map do |path|
   "\n--- FILE: #{path} ---\n#{File.read(File.join(worktree, path))}"
 end.join

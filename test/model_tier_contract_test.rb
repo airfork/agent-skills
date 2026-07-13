@@ -124,9 +124,14 @@ class ModelTierContractTest < Minitest::Test
   end
 
   def test_model_review_runner_supports_the_system_ruby
+    runner = read("scripts/run-codex-5.6-skill-review")
+    assert_includes runner, '"status", "--porcelain", "--", *packet_scope'
+    assert_includes runner, "Review packet scope is dirty; report was not replaced"
+    assert_operator runner.index("packet_status_output"), :<, runner.index("packet = packet_paths.uniq.map")
+
     return if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("2.7")
 
-    refute_includes read("scripts/run-codex-5.6-skill-review"), ".filter_map"
+    refute_includes runner, ".filter_map"
   end
 
   def test_codex_fallback_and_report_only_modes_are_executable
