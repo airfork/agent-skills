@@ -65,7 +65,7 @@ They pin `sandbox_mode = "read-only"` and per-role reasoning effort, and inherit
 
 If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation. If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.
 
-For Codex generic fallback subtasks, explicitly preserve the parent session's selected GPT-5.6 model; if Codex cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation.
+For Codex generic fallback subtasks, explicitly preserve the parent session's selected GPT-5.6 model; if Codex cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation. For Codex fallback role processes, require a proven read-only sandbox; if Codex cannot confirm it, stop the role rather than relying only on behavioral instructions.
 
 When installed, spawn finders and verifiers as these named agents. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders and must not receive lower reasoning effort. On other hosts, retain their existing verifier-model quality floors. If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
 
@@ -80,7 +80,7 @@ the host's maximum supported role effort rather than the high-effort parent
 setting, and deliver the complete role prompt on stdin:
 
 ```bash
-codex exec --model <selected-gpt-5.6-slug> -c model_reasoning_effort="<host-maximum-effort>" -
+codex exec --sandbox read-only --model <selected-gpt-5.6-slug> -c model_reasoning_effort="<host-maximum-effort>" -
 ```
 
 With a dedicated effort profile in `config.toml`, still pass the selected model on invocation:

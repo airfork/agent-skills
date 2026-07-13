@@ -57,6 +57,8 @@ Version guard:
 - Codex v0.137.0 silently ignored named-agent config; do not rely on named-agent effort or sandbox behavior there.
 - A Windows variant remains unresolved in the design notes. On Windows, disclose if named-agent config cannot be trusted.
 
+Before dispatching named agents, check `codex --version`. Codex v0.137.0 or an unverified version must use the validated fallback launcher or stop.
+
 For Codex fallback roles, require fresh context, the parent session's selected GPT-5.6 model, and xhigh (or the host's maximum) effort; if Codex cannot prove all three, stop and report that the adversarial-review tier was not enforceable.
 
 ```text

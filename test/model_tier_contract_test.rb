@@ -93,7 +93,7 @@ class ModelTierContractTest < Minitest::Test
 
     catalog = read("CATALOG.md")
     assert_includes catalog, "| Skill | Path | Category | Status | Install | Recommended model tier | Description |"
-    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\); use GPT-5\.6 Terra \(`standard` repository model tier\) only for lower-cost routine reviews \|/, catalog)
+    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\) recommended; GPT-5\.6 Luna and Terra remain supported at every review intensity when selected in the parent \|/, catalog)
   end
 
   def test_model_review_reports_record_execution_provenance
@@ -186,7 +186,8 @@ class ModelTierContractTest < Minitest::Test
     assert_includes code_skill, core_policy
     assert_includes code_adapter, codex_policy
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> -c model_reasoning_effort=high"
-    assert_includes code_adapter, 'codex exec --model <selected-gpt-5.6-slug> -c model_reasoning_effort="<host-maximum-effort>" -'
+    assert_includes code_adapter, 'codex exec --sandbox read-only --model <selected-gpt-5.6-slug> -c model_reasoning_effort="<host-maximum-effort>" -'
+    assert_includes code_adapter, "For Codex fallback role processes, require a proven read-only sandbox; if Codex cannot confirm it, stop the role rather than relying only on behavioral instructions."
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> --profile review"
     refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
 
@@ -203,6 +204,7 @@ class ModelTierContractTest < Minitest::Test
 
   def test_review_intensity_parser_separates_model_tiers
     skill = read("skills/codex-cursor/code-review/SKILL.md")
+    readme = read("skills/codex-cursor/code-review/README.md")
     section = skill[/## Tier Parsing And Help\n(?<body>.*?)(?=\nFor a tierless explicit)/m, :body]
     refute_nil section
     aliases = section.scan(/^\| `([^`]+)` \| `([^`]+)` \|$/)
@@ -218,6 +220,8 @@ class ModelTierContractTest < Minitest::Test
     assert_includes skill, "If a model-tier phrase conflicts with the active parent model, disclose the mismatch and stop so the user can restart with the requested model."
     assert_includes skill, "For a tierless explicit `$code-review` invocation or command-style request, print the help text and stop."
     assert_includes skill, "For a tierless ordinary natural-language review request, ask the user conversationally to choose an intensity."
+    assert_includes readme, "For a tierless explicit `$code-review` invocation or command-style request, print the help text and stop."
+    assert_includes readme, "For a tierless ordinary natural-language review request, ask the user conversationally to choose an intensity."
   end
 
   def test_quick_parent_effort_remains_low_cost
@@ -236,6 +240,8 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adapter, "The Codex fail-closed rule above takes precedence over the portable sequential fallback below."
     assert_includes adapter, "write the complete role prompt and review packet to stdin, close stdin, and capture the combined startup transcript"
     assert_includes adapter, "--model <selected-gpt-5.6-slug>"
+    assert_includes adapter, "Before dispatching named agents, check `codex --version`."
+    assert_includes adapter, "Codex v0.137.0 or an unverified version must use the validated fallback launcher or stop."
     refute_includes adapter, "If an environment cannot spawn subagents, run the same roles sequentially and disclose it:"
   end
 
@@ -291,6 +297,6 @@ class ModelTierContractTest < Minitest::Test
 
   def test_catalog_disambiguates_model_tier_from_review_intensity
     catalog = read("CATALOG.md")
-    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\); use GPT-5\.6 Terra \(`standard` repository model tier\) only for lower-cost routine reviews \|/, catalog)
+    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\) recommended; GPT-5\.6 Luna and Terra remain supported at every review intensity when selected in the parent \|/, catalog)
   end
 end

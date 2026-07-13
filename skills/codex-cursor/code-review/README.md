@@ -61,7 +61,7 @@ Use $code-review to address actionable review comments on PR #123. Re-check each
 
 ## Run Options
 
-In Codex, invoke the skill with `$code-review`. Review prompts must name an explicit tier: `quick`, `standard`, `high`, or `deep`. If the prompt asks for review but only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print the help text from `SKILL.md` and stop instead of running a default review.
+In Codex, invoke the skill with `$code-review`. Review prompts must name an explicit tier: `quick`, `standard`, `high`, or `deep`. For a tierless explicit `$code-review` invocation or command-style request, print the help text and stop. For a tierless ordinary natural-language review request, ask the user conversationally to choose an intensity.
 
 Invoking review mode grants permission to spawn the read-only finder and verifier subagents required by the selected tier. The skill should not ask again before spawning those subagents; only ask before work outside the user-requested scope or requested flags, such as unrequested edits, broad refactors, unflagged GitHub write actions, or explicit model/cost escalation beyond the chosen tier.
 
