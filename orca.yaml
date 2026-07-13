@@ -1,0 +1,4 @@
+scripts:
+  setup: ./scripts/test --list
+  run: ./scripts/verify
+  archive: ./scripts/archive-clean

@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
+
+mode=local
+dry_run=false
+
+while (($# > 0)); do
+  case "$1" in
+    --archive)
+      mode=archive
+      ;;
+    --dry-run)
+      dry_run=true
+      ;;
+    -h|--help)
+      cat <<'HELP'
+Usage: scripts/clean [--dry-run]
+
+Remove only untracked local generated paths. Use --dry-run to list targets
+without removing anything. Archive output is handled by scripts/archive-clean.
+HELP
+      exit 0
+      ;;
+    *)
+      echo "Usage: scripts/clean [--dry-run]" >&2
+      exit 2
+      ;;
+  esac
+  shift
+done
+
+if [[ "$mode" == archive ]]; then
+  targets=(build dist release artifacts)
+else
+  targets=(.cache .coverage .pytest_cache .ruff_cache .mypy_cache coverage logs screenshots tmp .tmp docs/plans/.scratch .planning)
+fi
+
+found=false
+for relative_path in "${targets[@]}"; do
+  path="$ROOT/$relative_path"
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    continue
+  fi
+
+  found=true
+  if [[ -L "$path" ]]; then
+    echo "Skipping symlink: $relative_path" >&2
+    continue
+  fi
+
+  if [[ -n "$(git ls-files -- "$relative_path")" ]]; then
+    echo "Skipping tracked path: $relative_path" >&2
+    continue
+  fi
+
+  if [[ "$dry_run" == true ]]; then
+    echo "Would remove: $relative_path"
+  else
+    rm -rf -- "$path"
+    echo "Removed: $relative_path"
+  fi
+done
+
+if [[ "$found" == false ]]; then
+  if [[ "$mode" == archive ]]; then
+    echo "No generated archive-clean targets found."
+  else
+    echo "No generated clean targets found."
+  fi
+fi

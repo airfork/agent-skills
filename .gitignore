@@ -4,5 +4,22 @@ tmp/
 .tmp/
 .worktrees/
 
+# Generated repository output and local tooling state
+build/
+dist/
+release/
+coverage/
+logs/
+screenshots/
+artifacts/
+.cache/
+.coverage
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.conductor/state/
+docs/plans/.scratch/
+.planning/
+
 # Per-skill mutable state (see AGENTS.md and docs/repo-guidelines.md)
 skills/**/state/

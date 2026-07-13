@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+cd "$ROOT"
+
+tests=(test/*_test.rb)
+
+case "${1:-}" in
+  "")
+    for test_file in "${tests[@]}"; do
+      echo "==> $test_file"
+      ruby -Itest "$test_file"
+    done
+    ;;
+  --list)
+    printf '%s\n' "${tests[@]}"
+    ;;
+  -h|--help)
+    cat <<'HELP'
+Usage: scripts/test [--list]
+
+Run the repository's Ruby contract tests sequentially, or list the selected
+test files without running them.
+HELP
+    ;;
+  *)
+    echo "Usage: scripts/test [--list]" >&2
+    exit 2
+    ;;
+esac

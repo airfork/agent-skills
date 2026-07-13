@@ -19,6 +19,9 @@ This repository stores custom agent skills and related authoring guidance.
 - Use the configured human git author only. Do not add AI attribution trailers or bylines to commits.
 - Before claiming completion, run the relevant verification and report the exact command.
 - Use `scripts/sync-skills --apply` only when the user explicitly wants the global skill symlinks changed.
+- Use the checked-in command surface in `COMMANDS.md`; route agent-run shell commands through `rtk` when available.
+- Subagents are approved by default for broad reviews, independent implementation slices, and parallel repo exploration when they materially improve coverage. Do not ask for extra approval just to execute bounded subagent work.
+- If isolated git worktrees are needed, keep them under `.worktrees/`; preserve unrelated work in the main checkout.
 
 ## Skill Updates
 
@@ -26,3 +29,10 @@ This repository stores custom agent skills and related authoring guidance.
 - Keep trigger descriptions in `SKILL.md` frontmatter precise; they are the primary activation surface.
 - Update recommended model tier metadata when the skill's expected execution cost changes.
 - Validate YAML syntax after editing `skills.yaml`.
+
+## Verification and cleanup
+
+- Run `scripts/test` for the repository's normal test suite and `scripts/verify` for the full local contract, syntax, and test gate.
+- Preview generated-artifact cleanup with `scripts/clean --dry-run` or `scripts/archive-clean --dry-run` before applying it. Cleanup scripts are path-scoped and must never be used to remove tracked files or unrelated user work.
+- Do not delete artifacts as part of routine agent work. If cleanup is explicitly requested, use the checked-in cleanup scripts and report the exact mode used.
+- When changing install metadata, run `scripts/sync-skills --dry-run` for each affected target; do not apply global symlink changes without explicit user direction.
