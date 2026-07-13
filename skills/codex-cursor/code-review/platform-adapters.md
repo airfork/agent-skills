@@ -59,7 +59,9 @@ They pin `sandbox_mode = "read-only"` and per-role reasoning effort, and inherit
 | Verifier (`standard`, `high`) | `review-verifier` | `high` |
 | Verifier (`deep`) | `review-verifier-deep` | `xhigh` |
 
-Spawn finders and verifiers as these named agents. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders and must not receive lower reasoning effort. On other hosts, retain their existing verifier-model quality floors. If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
+If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation. If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.
+
+When installed, spawn finders and verifiers as these named agents. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders and must not receive lower reasoning effort. On other hosts, retain their existing verifier-model quality floors. If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
 
 The named agents cover only the finder and verifier roles; the parent session still does prep, candidate grouping, dedup, and synthesis. Run review sessions at high parent reasoning effort too — e.g. `codex -c model_reasoning_effort=high`, or a dedicated profile in `config.toml`:
 

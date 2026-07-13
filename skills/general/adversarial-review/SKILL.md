@@ -140,6 +140,10 @@ Open questions must include both positions: the judge's evidence and consequence
 
 Write a chat summary and a report file. By default, place the report next to the first reviewed document as `<doc-stem>-review.md`. On re-review, append a new round section to the existing report instead of overwriting it.
 
+For `--report-only`, replace the convergence verdict with `REPORT ONLY - N findings` and emit only Findings and Metrics; use `ID | Category | Severity | Location | Summary` with no Resolution column. In this mode, do not emit Changelog, Rejected Findings, or Open Questions because no revision or resolution occurred.
+
+For all other modes, use these convergence report sections:
+
 Report sections:
 
 1. Verdict line: `PASSED`, `PASSED WITH OPEN QUESTIONS`, or `DID NOT CONVERGE - N findings remain open`.
