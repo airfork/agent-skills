@@ -92,4 +92,83 @@ class ModelTierContractTest < Minitest::Test
     assert_includes catalog, "| Skill | Path | Category | Status | Install | Recommended model tier | Description |"
     assert_match(/^\| `code-review` .* \| `deep` model tier; use the `standard` model tier only for lower-cost routine reviews \|/, catalog)
   end
+
+  def test_model_review_reports_record_execution_provenance
+    {
+      "luna" => "gpt-5.6-luna",
+      "terra" => "gpt-5.6-terra",
+      "sol" => "gpt-5.6-sol",
+    }.each do |name, slug|
+      path = "docs/plans/2026-07-12-codex-5.6-#{name}-skill-review.md"
+      assert File.file?(File.join(REPO_UNDER_TEST, path)), path
+      text = read(path)
+      assert_includes text, "- Model slug: `#{slug}`"
+      assert_includes text, "- Codex CLI: `codex-cli 0.144.1`"
+      assert_includes text, "- Reasoning effort: `high`"
+      assert_includes text, "- Exit status: `0`"
+      assert_match(/- Worktree: `\/Users\/tunji\/skills\/\.worktrees\/codex-5\.6-skill-compatibility`/, text)
+      assert_match(/- Reviewed commit: `[0-9a-f]{7,40}`/, text)
+      assert_match(/- Session ID: `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`/, text)
+      assert_includes text, "- Runtime model: `#{slug}`"
+      assert_includes text, "model: #{slug}"
+      assert_includes text, "workdir: /Users/tunji/skills/.worktrees/codex-5.6-skill-compatibility"
+      assert_includes text, "reasoning effort: high"
+      assert_includes text, "- Invocation: `ruby scripts/run-codex-5.6-skill-review #{name}`"
+      assert_includes text, "## Model verdict"
+    end
+  end
+
+  def test_model_review_runner_supports_the_system_ruby
+    return if Gem::Version.new(RUBY_VERSION) >= Gem::Version.new("2.7")
+
+    refute_includes read("scripts/run-codex-5.6-skill-review"), ".filter_map"
+  end
+
+  def test_codex_fallback_and_report_only_modes_are_executable
+    code_skill = read("skills/codex-cursor/code-review/SKILL.md")
+    code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
+
+    fallback_sentences = [
+      "If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation.",
+      "If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.",
+    ]
+    fallback_sentences.each do |sentence|
+      assert_includes code_skill, sentence
+      assert_includes code_adapter, sentence
+    end
+    assert_includes adversarial_skill, "For `--report-only`, replace the convergence verdict with `REPORT ONLY - N findings` and emit only Findings and Metrics"
+    assert_includes adversarial_skill, "use `ID | Category | Severity | Location | Summary` with no Resolution column"
+    assert_includes adversarial_skill, "do not emit Changelog, Rejected Findings, or Open Questions because no revision or resolution occurred"
+  end
+
+  def test_limited_capacity_and_terminal_verdicts_are_deterministic
+    code_skill = read("skills/codex-cursor/code-review/SKILL.md")
+    code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
+
+    bounded_waves = "Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once."
+    assert_includes code_skill, bounded_waves
+    assert_includes code_adapter, bounded_waves
+    assert_includes adversarial_skill, "Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity."
+    assert_includes adversarial_skill, "`PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding."
+    refute_includes adversarial_skill, "Stuck `CRITICAL` or `HIGH` findings mean the review did not pass."
+  end
+
+  def test_named_agent_install_and_github_fallback_are_explicit
+    code_skill = read("skills/codex-cursor/code-review/SKILL.md")
+    code_readme = read("skills/codex-cursor/code-review/README.md")
+    code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+
+    install_policy = "Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks."
+    assert_includes code_skill, install_policy
+    assert_includes code_readme, install_policy
+    assert_includes code_adapter, install_policy
+    refute_includes code_readme, "install them into `~/.codex/agents/`"
+    refute_includes code_adapter, "Install the named agent definitions from"
+
+    github_fallback = "If `gh` is unavailable or unauthenticated for a PR target or requested GitHub action, stop before review or mutation and report: `GitHub CLI authentication is required for this PR workflow.`"
+    assert_includes code_skill, github_fallback
+    assert_includes code_adapter, github_fallback
+  end
 end

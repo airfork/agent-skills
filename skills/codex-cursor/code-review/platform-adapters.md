@@ -46,7 +46,9 @@ Typical mapping:
 
 Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once.
 
-Install the named agent definitions from `agents/codex/` into `~/.codex/agents/` (one-time step; `scripts/sync-skills` does not copy them):
+Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
+
+When the user explicitly requests that optional setup, copy the definitions from `agents/codex/` (`scripts/sync-skills` does not copy them):
 
 ```bash
 cp <skill source>/agents/codex/*.toml ~/.codex/agents/
@@ -153,6 +155,8 @@ PR targets, PR review comments, prior PR context, optional PR comments, and `--p
 ```bash
 gh auth status
 ```
+
+If `gh` is unavailable or unauthenticated for a PR target or requested GitHub action, stop before review or mutation and report: `GitHub CLI authentication is required for this PR workflow.`
 
 Use `gh pr view`, `gh pr diff`, `gh pr comment`, `gh pr create`, and `gh api` as appropriate. `--pr` implies committing in-scope changes and a normal push before PR creation (it never implies `--fix`). Do not check out branches, stash changes, force-push, or mark threads resolved unless the user explicitly asks.
 

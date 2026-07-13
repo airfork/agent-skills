@@ -141,6 +141,8 @@ Review depth tracks reasoning effort at least as much as prompt structure. The t
 
 If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation. If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.
 
+Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
+
 If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
 
 ## Target Resolution
@@ -202,6 +204,7 @@ Run prep inline unless a cheap read-only prep subagent is clearly useful.
    If branch commits are in scope and `BASE_SHA` is empty, ask for a base branch or review only an explicit working-tree target. Do not guess a base for committed branch review.
 
 4. For PR targets, use `gh pr view` and `gh pr diff` when `gh` is authenticated. Do not check out another branch or disturb the worktree unless the user explicitly asks.
+   If `gh` is unavailable or unauthenticated for a PR target or requested GitHub action, stop before review or mutation and report: `GitHub CLI authentication is required for this PR workflow.`
 5. Find the guidance files that govern the changed code, by path proximity rather than reading the whole repository: the user-level and repo-root `AGENTS.md`/`CLAUDE.md`, any `AGENTS.md`, `CLAUDE.md`, or `CLAUDE.local.md` in a directory that is an ancestor of a changed file (a directory's guidance file only applies to files at or below it), plus `.cursor/rules/*` and `.github/copilot-instructions.md` when present. List them; the conventions finder reads them.
 6. Summarize the change in one paragraph: intent, touched areas, risk areas, and any notable generated/binary/dependency files. Note conventions a reviewer should know.
 

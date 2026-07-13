@@ -1,0 +1,152 @@
+#!/usr/bin/env ruby
+
+require "fileutils"
+require "open3"
+require "tempfile"
+
+MODELS = {
+  "luna" => ["Luna", "gpt-5.6-luna"],
+  "terra" => ["Terra", "gpt-5.6-terra"],
+  "sol" => ["Sol", "gpt-5.6-sol"],
+}.freeze
+
+PROMPT = <<~TEXT.freeze
+  Audit the complete packet below from the perspective of the exact GPT-5.6
+  model selected for this run. The packet contains the approved Codex 5.6
+  compatibility design, README.md, CATALOG.md, skills.yaml, and every tracked
+  file in the two active Codex-facing skill packages. Check trigger clarity, instruction
+  interpretation, model-versus-effort semantics, inherited-model behavior,
+  tool assumptions, fallbacks, and contradictions. This is read-only: do not
+  call tools, edit files, run tests, or spawn subagents. Perform the audit
+  inline from this complete packet. Report only concrete compatibility defects
+  with path, evidence, and consequence; otherwise state PASS.
+TEXT
+
+name = ARGV.fetch(0, nil)
+unless MODELS.key?(name) && ARGV.length == 1
+  warn "Usage: ruby scripts/run-codex-5.6-skill-review <luna|terra|sol>"
+  exit 2
+end
+
+display_name, slug = MODELS.fetch(name)
+worktree, git_status = Open3.capture2e("git", "rev-parse", "--show-toplevel")
+abort git_status unless git_status.success?
+worktree = File.realpath(worktree.strip)
+
+revision, git_status = Open3.capture2e("git", "-C", worktree, "rev-parse", "HEAD")
+abort git_status unless git_status.success?
+revision = revision.strip
+
+cli_version, version_status = Open3.capture2e("codex", "--version")
+abort cli_version unless version_status.success?
+cli_version = cli_version.strip
+
+package_paths, git_status = Open3.capture2e(
+  "git", "-C", worktree, "ls-files", "--",
+  "skills/codex-cursor/code-review/**",
+  "skills/general/adversarial-review/**",
+)
+abort package_paths unless git_status.success?
+packet_paths = [
+  "docs/plans/2026-07-12-codex-5.6-skill-compatibility-design.md",
+  "README.md",
+  "CATALOG.md",
+  "skills.yaml",
+  "test/model_tier_contract_test.rb",
+] + package_paths.lines.map(&:strip).reject(&:empty?)
+packet = packet_paths.uniq.map do |path|
+  "\n--- FILE: #{path} ---\n#{File.read(File.join(worktree, path))}"
+end.join
+review_prompt = "#{PROMPT}\n#{packet}"
+
+report_path = File.join(
+  worktree,
+  "docs/plans/2026-07-12-codex-5.6-#{name}-skill-review.md",
+)
+
+Tempfile.create(["codex-5.6-#{name}-verdict", ".md"]) do |verdict_file|
+  command = [
+    "codex", "exec",
+    "--ephemeral",
+    "--ignore-user-config",
+    "--ignore-rules",
+    "--sandbox", "read-only",
+    "--model", slug,
+    "--config", 'model_reasoning_effort="high"',
+    "--cd", worktree,
+    "--output-last-message", verdict_file.path,
+    "-",
+  ]
+
+  transcript = +""
+  exit_status = nil
+  Open3.popen2e(*command) do |stdin, output, wait_thread|
+    stdin.write(review_prompt)
+    stdin.close
+    output.each do |chunk|
+      transcript << chunk
+      $stdout.write(chunk)
+      $stdout.flush
+    end
+    exit_status = wait_thread.value
+  end
+
+  delimiters = transcript.lines.each_index.select do |index|
+    transcript.lines[index].strip.match?(/\A-{8,}\z/)
+  end
+  abort "Codex startup header was not found; report was not replaced" if delimiters.length < 2
+
+  header_lines = transcript.lines[(delimiters[0] + 1)...delimiters[1]].map(&:strip)
+  header = header_lines.each_with_object({}) do |line, fields|
+    key, value = line.split(":", 2)
+    fields[key] = value.strip if value
+  end
+
+  expected = {
+    "model" => slug,
+    "workdir" => worktree,
+    "reasoning effort" => "high",
+  }
+  mismatches = expected.reject { |key, value| header[key] == value }
+  unless exit_status.success? && mismatches.empty?
+    abort "Codex runtime mismatch or failure (exit #{exit_status.exitstatus}): #{mismatches.inspect}"
+  end
+
+  session_id = header.fetch("session id", "")
+  uuid = /\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+  abort "Codex session ID was not a UUID; report was not replaced" unless session_id.match?(uuid)
+
+  verdict = File.read(verdict_file.path)
+  abort "Codex returned an empty verdict; report was not replaced" if verdict.strip.empty?
+
+  observed_header = ["workdir", "model", "reasoning effort", "session id"].map do |key|
+    "#{key}: #{header.fetch(key)}"
+  end.join("\n")
+
+  report = <<~MARKDOWN
+    # GPT-5.6 #{display_name} Skill Compatibility Review
+
+    - Model slug: `#{slug}`
+    - Codex CLI: `#{cli_version}`
+    - Reasoning effort: `high`
+    - Exit status: `#{exit_status.exitstatus}`
+    - Worktree: `#{worktree}`
+    - Reviewed commit: `#{revision}`
+    - Runtime model: `#{header.fetch("model")}`
+    - Session ID: `#{session_id}`
+    - Invocation: `ruby scripts/run-codex-5.6-skill-review #{name}`
+
+    ## Command-observed runtime header
+
+    ```text
+    #{observed_header}
+    ```
+
+    ## Model verdict
+
+    #{verdict.rstrip}
+  MARKDOWN
+
+  FileUtils.mkdir_p(File.dirname(report_path))
+  File.write(report_path, report)
+end
