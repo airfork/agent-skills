@@ -1,0 +1,272 @@
+#!/usr/bin/env ruby
+# Fenced transition writer for milestone-orchestrator STATE.md documents.
+# Every mutation requires the live coordinator lease (owner + fencing token),
+# is checked against transition rules, re-validated structurally, and written
+# atomically — a rejected mutation leaves the file byte-identical.
+#
+# Usage:
+#   control-state STATE.md acquire-lease --owner ID [--ttl SECONDS] [--lease-dir DIR]
+#   control-state STATE.md renew-lease|release-lease --owner ID --token N
+#   control-state STATE.md set-phase PHASE --owner ID --token N
+#   control-state STATE.md set-epoch N --owner ID --token N
+#   control-state STATE.md record-attempt TASK --attempt-json JSON --owner ID --token N
+#   control-state STATE.md advance-stage TASK STAGE --owner ID --token N
+#   control-state STATE.md set-condition TASK CONDITION --owner ID --token N
+#   control-state STATE.md record-resource ID --kind K --host-id H [--task T] --owner ID --token N
+#   control-state STATE.md set-resource-status ID STATUS --owner ID --token N
+#   control-state STATE.md set-acceptance ID STATUS [--evidence STR] --owner ID --token N
+#   control-state STATE.md set-closeout --closeout-json JSON --owner ID --token N
+#   control-state STATE.md append-journal MESSAGE --owner ID --token N
+#   control-state STATE.md check-remote --observed absent|OID        (read-only)
+#
+# Exit codes: 0 ok, 1 transition/validation rejection, 2 usage error,
+#             3 lease/fencing failure, 4 remote-expectation mismatch.
+require "json"
+require "time"
+require_relative "lib/state_document"
+require_relative "lib/lease_store"
+
+STATE_OPEN_MARKER = "<!-- milestone-orchestrator-state:v1 -->".freeze
+STATE_CLOSE_MARKER = "<!-- /milestone-orchestrator-state -->".freeze
+
+def usage!(message)
+  warn message
+  exit 2
+end
+
+def reject!(message)
+  warn message
+  exit 1
+end
+
+args = ARGV.dup
+usage!("usage: control-state STATE.md COMMAND [args] [options]") if args.length < 2
+state_path = args.shift
+command = args.shift
+usage!("no such file: #{state_path}") unless File.file?(state_path)
+
+positional = []
+options = {}
+until args.empty?
+  arg = args.shift
+  if arg.start_with?("--")
+    key = arg[2..-1]
+    value = args.shift
+    usage!("#{arg} requires a value") if value.nil?
+    options[key] = value
+  else
+    positional << arg
+  end
+end
+
+lease_dir = options["lease-dir"]
+if lease_dir.nil?
+  common_dir = `git -C #{File.dirname(state_path).inspect} rev-parse --git-common-dir 2>/dev/null`.strip
+  lease_dir =
+    if common_dir.empty?
+      File.join(File.dirname(state_path), ".milestone-orchestrator-lease")
+    else
+      File.join(common_dir, "milestone-orchestrator", File.basename(File.dirname(File.expand_path(state_path))))
+    end
+end
+store = MilestoneOrchestrator::LeaseStore.new(lease_dir)
+
+markdown = File.read(state_path)
+open_at = markdown.index(STATE_OPEN_MARKER)
+close_at = markdown.index(STATE_CLOSE_MARKER)
+reject!("no canonical state block in #{state_path}") if open_at.nil? || close_at.nil?
+block = markdown[(open_at + STATE_OPEN_MARKER.length)...close_at]
+json_text = block[/```json\s*\n(.*?)```/m, 1]
+reject!("no ```json fence inside the state block") if json_text.nil?
+begin
+  state = JSON.parse(json_text)
+rescue JSON::ParserError => e
+  reject!("canonical state JSON does not parse: #{e.message}")
+end
+
+STAGES = MilestoneOrchestrator::StateDocument::TASK_STAGES
+CONDITIONS = MilestoneOrchestrator::StateDocument::TASK_CONDITIONS
+PHASES = MilestoneOrchestrator::StateDocument::RUN_PHASES
+ATTEMPT_STATUSES = MilestoneOrchestrator::StateDocument::ATTEMPT_STATUSES
+RESOURCE_KINDS = MilestoneOrchestrator::StateDocument::RESOURCE_KINDS
+RESOURCE_STATUSES = MilestoneOrchestrator::StateDocument::RESOURCE_STATUSES
+
+def fetch_task(state, task_id)
+  task = state["tasks"][task_id]
+  allowlist = state["run"]["task_allowlist"] || []
+  if task.nil? || !allowlist.include?(task_id)
+    reject!("unknown task #{task_id.inspect}: not in tasks and run.task_allowlist")
+  end
+  task
+end
+
+# --- read-only commands (no lease required) ---
+
+case command
+when "check-remote"
+  observed = options["observed"] || usage!("check-remote requires --observed absent|OID")
+  expectation = state.dig("authority", "remote_ref_expectation") || {}
+  expected =
+    if expectation["status"] == "absent"
+      "absent"
+    else
+      expectation["oid"] || expectation["base_oid"]
+    end
+  if observed == expected
+    puts "remote matches expectation (#{expected})"
+    exit 0
+  else
+    warn "remote-ref expectation mismatch: expected #{expected.inspect}, observed #{observed.inspect}; " \
+         "stop and reconcile before publication"
+    exit 4
+  end
+when "acquire-lease"
+  owner = options["owner"] || usage!("acquire-lease requires --owner")
+  ttl = Integer(options.fetch("ttl", "300"))
+  begin
+    lease = store.acquire(owner, ttl)
+    puts JSON.pretty_generate(lease)
+    exit 0
+  rescue MilestoneOrchestrator::LeaseStore::LeaseError => e
+    warn "lease acquisition failed: #{e.message}"
+    exit 3
+  end
+end
+
+# --- everything below is fenced ---
+
+owner = options["owner"] || usage!("#{command} requires --owner")
+token = Integer(options["token"] || usage!("#{command} requires --token"))
+
+begin
+  case command
+  when "renew-lease"
+    puts JSON.pretty_generate(store.renew(owner, token))
+    exit 0
+  when "release-lease"
+    store.release(owner, token)
+    puts "lease released"
+    exit 0
+  else
+    store.validate!(owner, token)
+  end
+rescue MilestoneOrchestrator::LeaseStore::LeaseError => e
+  warn "lease check failed: #{e.message}"
+  exit 3
+end
+
+journal_note = nil
+
+case command
+when "set-phase"
+  phase = positional[0] || usage!("set-phase requires a phase")
+  reject!("invalid phase #{phase.inspect}") unless PHASES.include?(phase)
+  reject!("run is closed; no further transitions") if state["run"]["phase"] == "closed"
+  state["run"]["phase"] = phase
+when "set-epoch"
+  epoch = Integer(positional[0] || usage!("set-epoch requires a value"))
+  current = state["run"]["epoch"].to_i
+  reject!("epoch may not decrease (current #{current})") if epoch < current
+  state["run"]["epoch"] = epoch
+when "record-attempt"
+  task_id = positional[0] || usage!("record-attempt requires a task id")
+  raw = options["attempt-json"] || usage!("record-attempt requires --attempt-json")
+  begin
+    attempt = JSON.parse(raw)
+  rescue JSON::ParserError => e
+    usage!("--attempt-json does not parse: #{e.message}")
+  end
+  task = fetch_task(state, task_id)
+  if task["condition"] == "circuit-open"
+    reject!("task #{task_id} circuit is open; reset the condition explicitly before new attempts")
+  end
+  status = attempt["status"]
+  reject!("attempt status #{status.inspect} is not one of #{ATTEMPT_STATUSES.join(", ")}") \
+    unless ATTEMPT_STATUSES.include?(status)
+  task["attempts"] = (task["attempts"] || []) + [attempt]
+  if status == "failed"
+    task["failure_count"] = task.fetch("failure_count", 0) + 1
+    budget = state.dig("budgets", "task_failures")
+    if budget && task["failure_count"] >= budget
+      task["condition"] = "circuit-open"
+      journal_note = "#{task_id} circuit opened after #{task["failure_count"]} failures"
+    end
+  end
+when "advance-stage"
+  task_id = positional[0] || usage!("advance-stage requires a task id")
+  stage = positional[1] || usage!("advance-stage requires a stage")
+  task = fetch_task(state, task_id)
+  reject!("invalid stage #{stage.inspect}") unless STAGES.include?(stage)
+  reject!("task #{task_id} circuit is open; stage advancement is fenced") if task["condition"] == "circuit-open"
+  current_index = STAGES.index(task["stage"]).to_i
+  new_index = STAGES.index(stage)
+  reject!("stage moves forward only (#{task["stage"]} -> #{stage})") unless new_index > current_index
+  completed = (task["attempts"] || []).any? { |a| a.is_a?(Hash) && a["status"] == "completed" }
+  reject!("stage advancement requires a completed attempt with adjudicated evidence") unless completed
+  task["stage"] = stage
+when "set-condition"
+  task_id = positional[0] || usage!("set-condition requires a task id")
+  condition = positional[1] || usage!("set-condition requires a condition")
+  task = fetch_task(state, task_id)
+  reject!("invalid condition #{condition.inspect}") unless CONDITIONS.include?(condition)
+  task["condition"] = condition
+when "record-resource"
+  resource_id = positional[0] || usage!("record-resource requires an id")
+  kind = options["kind"] || usage!("record-resource requires --kind")
+  host_id = options["host-id"] || usage!("record-resource requires --host-id")
+  reject!("invalid resource kind #{kind.inspect}") unless RESOURCE_KINDS.include?(kind)
+  state["resources"][resource_id] = {
+    "kind" => kind,
+    "host_id" => host_id,
+    "created_by_run" => state["run"]["id"],
+    "created_at" => Time.now.utc.iso8601,
+    "plan_task_id" => options["task"],
+    "status" => "active"
+  }
+when "set-resource-status"
+  resource_id = positional[0] || usage!("set-resource-status requires an id")
+  status = positional[1] || usage!("set-resource-status requires a status")
+  resource = state["resources"][resource_id]
+  reject!("unknown resource #{resource_id.inspect}: only recorded run-owned resources may change status") if resource.nil?
+  reject!("invalid resource status #{status.inspect}") unless RESOURCE_STATUSES.include?(status)
+  resource["status"] = status
+when "set-acceptance"
+  ac_id = positional[0] || usage!("set-acceptance requires an id")
+  status = positional[1] || usage!("set-acceptance requires a status")
+  entry = {"status" => status}
+  entry["evidence"] = options["evidence"] if options["evidence"]
+  state["acceptance"][ac_id] = entry
+when "set-closeout"
+  raw = options["closeout-json"] || usage!("set-closeout requires --closeout-json")
+  begin
+    state["closeout"] = JSON.parse(raw)
+  rescue JSON::ParserError => e
+    usage!("--closeout-json does not parse: #{e.message}")
+  end
+when "append-journal"
+  message = positional[0] || usage!("append-journal requires a message")
+  journal_note = message
+when "set-phase", "set-epoch"
+  # handled above
+else
+  usage!("unknown command #{command.inspect}")
+end
+
+new_json = JSON.pretty_generate(state)
+new_block = "#{STATE_OPEN_MARKER}\n```json\n#{new_json}\n```\n"
+new_markdown = markdown[0...open_at] + new_block + markdown[close_at..-1]
+if journal_note
+  new_markdown = new_markdown.rstrip + "\n- #{Time.now.utc.iso8601} — #{journal_note}\n"
+end
+
+document = MilestoneOrchestrator::StateDocument.new(new_markdown)
+document.validate
+unless document.valid?
+  document.errors.each { |f| warn "#{f.code} at #{f.path}: #{f.message}" }
+  reject!("mutation rejected: resulting state fails validation; file unchanged")
+end
+
+tmp = "#{state_path}.control-state.tmp"
+File.write(tmp, new_markdown)
+File.rename(tmp, state_path)
+puts "ok #{command}"

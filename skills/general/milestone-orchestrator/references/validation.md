@@ -11,7 +11,7 @@ this skill as "proven for large milestones" until layers 1, 3, and 4 have run.
 |-------|--------|
 | 1. RED baseline pressure tests | **Deferred** — protocol below; no baseline recorded yet |
 | 2. Deterministic validator tests | **Implemented** — `scripts/validate-state` covered by `test/milestone_orchestrator_state_validator_test.rb`; package contract covered by `test/milestone_orchestrator_skill_contract_test.rb` |
-| 3. Disposable end-to-end fixture | **Deferred** — fixture generator, fake forge, and fault matrix not built |
+| 3. Disposable end-to-end fixture | **Partially implemented** — deterministic control-plane fault matrix in `test/milestone_orchestrator_fault_matrix_test.rb` (false completion, failure-budget circuit, stale epoch/fencing, foreign-resource cleanup, remote-expectation mismatch, closeout-with-open-findings, cancellation, recovery epoch) exercised through `scripts/control-state`; live-agent faults (worker silence, real runtime loss) and the fake-forge fixture repo remain deferred |
 | 4. Small real-repository pilot | **Passed** (2026-07-13) — see below |
 
 ## Pilot results (2026-07-13)
@@ -47,10 +47,12 @@ Observed:
   clumsy (the deferred `control-state` script would help), and worker
   `pnpm install` per worktree added ~30s each.
 
-Deferred layers also cover the design's enforcement scripts (`control-state`,
-`authorize-action`, `execute-action`, `launch-role`, `inspect-effects`,
-`run-verification`, `scan-outgoing`, `run-pressure-suite`,
-`create-fixture-repo`). Until they exist, adapters rely on probed host
+`scripts/control-state` is now implemented: a lease-fenced STATE transition
+writer (exclusive coordinator lease with fencing tokens and epoch takeover,
+transition rules, atomic validation-gated writes). The remaining enforcement
+scripts from the design (`authorize-action`, `execute-action`, `launch-role`,
+`inspect-effects`, `run-verification`, `scan-outgoing`, `run-pressure-suite`,
+`create-fixture-repo`) stay deferred. Until they exist, adapters rely on probed host
 primitives plus the STATE ledger for the capability boundaries in
 [platform-adapters.md](platform-adapters.md), and the coordinator treats the
 manager boundary and publication envelope as policy enforced by instruction

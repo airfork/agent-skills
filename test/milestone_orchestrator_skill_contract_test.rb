@@ -16,7 +16,9 @@ class MilestoneOrchestratorSkillContractTest < Minitest::Test
     assets/plan-template.md
     assets/state-template.md
     scripts/validate-state
+    scripts/control-state
     scripts/lib/state_document.rb
+    scripts/lib/lease_store.rb
   ].freeze
 
   def skill_text
@@ -31,6 +33,7 @@ class MilestoneOrchestratorSkillContractTest < Minitest::Test
 
   def test_validate_state_is_executable
     assert File.executable?(File.join(SKILL_DIR, "scripts", "validate-state"))
+    assert File.executable?(File.join(SKILL_DIR, "scripts", "control-state"))
   end
 
   def test_frontmatter_name_and_trigger

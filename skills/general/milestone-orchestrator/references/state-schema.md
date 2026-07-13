@@ -6,6 +6,16 @@ JSON blocks are the machine source of truth. `scripts/validate-state` checks
 the STATE block (and cross-checks the PLAN block when given `--plan`); run it
 after every material STATE update and before publication.
 
+Prefer `scripts/control-state` over hand-editing the STATE block: it acquires
+an exclusive coordinator lease (fencing token + epoch, takeover only after
+expiry), enforces transition rules (forward-only stages gated on a completed
+attempt, circuit-open fencing, closed gated on a complete closeout, epoch
+never decreasing, only recorded resources mutable), validates the resulting
+document, and writes atomically — a rejected mutation leaves the file
+byte-identical. Run `control-state --help`-style usage from its header
+comment; `check-remote --observed absent|OID` gives the fenced
+remote-ref-expectation check before any push.
+
 Templates may use angle-bracket instructional tokens (`<like-this>`); an
 initialized RUN state may not contain unresolved tokens.
 
