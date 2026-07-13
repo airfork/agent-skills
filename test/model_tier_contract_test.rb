@@ -82,6 +82,12 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adversarial_skill, codex_policy
     assert_includes adversarial_adapter, codex_policy
 
+    fallback_policy = "use the host's maximum available effort and disclose that the requested tier was not fully enforceable"
+    assert_includes code_skill, fallback_policy
+    assert_includes code_adapter, fallback_policy
+    refute_includes code_skill, "continue with inherited settings and disclose that limitation"
+    refute_includes code_adapter, "continue with inherited settings and disclose that in the final report"
+
     catalog = read("CATALOG.md")
     assert_includes catalog, "| Skill | Path | Category | Status | Install | Recommended model tier | Description |"
     assert_match(/^\| `code-review` .* \| `deep` model tier; use the `standard` model tier only for lower-cost routine reviews \|/, catalog)
