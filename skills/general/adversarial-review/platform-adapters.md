@@ -63,6 +63,17 @@ For Codex fallback roles, require fresh context, the parent session's selected G
 Blocked: Codex could not prove fresh context, selected GPT-5.6 model inheritance, and maximum role effort, so the requested adversarial-review tier was not enforceable.
 ```
 
+When named agents are unavailable, a programmatic launcher may start each role
+with the current Codex CLI shape:
+
+```bash
+codex exec --ephemeral --ignore-user-config --ignore-rules --sandbox read-only \
+  --model <selected-gpt-5.6-slug> \
+  -c model_reasoning_effort="<host-maximum-effort>" -
+```
+
+The launcher must write the complete role prompt and review packet to stdin, close stdin, and capture the combined startup transcript. Validate the runtime model and reasoning-effort fields before accepting the role output. The Codex fail-closed rule above takes precedence over the portable sequential fallback below.
+
 On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier: judges and arbiters use the same inherited model and xhigh effort as attackers. This Codex exception does not weaken other hosts' prohibitions on fast or cheap judges and arbiters. If `--ultra` is requested in Codex, run `--high` and disclose:
 
 ```text
@@ -112,7 +123,7 @@ Gemini support as a reason to add a separate Gemini-only skill package.
 
 ## Sequential Fallback
 
-If an environment cannot spawn subagents, run the same roles sequentially and disclose it:
+If the selected platform adapter permits sequential fallback and the environment cannot spawn subagents, run the same roles sequentially and disclose it:
 
 ```text
 Note: subagents were unavailable, so adversarial-review roles were run sequentially.

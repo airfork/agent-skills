@@ -1,4 +1,6 @@
 require "minitest/autorun"
+require "open3"
+require "tmpdir"
 require "yaml"
 
 class ModelTierContractTest < Minitest::Test
@@ -91,7 +93,7 @@ class ModelTierContractTest < Minitest::Test
 
     catalog = read("CATALOG.md")
     assert_includes catalog, "| Skill | Path | Category | Status | Install | Recommended model tier | Description |"
-    assert_match(/^\| `code-review` .* \| `deep` model tier; use the `standard` model tier only for lower-cost routine reviews \|/, catalog)
+    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\); use GPT-5\.6 Terra \(`standard` repository model tier\) only for lower-cost routine reviews \|/, catalog)
   end
 
   def test_model_review_reports_record_execution_provenance
@@ -194,5 +196,93 @@ class ModelTierContractTest < Minitest::Test
     portable_effort_policy = "If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback."
     assert_includes adversarial_skill, portable_effort_policy
     refute_includes adversarial_skill, "If the host cannot enforce xhigh effort, continue only with disclosure."
+  end
+
+  def test_review_intensity_parser_separates_model_tiers
+    skill = read("skills/codex-cursor/code-review/SKILL.md")
+    section = skill[/## Tier Parsing And Help\n(?<body>.*?)(?=\nIf the user asks)/m, :body]
+    refute_nil section
+    aliases = section.scan(/^\| `([^`]+)` \| `([^`]+)` \|$/)
+      .flat_map { |names, tier| names.split(", ").map { |name| [name, tier] } }
+      .to_h
+
+    refute aliases.key?("fast")
+    assert_includes skill, "| `standard` model tier with `deep` review intensity | `standard` model tier | `deep` review intensity |"
+    assert_includes skill, "| `quick` and `deep` review intensity | unchanged | stop and ask which review intensity to use |"
+    assert_includes skill, "Model-tier phrases select only the Codex model and never select review intensity."
+  end
+
+  def test_quick_parent_effort_remains_low_cost
+    skill = read("skills/codex-cursor/code-review/SKILL.md")
+    adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+
+    assert_includes skill, "For `quick`, prep stays inline with the parent; do not spawn a prep subagent."
+    assert_includes adapter, "For `quick`, keep the current parent reasoning effort; quick is the low-cost inline tier."
+    assert_includes adapter, "For `standard`, `high`, and `deep`, run the parent session at high reasoning effort"
+    refute_includes adapter, "Run review sessions at high parent reasoning effort too."
+  end
+
+  def test_codex_adversarial_fallback_is_fail_closed
+    adapter = read("skills/general/adversarial-review/platform-adapters.md")
+
+    assert_includes adapter, "The Codex fail-closed rule above takes precedence over the portable sequential fallback below."
+    assert_includes adapter, "write the complete role prompt and review packet to stdin, close stdin, and capture the combined startup transcript"
+    assert_includes adapter, "--model <selected-gpt-5.6-slug>"
+    refute_includes adapter, "If an environment cannot spawn subagents, run the same roles sequentially and disclose it:"
+  end
+
+  def test_base_branch_fallback_executes_without_origin_head
+    skill = read("skills/codex-cursor/code-review/SKILL.md")
+    script = skill[/# BEGIN BASE_BRANCH_RESOLUTION\n(?<body>.*?)# END BASE_BRANCH_RESOLUTION/m, :body]
+    refute_nil script
+
+    Dir.mktmpdir("model-tier-base") do |dir|
+      _out, err, status = Open3.capture3("git", "init", "-q", chdir: dir)
+      assert status.success?, err
+
+      out, err, status = Open3.capture3("sh", "-c", "#{script}\nprintf '%s\\n' \"$BASE_BRANCH\"", chdir: dir)
+      assert status.success?, err
+      assert_equal "main", out.strip
+
+      _out, err, status = Open3.capture3(
+        "git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/trunk", chdir: dir
+      )
+      assert status.success?, err
+      out, err, status = Open3.capture3("sh", "-c", "#{script}\nprintf '%s\\n' \"$BASE_BRANCH\"", chdir: dir)
+      assert status.success?, err
+      assert_equal "trunk", out.strip
+    end
+  end
+
+  def test_adversarial_natural_language_critique_is_chat_only
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    policy = "For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file."
+
+    assert_includes skill, policy
+    assert_includes skill, "Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation."
+  end
+
+  def test_codex_model_inheritance_is_structurally_guarded
+    agent_paths = Dir.glob(File.join(REPO_UNDER_TEST, "skills", "*", "*", "agents", "codex", "*.toml"))
+    refute_empty agent_paths
+    agent_paths.each do |path|
+      refute_match(/^model\s*=/, File.read(path), path)
+    end
+
+    paths = ACTIVE_METADATA.map { |path| File.join(REPO_UNDER_TEST, path) } + active_codex_skill_files
+    versions = paths.flat_map { |path| File.read(path).scan(/\bGPT-\d+(?:\.\d+)?\b/i) }
+      .map(&:upcase).uniq.sort
+    assert_equal ["GPT-5.6"], versions
+
+    runner = read("scripts/run-codex-5.6-skill-review")
+    assert_match(/"--model", slug/, runner)
+    assert_includes runner, "stdin.write(review_prompt)"
+    assert_includes runner, "stdin.close"
+    assert_operator runner.index("mismatches = expected.reject"), :<, runner.index("File.write(report_path, report)")
+  end
+
+  def test_catalog_disambiguates_model_tier_from_review_intensity
+    catalog = read("CATALOG.md")
+    assert_match(/^\| `code-review` .* \| GPT-5\.6 Sol \(`deep` repository model tier\); use GPT-5\.6 Terra \(`standard` repository model tier\) only for lower-cost routine reviews \|/, catalog)
   end
 end

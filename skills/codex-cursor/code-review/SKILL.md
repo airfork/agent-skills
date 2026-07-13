@@ -73,10 +73,23 @@ Review mode requires an explicit tier in the user's review request. Recognize on
 
 | Alias | Tier |
 |-------|------|
-| `q`, `fast` | `quick` |
+| `q` | `quick` |
 | `std`, `normal`, `default` | `standard` |
 | `thorough` | `high` |
 | `xhigh`, `max`, `full` | `deep` |
+
+Model-tier phrases select only the Codex model and never select review intensity.
+Treat a tier word as review intensity only when it explicitly qualifies review,
+intensity, or the `$code-review` invocation. Use these interpretation fixtures:
+
+| Request fragment | Model selection | Review intensity |
+|------------------|-----------------|------------------|
+| `standard` model tier with `deep` review intensity | `standard` model tier | `deep` review intensity |
+| `quick` and `deep` review intensity | unchanged | stop and ask which review intensity to use |
+
+If multiple explicit review-intensity qualifiers conflict, stop and ask which
+one to use. Do not infer review intensity from Luna, Terra, Sol, or the
+repository model-tier names `fast`, `standard`, and `deep` by themselves.
 
 If the user asks for review without a recognizable tier, or if the request only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print this help text and stop:
 
@@ -135,7 +148,7 @@ Review depth tracks reasoning effort at least as much as prompt structure. The t
 
 | Role | Policy |
 |------|--------|
-| Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
+| Prep | For `quick`, prep stays inline with the parent; do not spawn a prep subagent. At other tiers, run inline unless a cheap read-only prep subagent is clearly useful. |
 | Finder | Inherit the parent/default model at **high** reasoning effort for `standard`/`high`, and **xhigh** (or the host's maximum) for `deep`. In Codex, spawn the named `review-finder` agent (`review-finder-deep` at `deep`); the agent definitions in [agents/codex/](agents/codex/) pin the effort and a read-only sandbox. |
 | Verifier | Use the same model and effort policy as finders at every tier. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; never downgrade verifier model quality or effort relative to the finders. On other hosts, retain the existing prohibition on a downgraded or fast verifier model. A single REFUTED vote kills a finding, so verifier quality directly controls what survives. In Codex, spawn `review-verifier` (`review-verifier-deep` at `deep`). |
 
@@ -198,7 +211,11 @@ Run prep inline unless a cheap read-only prep subagent is clearly useful.
 3. Resolve the base only when branch commits are in scope:
 
    ```bash
-   BASE_BRANCH=$(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo main)
+   # BEGIN BASE_BRANCH_RESOLUTION
+   BASE_BRANCH=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || true)
+   BASE_BRANCH=${BASE_BRANCH#origin/}
+   BASE_BRANCH=${BASE_BRANCH:-main}
+   # END BASE_BRANCH_RESOLUTION
    BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null || git merge-base HEAD "${BASE_BRANCH}" 2>/dev/null || true)
    HEAD_SHA=$(git rev-parse HEAD)
    ```

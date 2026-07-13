@@ -37,7 +37,7 @@ Activate adversarial-review for docs/spec.md docs/plan.md
 Run adversarial-review on docs/spec.md docs/plan.md --high
 ```
 
-Natural-language equivalents apply, such as "run adversarial review on the payments spec and plan."
+Natural-language equivalents apply, such as "run adversarial review on the payments spec and plan." For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file. Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation.
 
 Inputs are repository files only: a spec, a plan, or both. Do not review pasted text, tickets, or external docs in v1. If both a spec and plan are present, enable the coverage mapper and spec-plan drift angles. If only a plan is present, enable feasibility checks. If only a spec is present, skip plan-only angles.
 
@@ -97,7 +97,7 @@ Read [judge-rubric.md](judge-rubric.md), then send grouped candidates to read-on
 
 Assign stable IDs to promoted findings in order: `AR-001`, `AR-002`, and so on. Report at most 50 findings; aggregate overflow by category and severity.
 
-When `--report-only` is set, stop after cull and write the report. Do not revise, reject, run resolution checks, run the round-2 fresh sweep, or mark unresolved findings as stuck.
+When explicit `--report-only` or the chat-only natural-language critique mode is set, stop after cull. Explicit `--report-only` writes the report file; chat-only critique returns the same findings and metrics only in chat. Do not revise, reject, run resolution checks, run the round-2 fresh sweep, or mark unresolved findings as stuck.
 
 ### 5. Revise Or Reject
 
@@ -140,7 +140,7 @@ Open questions must include both positions: the judge's evidence and consequence
 
 ## Report
 
-Write a chat summary and a report file. By default, place the report next to the first reviewed document as `<doc-stem>-review.md`. On re-review, append a new round section to the existing report instead of overwriting it.
+For an explicit `$adversarial-review` invocation, explicit `--report-only`, or an explicit request to revise or fix, write a chat summary and a report file. By default, place the report next to the first reviewed document as `<doc-stem>-review.md`. On re-review, append a new round section to the existing report instead of overwriting it. In chat-only natural-language critique mode, return the report contents in chat and do not write a file.
 
 For `--report-only`, replace the convergence verdict with `REPORT ONLY - N findings` and emit only Findings and Metrics; use `ID | Category | Severity | Location | Summary` with no Resolution column. In this mode, do not emit Changelog, Rejected Findings, or Open Questions because no revision or resolution occurred.
 
