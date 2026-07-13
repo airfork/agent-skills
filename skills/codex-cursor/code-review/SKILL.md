@@ -76,22 +76,22 @@ Review mode requires an explicit tier in the user's review request. Recognize on
 | `q` | `quick` |
 | `std`, `normal`, `default` | `standard` |
 | `thorough` | `high` |
-| `xhigh`, `max`, `full` | `deep` |
+| `full` | `deep` |
 
-Model-tier phrases select only the Codex model and never select review intensity.
+Model-tier phrases describe the user's parent-model choice; they never change the active Codex model or select review intensity. If a model-tier phrase conflicts with the active parent model, disclose the mismatch and stop so the user can restart with the requested model.
 Treat a tier word as review intensity only when it explicitly qualifies review,
 intensity, or the `$code-review` invocation. Use these interpretation fixtures:
 
-| Request fragment | Model selection | Review intensity |
-|------------------|-----------------|------------------|
-| `standard` model tier with `deep` review intensity | `standard` model tier | `deep` review intensity |
+| Request fragment | Parent-model expectation | Review intensity |
+|------------------|--------------------------|------------------|
+| `standard` model tier with `deep` review intensity | GPT-5.6 Terra expected in the parent; do not switch models | `deep` review intensity |
 | `quick` and `deep` review intensity | unchanged | stop and ask which review intensity to use |
 
 If multiple explicit review-intensity qualifiers conflict, stop and ask which
 one to use. Do not infer review intensity from Luna, Terra, Sol, or the
 repository model-tier names `fast`, `standard`, and `deep` by themselves.
 
-If the user asks for review without a recognizable tier, or if the request only names a target such as `staged`, `branch`, `working tree`, or `PR #123`, print this help text and stop:
+For a tierless explicit `$code-review` invocation or command-style request, print the help text and stop. For a tierless ordinary natural-language review request, ask the user conversationally to choose an intensity. The help text is:
 
 ```text
 Usage:
@@ -122,7 +122,7 @@ Examples:
   Use $code-review --fix --pr to review branch changes with high intensity.
 ```
 
-Do not silently default to `standard` for review requests. For an explicit `$code-review` invocation without a tier, print the help text verbatim and stop. For natural-language review requests without a tier, ask the user conversationally to choose one (summarizing the four tiers) unless the surrounding instructions clearly provide a tier.
+Do not silently default to `standard` for review requests. When asking conversationally, summarize the four tiers unless the surrounding instructions already provide an intensity.
 
 ## Intensity
 

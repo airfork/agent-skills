@@ -118,6 +118,8 @@ class ModelTierContractTest < Minitest::Test
       assert_includes text, "reasoning effort: high"
       assert_includes text, "- Invocation: `ruby scripts/run-codex-5.6-skill-review #{name}`"
       assert_includes text, "## Model verdict"
+      assert_includes text, "## Parent disposition"
+      assert_includes text, "- Unresolved concrete blockers: 0"
     end
   end
 
@@ -184,6 +186,7 @@ class ModelTierContractTest < Minitest::Test
     assert_includes code_skill, core_policy
     assert_includes code_adapter, codex_policy
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> -c model_reasoning_effort=high"
+    assert_includes code_adapter, 'codex exec --model <selected-gpt-5.6-slug> -c model_reasoning_effort="<host-maximum-effort>" -'
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> --profile review"
     refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
 
@@ -200,16 +203,21 @@ class ModelTierContractTest < Minitest::Test
 
   def test_review_intensity_parser_separates_model_tiers
     skill = read("skills/codex-cursor/code-review/SKILL.md")
-    section = skill[/## Tier Parsing And Help\n(?<body>.*?)(?=\nIf the user asks)/m, :body]
+    section = skill[/## Tier Parsing And Help\n(?<body>.*?)(?=\nFor a tierless explicit)/m, :body]
     refute_nil section
     aliases = section.scan(/^\| `([^`]+)` \| `([^`]+)` \|$/)
       .flat_map { |names, tier| names.split(", ").map { |name| [name, tier] } }
       .to_h
 
     refute aliases.key?("fast")
-    assert_includes skill, "| `standard` model tier with `deep` review intensity | `standard` model tier | `deep` review intensity |"
+    refute aliases.key?("xhigh")
+    refute aliases.key?("max")
+    assert_includes skill, "| `standard` model tier with `deep` review intensity | GPT-5.6 Terra expected in the parent; do not switch models | `deep` review intensity |"
     assert_includes skill, "| `quick` and `deep` review intensity | unchanged | stop and ask which review intensity to use |"
-    assert_includes skill, "Model-tier phrases select only the Codex model and never select review intensity."
+    assert_includes skill, "Model-tier phrases describe the user's parent-model choice; they never change the active Codex model or select review intensity."
+    assert_includes skill, "If a model-tier phrase conflicts with the active parent model, disclose the mismatch and stop so the user can restart with the requested model."
+    assert_includes skill, "For a tierless explicit `$code-review` invocation or command-style request, print the help text and stop."
+    assert_includes skill, "For a tierless ordinary natural-language review request, ask the user conversationally to choose an intensity."
   end
 
   def test_quick_parent_effort_remains_low_cost
