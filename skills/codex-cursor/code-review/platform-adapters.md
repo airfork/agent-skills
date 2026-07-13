@@ -69,11 +69,21 @@ For Codex generic fallback subtasks, explicitly preserve the parent session's se
 
 When installed, spawn finders and verifiers as these named agents. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders and must not receive lower reasoning effort. On other hosts, retain their existing verifier-model quality floors. If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
 
-The named agents cover only the finder and verifier roles; the parent session still does prep, candidate grouping, dedup, and synthesis. Run review sessions at high parent reasoning effort too — e.g. `codex -c model_reasoning_effort=high`, or a dedicated profile in `config.toml`:
+The named agents cover only the finder and verifier roles; the parent session still does prep, candidate grouping, dedup, and synthesis. Run review sessions at high parent reasoning effort too. When starting a fresh process, preserve the selected model explicitly:
+
+```bash
+codex --model <selected-gpt-5.6-slug> -c model_reasoning_effort=high
+```
+
+With a dedicated effort profile in `config.toml`, still pass the selected model on invocation:
 
 ```toml
 [profiles.review]
 model_reasoning_effort = "high"
+```
+
+```bash
+codex --model <selected-gpt-5.6-slug> --profile review
 ```
 
 Codex subagent wrapper:

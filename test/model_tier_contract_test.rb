@@ -181,5 +181,8 @@ class ModelTierContractTest < Minitest::Test
 
     assert_includes code_skill, core_policy
     assert_includes code_adapter, codex_policy
+    assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> -c model_reasoning_effort=high"
+    assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> --profile review"
+    refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
   end
 end
