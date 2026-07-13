@@ -8,9 +8,9 @@ For invocation syntax, flags, tiers, targets, and action permissions, see
 
 | Tier | Recommended execution |
 |------|-----------------------|
-| `fast` | GPT-5.4 mini, Claude Sonnet medium, or Gemini low-effort/default. |
-| `standard` | GPT-5.5 medium, Claude Sonnet high, or Gemini default. |
-| `deep` | GPT-5.5 high, Claude Opus 4.8 high, or Gemini's highest available reasoning model. |
+| `fast` | GPT-5.6 Luna, Claude Sonnet medium, or Gemini low-effort/default. |
+| `standard` | GPT-5.6 Terra, Claude Sonnet high, or Gemini default. |
+| `deep` | GPT-5.6 Sol, Claude Opus 4.8 high, or Gemini's highest available reasoning model. |
 | `ultracode` | Claude Opus 4.8 high with UltraCode. |
 
 ## Skills

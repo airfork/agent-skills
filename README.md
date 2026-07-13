@@ -25,9 +25,9 @@ Use these labels in `CATALOG.md` and `skills.yaml`:
 
 | Tier | Codex/OpenAI default | Claude default | Gemini default | Use for |
 |------|---------------------|----------------|----------------|---------|
-| `fast` | GPT-5.4 mini | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |
-| `standard` | GPT-5.5 medium | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |
-| `deep` | GPT-5.5 high | Opus 4.8 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |
+| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |
+| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |
+| `deep` | GPT-5.6 Sol | Opus 4.8 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |
 | `ultracode` | N/A | Opus 4.8 high with UltraCode | N/A | Claude-only workflows that benefit from UltraCode explicitly. |
 
 Model names are local operating labels. Update them when the available model menu changes.
