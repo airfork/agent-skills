@@ -1,0 +1,66 @@
+#!/usr/bin/env ruby
+# Validate a milestone-orchestrator STATE.md canonical block, and optionally
+# cross-check the PLAN.md canonical block. Dependency-free; Ruby 2.6+.
+#
+# Usage: validate-state STATE.md [--plan PLAN.md] [--json]
+#
+# Exit status: 0 valid, 1 findings, 2 usage error.
+require_relative "lib/state_document"
+
+state_path = nil
+plan_path = nil
+json_output = false
+
+args = ARGV.dup
+until args.empty?
+  arg = args.shift
+  case arg
+  when "--plan"
+    plan_path = args.shift
+    abort("--plan requires a path") if plan_path.nil?
+  when "--json"
+    json_output = true
+  when "-h", "--help"
+    puts "Usage: validate-state STATE.md [--plan PLAN.md] [--json]"
+    exit 0
+  else
+    if state_path
+      warn "unexpected argument: #{arg}"
+      exit 2
+    end
+    state_path = arg
+  end
+end
+
+if state_path.nil?
+  warn "Usage: validate-state STATE.md [--plan PLAN.md] [--json]"
+  exit 2
+end
+
+[state_path, plan_path].compact.each do |path|
+  unless File.file?(path)
+    warn "no such file: #{path}"
+    exit 2
+  end
+end
+
+document = MilestoneOrchestrator::StateDocument.new(
+  File.read(state_path),
+  plan_path ? File.read(plan_path) : nil
+)
+document.validate
+
+if json_output
+  puts JSON.pretty_generate(document.report)
+else
+  if document.valid?
+    puts "OK: #{state_path}#{plan_path ? " + #{plan_path}" : ""}"
+  else
+    document.errors.each do |finding|
+      puts "#{finding.code} at #{finding.path}: #{finding.message}"
+    end
+    puts "#{document.errors.length} finding(s)"
+  end
+end
+
+exit(document.valid? ? 0 : 1)

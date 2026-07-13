@@ -1,0 +1,4 @@
+interface:
+  display_name: "Milestone Orchestrator"
+  short_description: "Plan a milestone interactively, then run it unattended to a draft PR"
+  default_prompt: "Use $milestone-orchestrator to plan this milestone with me, then implement it autonomously with multi-agent workers and open a draft PR. Use prepare, run, or status subcommands to enter a specific phase."

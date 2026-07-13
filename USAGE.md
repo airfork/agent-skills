@@ -22,6 +22,7 @@ folder.
 |-------|----------|---------|------------------|---------|
 | `adversarial-review` | `general` | Codex, Claude, Gemini | `deep` | Fresh-context critique of specs, plans, migration plans, architecture designs, and other planning docs before implementation. |
 | `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
+| `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
 | `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
 
 ## `adversarial-review`
@@ -155,6 +156,63 @@ review -> fix -> verify -> commit -> push -> PR/comment
 
 The skill does not support convenience flags such as `--force`, `--no-verify`,
 `--stash`, or `--merge`. Those operations require explicit natural language.
+
+## `milestone-orchestrator`
+
+Use `milestone-orchestrator` for large milestones that deserve an interactive
+design/approval phase (PREPARE) followed by an unattended multi-agent
+implementation run (RUN) that ends in a reviewed draft pull request.
+
+### Invocation
+
+Codex:
+
+```text
+Use $milestone-orchestrator to plan and run the <milestone> milestone
+Use $milestone-orchestrator prepare docs/milestones/<slug>/
+Use $milestone-orchestrator run docs/milestones/<slug>/
+Use $milestone-orchestrator status docs/milestones/<slug>/
+```
+
+Claude Code:
+
+```text
+/milestone-orchestrator <milestone description>
+/milestone-orchestrator run docs/milestones/<slug>/
+```
+
+Natural-language equivalents also apply, such as:
+
+```text
+Plan this milestone with me, then implement it autonomously and open a draft PR.
+```
+
+### Modes
+
+| Mode | Behavior |
+|------|----------|
+| bare invocation | PREPARE, then after explicit approval continue into RUN. |
+| `prepare` | Stop after the reviewed SPEC/PLAN, approval, and STATE initialization. |
+| `run` | Resume RUN from approved milestone artifacts. |
+| `status` | Reconcile STATE against git/host/forge evidence and report; dispatch nothing. |
+
+### Action Rules
+
+- PREPARE is interactive; RUN interrupts the user only for loss of authority,
+  a genuine spec contradiction, exhausted budgets, or infrastructure failure.
+- The coordinator is a manager: during RUN it edits only milestone control
+  artifacts, never implementation files.
+- Default publication authority is local commits + push + one draft PR with
+  the configured human git author. PR-ready and reviewer notification require
+  their own recorded flags. Merge and deploy are never automated.
+- Final whole-branch review is mandatory before handoff: Codex workers use
+  this repository's `code-review` skill, Claude workers use Claude's own
+  `/code-review`.
+- Cleans only run-created worktrees, terminals, and browser tabs recorded in
+  the run's STATE ledger; foreign or ambiguous resources are retained and
+  reported.
+- v1 validation status and deferred layers are recorded in the skill's
+  `references/validation.md`.
 
 ## `ui-drill`
 
