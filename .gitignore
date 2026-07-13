@@ -2,7 +2,7 @@
 *.log
 tmp/
 .tmp/
+.worktrees/
 
 # Per-skill mutable state (see AGENTS.md and docs/repo-guidelines.md)
 skills/**/state/
-
