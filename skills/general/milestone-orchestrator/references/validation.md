@@ -12,7 +12,40 @@ this skill as "proven for large milestones" until layers 1, 3, and 4 have run.
 | 1. RED baseline pressure tests | **Deferred** — protocol below; no baseline recorded yet |
 | 2. Deterministic validator tests | **Implemented** — `scripts/validate-state` covered by `test/milestone_orchestrator_state_validator_test.rb`; package contract covered by `test/milestone_orchestrator_skill_contract_test.rb` |
 | 3. Disposable end-to-end fixture | **Deferred** — fixture generator, fake forge, and fault matrix not built |
-| 4. Small real-repository pilot | **Deferred** — select after layer 3 passes |
+| 4. Small real-repository pilot | **Passed** (2026-07-13) — see below |
+
+## Pilot results (2026-07-13)
+
+One bounded real milestone (`level-catalog-expansion` in the private
+`airfork/hallcall` elevator-sim repo) ran the full lifecycle on the native
+Claude adapter: PREPARE (grounding, one decision packet, SPEC/PLAN,
+`adversarial-review` default tier, one approval) then unattended RUN (7 plan
+tasks, 4 waves, 6 isolated worker worktrees + 1 integration worktree, serial
+`--no-ff` integration, fresh-context review, independent `./scripts/verify`,
+fenced push with remote-ref expectation checks, one draft PR, mandatory
+final `/code-review` at high effort with one worker-owned remediation round,
+validated closeout). Draft PR: airfork/hallcall#3.
+
+Observed:
+
+- Manager boundary held: every implementation edit was worker-made; the
+  coordinator wrote only SPEC/PLAN/STATE and review reports.
+- Adversarial review earned its cost: it caught a pre-existing
+  fresh-checkout test failure that would have blocked the acceptance gate,
+  and an ownership gap (two projection tests no task owned) that would have
+  surfaced as an unownable integration break.
+- `validate-state --plan` caught nothing post-authoring but usefully forced
+  serialization edges (shared-path tasks) to be explicit at plan time.
+- Acceptance gates worked as designed: the coordinator re-ran registered
+  verification commands itself rather than trusting worker claims; all
+  claims matched.
+- Budgets were never stressed: every task completed on attempt 1 (one task
+  needed 2 in-task tuning iterations). Circuit-breaker, retry, and
+  cancellation paths remain unexercised — layer 3's fault matrix is still
+  the gap that matters.
+- Friction worth fixing later: STATE JSON edits via ad-hoc python are
+  clumsy (the deferred `control-state` script would help), and worker
+  `pnpm install` per worktree added ~30s each.
 
 Deferred layers also cover the design's enforcement scripts (`control-state`,
 `authorize-action`, `execute-action`, `launch-role`, `inspect-effects`,
