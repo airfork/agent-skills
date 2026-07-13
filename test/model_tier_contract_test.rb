@@ -38,8 +38,9 @@ class ModelTierContractTest < Minitest::Test
     EXPECTED_HUMAN_ROWS.each do |path, rows|
       text = read(path)
 
-      rows.each_value do |row|
-        assert_includes text, row, path
+      rows.each do |tier, row|
+        matches = text.lines.grep(/\A\| `#{Regexp.escape(tier)}` \|/).map(&:chomp)
+        assert_equal [row], matches, "#{path} #{tier} row"
       end
     end
   end
@@ -170,5 +171,15 @@ class ModelTierContractTest < Minitest::Test
     github_fallback = "If `gh` is unavailable or unauthenticated for a PR target or requested GitHub action, stop before review or mutation and report: `GitHub CLI authentication is required for this PR workflow.`"
     assert_includes code_skill, github_fallback
     assert_includes code_adapter, github_fallback
+  end
+
+  def test_generic_fallback_preserves_the_selected_parent_model
+    code_skill = read("skills/codex-cursor/code-review/SKILL.md")
+    code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+    core_policy = "When using generic fallback subtasks, explicitly preserve the parent session's selected model; if the host cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation."
+    codex_policy = "For Codex generic fallback subtasks, explicitly preserve the parent session's selected GPT-5.6 model; if Codex cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation."
+
+    assert_includes code_skill, core_policy
+    assert_includes code_adapter, codex_policy
   end
 end

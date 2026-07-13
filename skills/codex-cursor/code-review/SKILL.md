@@ -141,6 +141,8 @@ Review depth tracks reasoning effort at least as much as prompt structure. The t
 
 If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation. If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.
 
+When using generic fallback subtasks, explicitly preserve the parent session's selected model; if the host cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation.
+
 Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
 
 If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
