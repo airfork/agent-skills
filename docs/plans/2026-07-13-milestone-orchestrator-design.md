@@ -87,13 +87,14 @@ The skill has one shared orchestration policy and three runtime adapters:
    tasks and dependencies, dispatches workers with injected lifecycle
    preambles, waits for `worker_done`, `escalation`, and `decision_gate`
    messages, routes worktrees, and records cleanup.
-2. **Native Codex adapter.** Uses a Sol-class coordinator, `/goal`, custom or
-   built-in Codex agents, native subagent controls, and this repository's
-   `code-review` skill.
-3. **Native Claude adapter.** Uses a Fable-class coordinator, `/goal`, custom
-   Claude subagents with worktree isolation, and Claude's own `/code-review`
-   workflow. It must not invoke this repository's Codex-oriented `code-review`
-   skill as a substitute.
+2. **Native Codex adapter.** Uses a Sol-class coordinator, capability-probed
+   long-running coordination (`/goal` when available or the explicit STATE
+   loop), custom or built-in Codex agents, native subagent controls, and this
+   repository's `code-review` skill.
+3. **Native Claude adapter.** Uses a Fable-class coordinator,
+   capability-probed long-running coordination, custom Claude subagents with
+   worktree isolation, and Claude's own `/code-review` workflow. It must not
+   invoke this repository's Codex-oriented `code-review` skill as a substitute.
 
 Orca is not a secondary appendix. Its adapter defines the full lifecycle and is
 implemented first. The native adapters describe how to preserve that lifecycle
@@ -108,17 +109,23 @@ The shared policy uses four capability roles:
    milestone control artifacts after validating the coordinator lease, schema,
    expected source SHA, and transition. It is the coordinator's physical writer,
    not a second logical STATE owner.
-3. **Verification executor:** Independent of the implementer. It runs required
-   gates at an exact clean-tree SHA and emits immutable verifier records.
-4. **External-action executor:** The only role with scoped publication and Orca
-   cleanup capabilities. It accepts allowlisted actions, rechecks the current
-   authority and epoch immediately before submission, and exposes no merge or
-   deploy operation.
+3. **Verification executor:** Independent of the implementer. It resolves only
+   approved command IDs from canonical PLAN data, runs them at an exact
+   clean-tree SHA, and emits immutable verifier records.
+4. **External-action executor:** A protected service or distinct principal and
+   the only role with scoped publication and Orca cleanup credentials. It
+   accepts typed, one-shot allowlisted actions, rechecks current authority,
+   epoch, subject, effects, and postconditions immediately before submission,
+   and exposes no merge or deploy operation.
 
-An adapter must probe and record how it enforces these boundaries. If prevention
-is unavailable, a reliable attributable control must detect violations; RUN is
-blocked when neither prevention nor detection can protect the manager boundary,
-or when publication/cleanup capability cannot be isolated from ordinary workers.
+An adapter must probe and record how it enforces these boundaries. Coordinator
+write prevention may fall back to reliable attributable detection, but external
+credentials, the control root, and the executor endpoint require OS-enforced
+sandbox/container/distinct-principal isolation from ordinary workers. Same-user
+file modes, hidden paths, and bearer tokens are not isolation boundaries. RUN is
+blocked when the adapter cannot prevent workers from reading credentials/control
+state, reaching privileged sockets/process state, or bypassing the constrained
+executor.
 
 ## Repository artifacts
 
@@ -136,13 +143,25 @@ they exist. Otherwise create a directory such as
   per-attempt host IDs, task stage and condition, model/agent, resources, commits,
   mutable acceptance evidence, review results, authority, assumptions, retained
   resources, and next-ready work.
+- `<git-common-dir>/milestone-orchestrator/<run-id>/evidence.jsonl` — protected,
+  append-only, digest-chained verifier, scan, effect, grant, action, CI, cleanup,
+  and terminal closeout evidence. It is outside every worktree and writable only
+  by capability services.
 
 `SPEC.md` and `PLAN.md` are stable inputs during RUN. Changes to either create a
 new version and digest through an explicit recorded replan. `STATE.md` is
-updated after every material transition and finalized in the milestone branch.
+updated after material pre-publication transitions. Before each publication
+cycle, one finite control-anchor commit snapshots the protected evidence
+ledger's current sequence/digest and exact implementation subject. Post-push
+action, CI, final-review, cleanup, and closeout evidence remains in the external
+ledger and PR/handoff surfaces rather than creating an infinite audit-commit
+loop. A remediation that changes implementation starts one new anchor cycle.
 Its schema defines stable IDs, enums, legal transitions, evidence freshness,
-source commits, dependency and ownership invariants, schema-version migration,
-and closeout requirements. One coordinator owns the STATE transition stream;
+implementation subjects, dependency and ownership invariants, and closeout
+requirements. Schema v1 fails closed on unknown versions; when a later schema
+ships, it must include a fenced, atomic, idempotent migration from every still-
+supported prior version rather than requiring manual STATE edits. One
+coordinator owns the STATE transition stream;
 workers return structured evidence for it to adjudicate, and the fenced control
 writer performs the actual allowlisted file update. The coordinator may cause
 edits only to these orchestration/control artifacts during RUN; those edits are
@@ -262,7 +281,8 @@ Create `STATE.md`, record the approved spec and plan versions, and verify:
 - Chrome DevTools and/or Orca embedded-browser availability when relevant
 - Worktree base and integration strategy
 - Publication envelope: enabled actions, forge/repository, remote, base/head refs,
-  expected remote OID, existing-PR identity or idempotent creation rule,
+  tagged remote-ref expectation (`absent` plus base OID for first publication or
+  `present` plus exact OID for updates), existing-PR identity or idempotent creation rule,
   force-push prohibition, and distinct ready/reviewer-notification flags
 - Derived effects for each permitted Git/forge action: branch and PR workflows,
   preview/production deployments, privileged CI, auto-merge, merge queues, bots,
@@ -451,11 +471,15 @@ exists unless PREPARE recorded an opt-out. Only the constrained external-action
 executor can publish; ordinary workers and the coordinator receive no
 publication, merge, deploy, cross-run cleanup, or credential-export capability.
 Immediately before submission the executor validates the current lease token,
-run epoch, action flag, scoped credential, target identity, and approved direct
-and derived effects, then emits an immutable audit record.
+run epoch, typed action schema, scoped credential, target identity, anchored
+subject/scan, and a fresh effect snapshot derived from repository configuration
+and authoritative forge/Orca APIs, then emits an immutable audit record. Callers
+cannot supply their own claimed effect list.
 
-Before push, fetch and compare the recorded remote OID; use an explicit
-non-force refspec and stop on mismatch. Draft-PR creation is idempotent against
+Before push, fetch and compare a tagged remote-ref expectation: an initial push
+must prove the full ref is absent and scans base-to-head; an update must match
+the recorded OID. Use an explicit non-force refspec and stop on mismatch.
+Draft-PR creation is idempotent against
 the recorded forge, base, head, and PR identity. Later remediation updates the
 same PR. Commit messages use the configured human author and contain no AI
 attribution.
@@ -486,7 +510,8 @@ remain or the recorded remediation ceiling is reached.
 Run the full repository gate and confirm the PREPARE-time required-check snapshot
 with bounded polling. Infrastructure failures use the recorded retry budget;
 pending or uncertain CI leaves the PR draft and produces a blocker rather than
-an indefinite wait. Finalize the acceptance matrix and `STATE.md`, mark the PR
+an indefinite wait. Finalize the acceptance matrix and append terminal evidence
+to the protected ledger, mark the PR
 ready only when its separate flag and all required gates permit it, clean
 lifecycle-owned Orca resources, and stop before merge or deployment.
 
@@ -594,14 +619,18 @@ integrated and independently verified:
 3. Re-list the full worktree and reconcile any replacement terminal handle.
    After a runtime-generation change, retain the terminal unless ownership can
    still be proven from the worktree and dispatch.
-4. Re-list browser tabs, map the recorded `browserPageId` to its current mutable
-   index immediately before closure, and verify the stable identity again.
+4. Re-list browser tabs and close by the recorded stable `browserPageId` when
+   supported. Use page-ID-to-current-index reconciliation only as a
+   capability-probed legacy fallback, with identity revalidation immediately
+   before closure.
 5. Close only run-created, non-configured terminals and tabs whose identity is
    unambiguous.
 6. Remove the completed child worktree.
 7. Verify the same stable resources disappeared from Orca terminal, tab, and worktree
    listings.
-8. Update `STATE.md` with cleanup evidence.
+8. Append cleanup evidence to the protected external ledger. Before publication,
+   the next finite STATE anchor may include its prefix digest; after final push,
+   do not create another branch commit solely to report cleanup.
 
 Never close pre-existing configured tabs, terminals, browsers, or worktrees.
 Never force-remove a worktree containing unpreserved work. On failure, retain
@@ -628,8 +657,9 @@ personal data, or secret-bearing screenshots in prompts, task payloads,
 repository artifacts, commits, or pull requests. Keep necessary raw captures in
 a git-ignored transient location with an explicit retention deadline, delete
 them at safe closeout, and run the repository's secret scan (or a documented
-fallback) before every commit and push. Before publication, fail closed unless
-the scanner covers the exact expected-remote-OID-to-head outgoing object range,
+  fallback) before every commit and push. Before publication, fail closed unless
+  the scanner proves the tagged remote expectation and covers base-to-head for
+  an absent branch or exact remote-OID-to-head for an existing branch,
 commit metadata, referenced blobs, milestone control documents, referenced LFS
 objects, and generated or uploaded artifacts. Record scanner identity, scope,
 exclusions, source and remote SHAs, and result. A detection triggers credential
@@ -639,7 +669,9 @@ rotation and history remediation rather than merely deleting the final-tree file
 
 ### Native Codex
 
-- Run a Sol-class root coordinator with `/goal` for long-running execution.
+- Run a Sol-class root coordinator. Use `/goal` only when the capability probe
+  proves it; otherwise use a tested explicit coordinator loop over STATE and
+  native agent/process primitives or mark the adapter blocked.
 - Probe native subagent/worktree support and this repository's compatible
   `code-review` installation before RUN; record host and workflow versions plus
   the compatibility decision, then use an approved compatible host
@@ -659,7 +691,9 @@ rotation and history remediation rather than merely deleting the final-tree file
 
 ### Native Claude Code
 
-- Run a Fable-class custom coordinator with `/goal`.
+- Run a Fable-class custom coordinator. Use `/goal` only when the capability
+  probe proves it; otherwise use a tested explicit coordinator loop over STATE
+  and native agent/process primitives or mark the adapter blocked.
 - Probe subagent/worktree support and Claude's compatible `/code-review`
   workflow before RUN; record host and workflow versions plus the compatibility
   decision. Use an approved compatible Claude or Orca review route, or block
@@ -689,24 +723,41 @@ external-action executor.
 ```text
 skills/general/milestone-orchestrator/
   SKILL.md
+  agents/
+    openai.yaml
   references/
     platform-adapters.md
     intake.md
     task-contracts.md
     state-schema.md
+    validation.md
   assets/
     spec-template.md
     plan-template.md
     state-template.md
   scripts/
+    lib/
+      state_document.rb
+      lease_store.rb
+      audit_log.rb
     validate-state
+    control-state
+    authorize-action
+    execute-action
+    launch-role
+    inspect-effects
+    run-verification
+    scan-outgoing
+    run-pressure-suite
     create-fixture-repo
 ```
 
 Keep `SKILL.md` focused on the shared lifecycle and selection rules. Put Orca,
 Codex, and Claude mechanics in `references/platform-adapters.md`; detailed question,
-packet, and state contracts belong in references. Templates are output assets.
-Scripts provide deterministic validation and disposable test setup.
+packet, state, and validation contracts belong in references. Templates are
+output assets. Scripts provide deterministic validation, fenced control and
+external-action boundaries, independent evidence, pressure scoring, and
+disposable test setup.
 
 Adding the finalized skill requires synchronized entries in `CATALOG.md` and
 `skills.yaml`. Installation behavior is not changed unless explicitly requested.
