@@ -309,6 +309,8 @@ Output at most **4 findings**, most-severe first, one line each: `path/to/file.e
 
 ### Step 3: Parallel Finders
 
+Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once.
+
 Dispatch all finder angles for the chosen tier in parallel as read-only subagents. The user's invocation of review mode is permission to spawn these read-only subagents; do not ask again. Use the host's current parallel-task or subagent tools. If no such tools exist, run the same angles sequentially and disclose that in the final report.
 
 Each finder gets: the shared read-only wrapper, the scope block, ONE angle from the roster below, and the shared output contract. Do not give finders the never-report list; filtering happens at verify and synthesis, not in the finder's head.

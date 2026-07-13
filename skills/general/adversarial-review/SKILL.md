@@ -134,7 +134,9 @@ At the cap, use this verdict line:
 DID NOT CONVERGE - N findings remain open
 ```
 
-Open questions must include both positions: the judge's evidence and consequence, plus the author's rationale or failed-fix summary. Stuck `CRITICAL` or `HIGH` findings mean the review did not pass.
+Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity. `PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding.
+
+Open questions must include both positions: the judge's evidence and consequence, plus the author's rationale or failed-fix summary.
 
 ## Report
 

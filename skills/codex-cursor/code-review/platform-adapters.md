@@ -44,6 +44,8 @@ Typical mapping:
 | Wait for results | Collect all outputs before dedupe or filtering |
 | Clean up | Close completed agents/tasks if the host exposes an explicit close operation |
 
+Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once.
+
 Install the named agent definitions from `agents/codex/` into `~/.codex/agents/` (one-time step; `scripts/sync-skills` does not copy them):
 
 ```bash
