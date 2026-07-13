@@ -59,7 +59,7 @@ They pin `sandbox_mode = "read-only"` and per-role reasoning effort, and inherit
 | Verifier (`standard`, `high`) | `review-verifier` | `high` |
 | Verifier (`deep`) | `review-verifier-deep` | `xhigh` |
 
-Spawn finders and verifiers as these named agents. Never substitute a downgraded or "fast" model for verifiers at any tier — verifier quality directly controls what survives. If the named agents are not installed and the host cannot set per-subagent reasoning effort, continue with inherited settings and disclose that in the final report.
+Spawn finders and verifiers as these named agents. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders and must not receive lower reasoning effort. On other hosts, retain their existing verifier-model quality floors. If the named agents are not installed and the host cannot set per-subagent reasoning effort, continue with inherited settings and disclose that in the final report.
 
 The named agents cover only the finder and verifier roles; the parent session still does prep, candidate grouping, dedup, and synthesis. Run review sessions at high parent reasoning effort too — e.g. `codex -c model_reasoning_effort=high`, or a dedicated profile in `config.toml`:
 

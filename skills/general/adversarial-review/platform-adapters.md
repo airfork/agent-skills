@@ -63,7 +63,7 @@ If named agents are not installed, or the host cannot prove named-agent config i
 Note: Codex named agents were unavailable or untrusted, so attacker/judge roles inherited the parent settings.
 ```
 
-Never substitute a downgraded or fast model for judges or arbiters. If `--ultra` is requested in Codex, run `--high` and disclose:
+On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier: judges and arbiters use the same inherited model and xhigh effort as attackers. This Codex exception does not weaken other hosts' prohibitions on fast or cheap judges and arbiters. If `--ultra` is requested in Codex, run `--high` and disclose:
 
 ```text
 Note: --ultra is Claude-only; Codex ran the --high pipeline instead.

@@ -88,7 +88,7 @@ The action chain is always `review -> fix -> verify -> commit -> push -> PR/comm
 
 ## Model And Effort Policy
 
-Finder and verifier subagents inherit the parent/default model but must run at elevated reasoning effort: `high` for `standard`/`high` tiers, `xhigh` (or the host maximum) for `deep`. In Codex this is done by spawning the named agents from `agents/codex/` (install them into `~/.codex/agents/`). Verifiers are never downgraded to a faster model at any tier — verifier quality directly controls what survives.
+Finder and verifier subagents inherit the parent/default model but must run at elevated reasoning effort: `high` for `standard`/`high` tiers, `xhigh` (or the host maximum) for `deep`. In Codex this is done by spawning the named agents from `agents/codex/` (install them into `~/.codex/agents/`). On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders. On other hosts, verifiers must not use a downgraded or fast model. Verifier quality directly controls what survives.
 
 ## Design checks
 

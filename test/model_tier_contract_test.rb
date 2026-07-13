@@ -61,4 +61,29 @@ class ModelTierContractTest < Minitest::Test
       refute_match(/GPT-5\.[45]/i, File.read(path), path)
     end
   end
+
+  def test_quality_roles_accept_each_inherited_5_6_model
+    code_skill = read("skills/codex-cursor/code-review/SKILL.md")
+    code_readme = read("skills/codex-cursor/code-review/README.md")
+    code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
+    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
+    adversarial_adapter = read("skills/general/adversarial-review/platform-adapters.md")
+
+    refute_includes code_skill, 'never a downgraded or "fast" model'
+    refute_includes code_readme, "Verifiers are never downgraded to a faster model at any tier"
+    refute_includes code_adapter, 'Never substitute a downgraded or "fast" model for verifiers at any tier'
+    refute_includes adversarial_skill, "Judges and arbiters must never be downgraded to a fast or cheap model."
+    refute_includes adversarial_adapter, "Never substitute a downgraded or fast model for judges or arbiters."
+
+    codex_policy = "On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier"
+    assert_includes code_skill, codex_policy
+    assert_includes code_readme, codex_policy
+    assert_includes code_adapter, codex_policy
+    assert_includes adversarial_skill, codex_policy
+    assert_includes adversarial_adapter, codex_policy
+
+    catalog = read("CATALOG.md")
+    assert_includes catalog, "| Skill | Path | Category | Status | Install | Recommended model tier | Description |"
+    assert_match(/^\| `code-review` .* \| `deep` model tier; use the `standard` model tier only for lower-cost routine reviews \|/, catalog)
+  end
 end

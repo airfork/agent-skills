@@ -15,10 +15,10 @@ For invocation syntax, flags, tiers, targets, and action permissions, see
 
 ## Skills
 
-| Skill | Path | Category | Status | Install | Recommended tier | Description |
+| Skill | Path | Category | Status | Install | Recommended model tier | Description |
 |-------|------|----------|--------|---------|------------------|-------------|
 | `adversarial-review` | `skills/general/adversarial-review/` | `general` | Active | Codex, Claude, and Gemini enabled; Cursor disabled | `deep`; heavy mode `ultracode` for Claude-only UltraCode runs | Cross-platform adversarial review workflow for specs and implementation plans, using fresh-context attack angles, refute-or-promote culling, revise/reject loops, and resolution verification before implementation. |
-| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex and Gemini enabled; Cursor disabled | `deep`; use `standard` only for lower-cost routine reviews | Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation and opt-in fix/commit/push/PR flags. |
+| `code-review` | `skills/codex-cursor/code-review/` | `codex-cursor` | Active | Codex and Gemini enabled; Cursor disabled | `deep` model tier; use the `standard` model tier only for lower-cost routine reviews | Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation and opt-in fix/commit/push/PR flags. |
 | `ui-drill` | `skills/claude/ui-drill/` | `claude` | Active | Claude enabled; Codex, Cursor, and Gemini disabled | `standard` | Personal UI/UX critique tutoring course: generates deliberately flawed mockups, grades perception and articulation separately, and adapts a nine-module curriculum via a persistent student model in the skill's git-ignored `state/` folder. |
 
 ## Category Backlog

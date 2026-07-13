@@ -137,7 +137,7 @@ Review depth tracks reasoning effort at least as much as prompt structure. The t
 |------|--------|
 | Prep | Run inline with the parent model unless a cheap read-only prep subagent is clearly useful. |
 | Finder | Inherit the parent/default model at **high** reasoning effort for `standard`/`high`, and **xhigh** (or the host's maximum) for `deep`. In Codex, spawn the named `review-finder` agent (`review-finder-deep` at `deep`); the agent definitions in [agents/codex/](agents/codex/) pin the effort and a read-only sandbox. |
-| Verifier | Same model and effort policy as finders at every tier — never a downgraded or "fast" model. A single REFUTED vote kills a finding, so verifier quality directly controls what survives. In Codex, spawn `review-verifier` (`review-verifier-deep` at `deep`). |
+| Verifier | Use the same model and effort policy as finders at every tier. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; never downgrade verifier model quality or effort relative to the finders. On other hosts, retain the existing prohibition on a downgraded or fast verifier model. A single REFUTED vote kills a finding, so verifier quality directly controls what survives. In Codex, spawn `review-verifier` (`review-verifier-deep` at `deep`). |
 
 If the host cannot set subagent models or reasoning effort, continue with inherited settings and disclose that limitation in the final notes.
 

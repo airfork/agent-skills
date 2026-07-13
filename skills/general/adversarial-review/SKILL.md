@@ -57,7 +57,7 @@ No quick or low tier exists. This skill is for maximum-rigor pre-implementation 
 - Attackers and judges are part of this workflow. Spawn the read-only subagents needed for the selected tier without asking for extra permission.
 - Fresh context is required. Do not let the authoring conversation perform the attack wave. Start attackers with no inherited conversation context when the host allows it.
 - Attackers are read-only but not doc-only. They must read repository files needed to check claims against reality.
-- Judges and arbiters must never be downgraded to a fast or cheap model. If the host cannot enforce xhigh effort, continue only with disclosure.
+- On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier: judges and arbiters use the same inherited model and xhigh effort as attackers, without a relative downgrade. On other hosts, retain the existing prohibition on fast or cheap judges and arbiters. If the host cannot enforce xhigh effort, continue only with disclosure.
 - Do not install Codex agent TOMLs into `~/.codex/agents/` unless the user explicitly asks.
 - The parent may edit only the reviewed spec/plan files during revise. Do not edit implementation files as part of review.
 - The rejection channel is mandatory. Do not "fix" weak or hallucinated objections merely because a judge challenged the document.
