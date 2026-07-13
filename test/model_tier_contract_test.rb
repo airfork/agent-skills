@@ -184,5 +184,15 @@ class ModelTierContractTest < Minitest::Test
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> -c model_reasoning_effort=high"
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> --profile review"
     refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
+
+    adversarial_adapter = read("skills/general/adversarial-review/platform-adapters.md")
+    adversarial_codex_policy = "For Codex fallback roles, require fresh context, the parent session's selected GPT-5.6 model, and xhigh (or the host's maximum) effort; if Codex cannot prove all three, stop and report that the adversarial-review tier was not enforceable."
+    assert_includes adversarial_adapter, adversarial_codex_policy
+    refute_includes adversarial_adapter, "continue with inherited settings only when the user still wants the review"
+
+    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
+    portable_effort_policy = "If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback."
+    assert_includes adversarial_skill, portable_effort_policy
+    refute_includes adversarial_skill, "If the host cannot enforce xhigh effort, continue only with disclosure."
   end
 end

@@ -57,10 +57,10 @@ Version guard:
 - Codex v0.137.0 silently ignored named-agent config; do not rely on named-agent effort or sandbox behavior there.
 - A Windows variant remains unresolved in the design notes. On Windows, disclose if named-agent config cannot be trusted.
 
-If named agents are not installed, or the host cannot prove named-agent config is honored, continue with inherited settings only when the user still wants the review. Disclose the limitation in the report:
+For Codex fallback roles, require fresh context, the parent session's selected GPT-5.6 model, and xhigh (or the host's maximum) effort; if Codex cannot prove all three, stop and report that the adversarial-review tier was not enforceable.
 
 ```text
-Note: Codex named agents were unavailable or untrusted, so attacker/judge roles inherited the parent settings.
+Blocked: Codex could not prove fresh context, selected GPT-5.6 model inheritance, and maximum role effort, so the requested adversarial-review tier was not enforceable.
 ```
 
 On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier: judges and arbiters use the same inherited model and xhigh effort as attackers. This Codex exception does not weaken other hosts' prohibitions on fast or cheap judges and arbiters. If `--ultra` is requested in Codex, run `--high` and disclose:
