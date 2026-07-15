@@ -218,6 +218,18 @@ class MilestoneOrchestratorStateValidatorTest < Minitest::Test
     assert_equal true, report.fetch("valid")
   end
 
+  def test_oversized_attempt_evidence_rejected
+    state = valid_state
+    state["run"]["task_allowlist"] = ["TASK-001"]
+    state["tasks"]["TASK-001"] = {
+      "type" => "implementation", "stage" => "implemented", "condition" => "active",
+      "failure_count" => 0,
+      "attempts" => [{"attempt" => 1, "status" => "completed", "evidence" => "x" * 1200}]
+    }
+    report, _stderr, _exit = run_validator(wrap_state(state))
+    assert_includes error_codes(report), "oversized_evidence"
+  end
+
   def test_task_with_invalid_stage_rejected
     state = valid_state
     state["tasks"]["TASK-001"] = {

@@ -104,6 +104,32 @@ No integration or publication dependency ever points directly at a dispatched
 worker task. Failed, malformed, stale-dispatch, or wrong-pane results release
 nothing.
 
+## Verification execution and long gates
+
+All registered-command runs — acceptance-gate re-runs, integration checks,
+the final repository gate — execute through `scripts/run-verification`: it
+refuses unregistered command IDs, anchors the run to the claimed SHA
+(`--expected-sha`), streams full output to the milestone `evidence/`
+directory, and prints a one-line JSON digest. The digest is the gate
+evidence; the raw output never enters coordinator context.
+
+Commands with registered timeouts over ~10 minutes are **long gates**, and
+field runs are unambiguous about them: implementation workers repeatedly died
+running long gates as backgrounded commands, costing multi-hour stalls and
+manual rescue. Therefore:
+
+- Long gates run coordinator-side (or in a dedicated verification worker),
+  via `run-verification`, in the foreground. Never inside an implementation
+  worker, and never backgrounded.
+- Implementation workers run only registered fast targeted subsets; PLAN
+  must register at least one fast command per implementation task alongside
+  any long gate.
+- A full long-gate run is required when the delta since the last green gate
+  touches runtime code, and at integration and closeout. A delta that is
+  provably docs/comments/test-annotations only (check `git diff --stat`
+  against the last certified SHA) runs the fast subset instead — record the
+  classification with the evidence. When unsure, run the gate.
+
 ## Review and remediation loop
 
 - Fresh-context reviewers for risky tasks and integration boundaries under

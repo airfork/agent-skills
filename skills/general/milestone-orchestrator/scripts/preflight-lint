@@ -1,0 +1,164 @@
+#!/usr/bin/env ruby
+# Preflight lint for milestone-orchestrator PREPARE artifacts. Catches the
+# self-inflicted defects observed across real runs before RUN starts:
+# unresolved decision markers, verification commands that cannot run from a
+# fresh checkout, absolute-path portability traps, long gates without an
+# execution policy, and repo contract files no task owns.
+#
+# Usage:
+#   preflight-lint MILESTONE_DIR [--repo DIR]
+#
+# MILESTONE_DIR holds SPEC.md and PLAN.md. --repo defaults to the git
+# toplevel containing MILESTONE_DIR.
+#
+# Output: one finding per line (`ERROR code path message` / `WARN ...`).
+# Exit codes: 0 no errors (warnings allowed), 1 errors present, 2 usage.
+require "json"
+
+PLAN_OPEN_MARKER = "<!-- milestone-orchestrator-plan:v1 -->".freeze
+PLAN_CLOSE_MARKER = "<!-- /milestone-orchestrator-plan -->".freeze
+LONG_GATE_SECONDS = 600
+CONTRACT_FILE_PATTERN = /\A(PROJECT_STATUS|STATUS|CHANGELOG)[^\/]*\z/i
+
+def usage!(message)
+  warn message
+  exit 2
+end
+
+args = ARGV.dup
+usage!("usage: preflight-lint MILESTONE_DIR [--repo DIR]") if args.empty?
+dir = args.shift
+usage!("no such directory: #{dir}") unless File.directory?(dir)
+options = {}
+until args.empty?
+  arg = args.shift
+  usage!("unexpected argument #{arg.inspect}") unless arg.start_with?("--")
+  value = args.shift
+  usage!("#{arg} requires a value") if value.nil?
+  options[arg[2..-1]] = value
+end
+
+dir = File.expand_path(dir)
+repo = options["repo"]
+if repo.nil?
+  toplevel = `git -C #{dir.inspect} rev-parse --show-toplevel 2>/dev/null`.strip
+  repo = toplevel.empty? ? dir : toplevel
+end
+repo = File.expand_path(repo)
+
+findings = []
+add = lambda do |severity, code, path, message|
+  findings << [severity, code, path, message]
+end
+
+# --- unresolved decision markers in SPEC/PLAN prose ---
+
+%w[SPEC.md PLAN.md].each do |name|
+  path = File.join(dir, name)
+  unless File.file?(path)
+    add.call("ERROR", "missing_artifact", name, "#{name} not found in #{dir}")
+    next
+  end
+  File.read(path).each_line.with_index(1) do |line, lineno|
+    if line =~ /\b(TBD|TODO|FIXME)\b/
+      add.call("ERROR", "unresolved_marker", "#{name}:#{lineno}",
+               "unresolved #{$1} marker; intake requires none at approval")
+    end
+    if line =~ /<(?:decide|placeholder|fill[- ]?in)[^>]*>/i
+      add.call("ERROR", "unresolved_marker", "#{name}:#{lineno}",
+               "unresolved placeholder token #{$~[0].inspect}")
+    end
+  end
+end
+
+# --- canonical plan block checks ---
+
+plan_path = File.join(dir, "PLAN.md")
+plan = nil
+if File.file?(plan_path)
+  markdown = File.read(plan_path)
+  open_at = markdown.index(PLAN_OPEN_MARKER)
+  close_at = markdown.index(PLAN_CLOSE_MARKER)
+  if open_at.nil? || close_at.nil?
+    add.call("ERROR", "missing_plan_block", "PLAN.md", "no canonical plan block")
+  else
+    json_text = markdown[(open_at + PLAN_OPEN_MARKER.length)...close_at][/```json\s*\n(.*?)```/m, 1]
+    if json_text.nil?
+      add.call("ERROR", "missing_plan_block", "PLAN.md", "no ```json fence inside the plan block")
+    else
+      begin
+        plan = JSON.parse(json_text)
+      rescue JSON::ParserError => e
+        add.call("ERROR", "invalid_json", "PLAN.md", "plan JSON does not parse: #{e.message}")
+      end
+    end
+  end
+end
+
+if plan
+  tasks = plan["tasks"] || {}
+  commands = plan["verification_commands"] || {}
+
+  # Executables must resolve from a fresh checkout: repo-relative or on PATH.
+  path_dirs = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR)
+  commands.each do |command_id, command|
+    next unless command.is_a?(Hash)
+    argv = command["argv"]
+    next unless argv.is_a?(Array) && argv.first.is_a?(String)
+    exe = argv.first
+    cwd = File.expand_path(command["cwd"] || ".", repo)
+    resolvable =
+      if exe.include?("/")
+        File.executable?(File.expand_path(exe, cwd))
+      else
+        path_dirs.any? { |d| File.executable?(File.join(d, exe)) }
+      end
+    unless resolvable
+      add.call("ERROR", "missing_executable", "verification_commands.#{command_id}",
+               "argv[0] #{exe.inspect} not executable from #{command["cwd"] || "."} or PATH; " \
+               "gate would fail on a fresh checkout")
+    end
+    argv.each do |part|
+      if part.start_with?("/") && !part.start_with?(repo)
+        add.call("WARN", "absolute_path", "verification_commands.#{command_id}",
+                 "argv contains absolute path #{part.inspect} outside the repository; " \
+                 "evidence and commands should be repo-relative")
+      end
+    end
+    timeout = command["timeout_seconds"]
+    if timeout.is_a?(Integer) && timeout > LONG_GATE_SECONDS
+      users = tasks.count { |_, t| t.is_a?(Hash) && (t["verification_command_ids"] || []).include?(command_id) }
+      add.call("WARN", "long_gate", "verification_commands.#{command_id}",
+               "timeout #{timeout}s marks this a long gate (referenced by #{users} task(s)): " \
+               "run it coordinator-side via run-verification, never backgrounded inside a " \
+               "worker, and register a fast targeted subset for per-task checks")
+    end
+  end
+
+  # owned_paths escaping the repo
+  tasks.each do |task_id, task|
+    next unless task.is_a?(Hash)
+    (task["owned_paths"] || []).each do |p|
+      if p.start_with?("/") || p.split("/").include?("..")
+        add.call("ERROR", "path_escape", "tasks.#{task_id}.owned_paths",
+                 "owned path #{p.inspect} escapes the repository")
+      end
+    end
+  end
+
+  # Repo contract files (status ledgers, changelogs) that no task owns have
+  # caused runtime ownership reconciliations in real runs.
+  owned = tasks.values.select { |t| t.is_a?(Hash) }.flat_map { |t| t["owned_paths"] || [] }
+  tracked = `git -C #{repo.inspect} ls-files 2>/dev/null`.split("\n")
+  tracked.select { |f| f =~ CONTRACT_FILE_PATTERN }.each do |contract|
+    next if owned.any? { |p| p == contract || contract.start_with?("#{p.chomp("/")}/") }
+    add.call("WARN", "unowned_contract_file", contract,
+             "repo contract file is owned by no task; if a repo gate requires updating it, " \
+             "assign ownership now instead of reconciling mid-run")
+  end
+end
+
+findings.each { |sev, code, path, message| puts "#{sev} #{code} #{path} #{message}" }
+errors = findings.count { |sev, _, _, _| sev == "ERROR" }
+puts "preflight-lint: #{errors} error(s), #{findings.length - errors} warning(s)"
+exit(errors.zero? ? 0 : 1)

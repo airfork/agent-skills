@@ -160,6 +160,13 @@ validation failure, not a configuration option.
 }
 ```
 
+Attempt `evidence` and task `note` strings are digests, hard-capped at 1000
+characters (`oversized_evidence` validation failure): one or two sentences
+plus a pointer into the milestone `evidence/` directory (e.g. a
+`run-verification` digest line or log path). Field runs showed STATE bloating
+to 50KB+ from per-attempt prose, taxing every later coordinator read — the
+ledger records *that* and *where*, not the full story.
+
 Stages advance forward only (`pending -> implemented -> reviewed -> verified
 -> integrated -> closed` for implementation tasks; review/verification/
 integration/cleanup tasks may go `pending -> verified/integrated/closed` as

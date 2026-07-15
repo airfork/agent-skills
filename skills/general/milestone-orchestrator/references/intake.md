@@ -159,7 +159,14 @@ RUN starts only after these pass or the approved plan records a safe fallback:
       run's recorded allowlist
 - [ ] Newly created clean integration worktree, unique milestone branch,
       pinned starting commit
-- [ ] Baseline repository verification passes (record the exact command)
+- [ ] Baseline repository verification passes, executed via
+      `scripts/run-verification` (record the digest)
+- [ ] `scripts/preflight-lint <milestone-dir>` reports zero errors; warnings
+      resolved or explicitly accepted in PLAN (long gates get the
+      task-contracts.md execution policy; unowned repo contract files get an
+      owner)
+- [ ] Long gates (registered timeout > ~10 min) identified, and a fast
+      targeted verification command registered for every implementation task
 - [ ] Dirty paths classified: unrelated (preserve), relevant milestone input
       (approved checkpoint/snapshot strategy required), or conflict (resolve
       before RUN)

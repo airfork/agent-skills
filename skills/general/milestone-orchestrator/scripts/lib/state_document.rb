@@ -204,12 +204,15 @@ module MilestoneOrchestrator
         check_enum(task["type"], TASK_TYPES, "tasks.#{task_id}.type")
         check_enum(task["stage"], TASK_STAGES, "tasks.#{task_id}.stage")
         check_enum(task["condition"], TASK_CONDITIONS, "tasks.#{task_id}.condition")
+        check_evidence_size(task["note"], "tasks.#{task_id}.note")
         attempts = task["attempts"]
         if attempts.is_a?(Array)
           attempts.each_with_index do |attempt, index|
             next unless attempt.is_a?(Hash)
             check_enum(attempt["status"], ATTEMPT_STATUSES,
                        "tasks.#{task_id}.attempts[#{index}].status")
+            check_evidence_size(attempt["evidence"],
+                                "tasks.#{task_id}.attempts[#{index}].evidence")
           end
           if TASK_STAGES.index(task["stage"]).to_i > 0 &&
              attempts.none? { |a| a.is_a?(Hash) && a["status"] == "completed" }
@@ -221,6 +224,18 @@ module MilestoneOrchestrator
                 "stage #{task["stage"].inspect} requires at least one completed attempt")
         end
       end
+    end
+
+    # Evidence in STATE is a digest plus a pointer; prose belongs in the
+    # milestone's evidence/ directory. The ledger is re-read constantly, so
+    # oversized entries tax every later coordinator turn.
+    EVIDENCE_MAX_CHARS = 1000
+
+    def check_evidence_size(value, path)
+      return unless value.is_a?(String) && value.length > EVIDENCE_MAX_CHARS
+      error("oversized_evidence", path,
+            "#{value.length} chars exceeds #{EVIDENCE_MAX_CHARS}; record a short digest " \
+            "plus a path into the milestone evidence/ directory instead")
     end
 
     def validate_resources(resources)

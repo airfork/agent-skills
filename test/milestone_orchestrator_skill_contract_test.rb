@@ -17,6 +17,8 @@ class MilestoneOrchestratorSkillContractTest < Minitest::Test
     assets/state-template.md
     scripts/validate-state
     scripts/control-state
+    scripts/run-verification
+    scripts/preflight-lint
     scripts/lib/state_document.rb
     scripts/lib/lease_store.rb
   ].freeze

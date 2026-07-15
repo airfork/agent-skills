@@ -1,0 +1,157 @@
+#!/usr/bin/env ruby
+# Registered-command verification runner for milestone-orchestrator.
+# Runs exactly one verification command registered in PLAN.md's canonical
+# block, streams full output to an evidence log file, and prints a one-line
+# JSON digest — the digest (not the raw output) is what enters coordinator
+# context and STATE evidence.
+#
+# Usage:
+#   run-verification PLAN.md COMMAND_ID [--repo DIR] [--evidence-dir DIR]
+#                    [--expected-sha OID]
+#
+# Defaults: --repo is the git toplevel containing PLAN.md; --evidence-dir is
+# `evidence/` next to PLAN.md. --expected-sha refuses to run when the
+# repository HEAD does not match the claimed SHA (gate evidence must be
+# anchored to the commit it certifies).
+#
+# Exit codes: 0 command passed, 1 command failed or timed out, 2 usage error,
+#             3 unregistered command or unparseable PLAN, 4 sha mismatch.
+require "json"
+require "fileutils"
+
+PLAN_OPEN_MARKER = "<!-- milestone-orchestrator-plan:v1 -->".freeze
+PLAN_CLOSE_MARKER = "<!-- /milestone-orchestrator-plan -->".freeze
+PASS_TAIL_LINES = 5
+FAIL_TAIL_LINES = 20
+
+def usage!(message)
+  warn message
+  exit 2
+end
+
+def reject!(message, code)
+  warn message
+  exit code
+end
+
+args = ARGV.dup
+usage!("usage: run-verification PLAN.md COMMAND_ID [options]") if args.length < 2
+plan_path = args.shift
+command_id = args.shift
+usage!("no such file: #{plan_path}") unless File.file?(plan_path)
+
+options = {}
+until args.empty?
+  arg = args.shift
+  usage!("unexpected argument #{arg.inspect}") unless arg.start_with?("--")
+  value = args.shift
+  usage!("#{arg} requires a value") if value.nil?
+  options[arg[2..-1]] = value
+end
+
+plan_dir = File.expand_path(File.dirname(plan_path))
+repo = options["repo"]
+if repo.nil?
+  toplevel = `git -C #{plan_dir.inspect} rev-parse --show-toplevel 2>/dev/null`.strip
+  repo = toplevel.empty? ? plan_dir : toplevel
+end
+repo = File.expand_path(repo)
+evidence_dir = File.expand_path(options["evidence-dir"] || File.join(plan_dir, "evidence"))
+
+markdown = File.read(plan_path)
+open_at = markdown.index(PLAN_OPEN_MARKER)
+close_at = markdown.index(PLAN_CLOSE_MARKER)
+reject!("no canonical plan block in #{plan_path}", 3) if open_at.nil? || close_at.nil?
+json_text = markdown[(open_at + PLAN_OPEN_MARKER.length)...close_at][/```json\s*\n(.*?)```/m, 1]
+reject!("no ```json fence inside the plan block", 3) if json_text.nil?
+begin
+  plan = JSON.parse(json_text)
+rescue JSON::ParserError => e
+  reject!("canonical plan JSON does not parse: #{e.message}", 3)
+end
+
+command = plan.dig("verification_commands", command_id)
+if command.nil?
+  known = (plan["verification_commands"] || {}).keys.sort.join(", ")
+  reject!("command #{command_id.inspect} is not registered in the approved plan " \
+          "(registered: #{known}); worker-supplied command lines are never run", 3)
+end
+argv = command["argv"]
+unless argv.is_a?(Array) && !argv.empty? && argv.all? { |part| part.is_a?(String) }
+  reject!("registered argv for #{command_id} is not a non-empty array of strings", 3)
+end
+cwd = command["cwd"] || "."
+if cwd.start_with?("/") || cwd.split("/").include?("..")
+  reject!("registered cwd #{cwd.inspect} escapes the repository", 3)
+end
+timeout_seconds = Integer(command["timeout_seconds"] || 3600)
+
+sha = `git -C #{repo.inspect} rev-parse HEAD 2>/dev/null`.strip
+sha = nil if sha.empty?
+expected = options["expected-sha"]
+if expected && sha != expected
+  reject!("repository HEAD #{sha.inspect} does not match --expected-sha #{expected.inspect}; " \
+          "check out the claimed commit before certifying it", 4)
+end
+
+FileUtils.mkdir_p(evidence_dir)
+stamp = Time.now.utc.strftime("%Y%m%dT%H%M%SZ")
+log_path = File.join(evidence_dir, "#{command_id}-#{sha ? sha[0, 12] : "nosha"}-#{stamp}.log")
+
+started = Time.now
+timed_out = false
+exit_code = nil
+File.open(log_path, "w") do |log|
+  log.puts "# run-verification #{command_id} @ #{sha || "no-sha"} (#{stamp})"
+  log.puts "# argv: #{argv.inspect}  cwd: #{cwd}  timeout: #{timeout_seconds}s"
+  log.flush
+  pid = Process.spawn(*argv, chdir: File.expand_path(cwd, repo),
+                      out: log.fileno, err: log.fileno, pgroup: true)
+  deadline = Time.now + timeout_seconds
+  status = nil
+  loop do
+    _, status = Process.waitpid2(pid, Process::WNOHANG)
+    break if status
+    if Time.now > deadline
+      timed_out = true
+      # Prefer killing the whole process group; macOS can raise EPERM on
+      # group signals in some states, so fall back to the direct pid.
+      kill_tree = lambda do |sig|
+        Process.kill("-#{sig}", pid)
+      rescue Errno::ESRCH, Errno::EPERM
+        begin
+          Process.kill(sig, pid)
+        rescue Errno::ESRCH, Errno::EPERM
+          nil
+        end
+      end
+      kill_tree.call("TERM")
+      sleep 2
+      kill_tree.call("KILL")
+      _, status = Process.waitpid2(pid)
+      break
+    end
+    sleep 0.2
+  end
+  exit_code = status.exitstatus
+end
+duration = (Time.now - started).round(1)
+
+pass = !timed_out && exit_code == 0
+tail_lines = pass ? PASS_TAIL_LINES : FAIL_TAIL_LINES
+tail = File.open(log_path) do |f|
+  f.seek([f.size - 65_536, 0].max)
+  f.read.split("\n").last(tail_lines).map { |l| l[0, 400] }
+end
+
+puts JSON.generate(
+  "command_id" => command_id,
+  "sha" => sha,
+  "pass" => pass,
+  "exit_code" => exit_code,
+  "timed_out" => timed_out,
+  "duration_seconds" => duration,
+  "log" => log_path,
+  "tail" => tail
+)
+exit(pass ? 0 : 1)

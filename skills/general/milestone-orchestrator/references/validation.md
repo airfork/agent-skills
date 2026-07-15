@@ -84,6 +84,20 @@ defaults to high effort. Note the pilot's adversarial review did catch two
 real defects — the `standard` depth trades that assurance for cost on
 low-risk work, and the escalate-on-surprise rule in intake.md is the hedge.
 
+v1.4 (2026-07-15) was driven by a five-run field audit (ai-civ m74, exodus
+m30/m31/m32, kards-sim m53 — see each repo's `docs/milestones/<slug>/STATE.md`
+journal): reviews found ~zero shipped-correctness bugs across the two fully
+reviewed runs; the dominant friction was implementation workers dying on
+backgrounded 13–25 minute gates; STATE bloated to 50KB+ from per-attempt
+evidence prose. It added `scripts/run-verification` (registered-command-only
+runner, SHA-anchored, digest-only evidence), `scripts/preflight-lint`
+(unresolved markers, fresh-checkout executability, long-gate policy, unowned
+contract files), the long-gate execution policy in task-contracts.md, and the
+1000-char `oversized_evidence` cap on STATE evidence/notes. One field caveat:
+mid-run validator schema changes forced a live run (m32) to backfill budget
+keys post-closeout — prefer additive, phase-gated validation rules for
+anything a live run might hold.
+
 The script/validator changes are covered by deterministic tests; the
 instruction-level behavior of these revisions has not been pressure-tested
 and inherits layer 1's deferred status.

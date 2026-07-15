@@ -32,9 +32,12 @@ Reference routing — read these before the corresponding stage:
 | Orca / native Codex / native Claude mechanics, resource cleanup | [references/platform-adapters.md](references/platform-adapters.md) |
 | Skill validation status and pressure-test protocol | [references/validation.md](references/validation.md) |
 
-Templates for the milestone artifacts live in `assets/`. The
-`scripts/validate-state` validator checks a milestone's `STATE.md` canonical
-block; run it after every material STATE update and before publication.
+Templates for the milestone artifacts live in `assets/`. Four scripts replace
+mechanical judgment: `scripts/validate-state` checks the `STATE.md` canonical
+block (run after every material update and before publication);
+`scripts/control-state` is the fenced STATE transition writer;
+`scripts/preflight-lint` gates the end of PREPARE; `scripts/run-verification`
+executes registered verification commands and emits digest-only evidence.
 
 ## Invocation
 
@@ -96,13 +99,15 @@ overlapping writers or integration surprises, replan to `full`.
   durable task stage requires the coordinator to validate the returned commits,
   evidence, and verification output.
 - **Independent verification and review.** Verification uses only the exact
-  commands registered in PLAN and is adjudicated by the coordinator, never
-  self-certified by the implementer: under `full` the coordinator (or a
-  verification worker) re-runs the commands independently; under `lite` it
-  validates the worker's captured output (registered command ID, SHA, passing
-  result) and re-runs only at the checkpoints defined in task-contracts.md
-  (first completed task, suspicion, shared-path integration, first push,
-  final gate).
+  commands registered in PLAN, executed through `scripts/run-verification`
+  (digest evidence, full output to `evidence/`), and is adjudicated by the
+  coordinator, never self-certified by the implementer: under `full` the
+  coordinator (or a verification worker) re-runs the commands independently;
+  under `lite` it validates the worker's captured output (registered command
+  ID, SHA, passing result) and re-runs only at the checkpoints defined in
+  task-contracts.md (first completed task, suspicion, shared-path
+  integration, first push, final gate). Long gates never run inside
+  implementation workers — see task-contracts.md.
   Review findings are remediated by workers, then re-verified and re-reviewed.
   Self-review never releases a gate.
 - **Publication envelope.** Default authority is local commit + push + one
@@ -268,3 +273,8 @@ abandons stale dispatches before resuming (see state-schema.md recovery rules).
 - "Small milestone, but full ceremony is safer" — ceremony that the profile
   says to skip is waste, not safety; risk controls live in the
   non-negotiables, not in extra dispatches.
+- "The worker can just run the full gate in the background" — backgrounded
+  long gates killed workers in every field run that tried; long gates are
+  coordinator-side via run-verification.
+- "I'll paste the test output into STATE as evidence" — evidence is a digest
+  plus a log path; prose bloats the ledger every later turn re-reads.
