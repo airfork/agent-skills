@@ -60,6 +60,23 @@ approval checkpoint; `run` resumes from approved artifacts; `status` reconciles
 and reports without dispatching new work. A bare invocation runs PREPARE and,
 after explicit approval, continues into RUN.
 
+## Execution Profiles
+
+Ceremony must scale with the milestone; the process below describes the `full`
+profile, and small milestones run a cheaper `lite` variant. During PREPARE,
+classify the milestone, record the profile and its rationale in `PLAN.md`, and
+surface it at approval.
+
+| Profile | Choose when | Adjustments |
+|---------|-------------|-------------|
+| `full` | Roughly six or more tasks, multiple independent writers, migration/security/data risk, or expensive integration | The process exactly as written |
+| `lite` | Roughly five or fewer tasks, one or two writers, low blast radius, cheap verification | Single shared worktree with serialized tasks; no dedicated integration worker (each verified task lands directly on the integration branch); acceptance gates validate worker-captured verification output instead of re-running commands; per-task fresh-context review is skipped — the mandatory final whole-branch review is the review |
+
+Profile selection changes ceremony only. It never relaxes authority, the
+publication envelope, the manager-only boundary, secret scanning, budgets, or
+the mandatory final review. When in doubt, or when a `lite` run develops
+overlapping writers or integration surprises, replan to `full`.
+
 ## Non-Negotiables
 
 - **Manager-only coordinator.** During RUN the coordinator edits only the
@@ -78,10 +95,14 @@ after explicit approval, continues into RUN.
   process exit, subagent return) closes an attempt only. Advancement of the
   durable task stage requires the coordinator to validate the returned commits,
   evidence, and verification output.
-- **Independent verification and review.** Verification is executed
-  independently of the implementer using the exact commands registered in
-  PLAN. Review findings are remediated by workers, then re-verified and
-  re-reviewed. Self-review never releases a gate.
+- **Independent verification and review.** Verification uses only the exact
+  commands registered in PLAN and is adjudicated by the coordinator, never
+  self-certified by the implementer: under `full` the coordinator (or a
+  verification worker) re-runs the commands independently; under `lite` it
+  validates the worker's captured output (registered command ID, SHA, passing
+  result) and re-runs only on suspicion and at the final repository gate.
+  Review findings are remediated by workers, then re-verified and re-reviewed.
+  Self-review never releases a gate.
 - **Publication envelope.** Default authority is local commit + push + one
   draft PR, using the configured human git author with no AI attribution.
   PR-ready and reviewer notification need their own recorded flags. Merge and
@@ -109,7 +130,8 @@ Read [references/intake.md](references/intake.md), then:
 
 1. **Ground in the repository.** Read repo instructions, architecture docs,
    recent history, and the relevant implementation. Fan out read-only survey
-   agents for broad repos.
+   agents for broad repos. Distill the result into a grounding digest that
+   every task packet will embed, so workers never repeat this exploration.
 2. **Build the decision inventory** across behavior, architecture, migration,
    data/privacy, performance, error handling, testing, release authority,
    credentials, destructive-action boundaries, and defaults.
@@ -156,8 +178,11 @@ reconcile -> select ready tasks -> build packets -> dispatch wave
    escalation, and gate messages. A timeout is a liveness checkpoint, not
    failure; heartbeat proves liveness, not completion.
 4. **Review, remediate, verify.** Fresh-context reviewers on risky tasks and
-   integration boundaries; verified findings become worker-owned remediation
-   tasks followed by re-verification and re-review.
+   integration boundaries (`full` profile; `lite` defers to the final review).
+   Batch a review round's verified merge-blocking findings into one
+   worker-owned remediation task per owned path/component, followed by
+   re-verification and re-review. Non-merge-blocking findings are recorded in
+   STATE and reported at closeout, not remediated in-run.
 5. **Integrate serially** through a dedicated integration worker on the single
    integration worktree. Architectural mismatch triggers a replan; a true SPEC
    contradiction escalates to the user.
@@ -199,6 +224,11 @@ Explicit and overrideable in `PLAN.md`; never left unset:
 | Plan-only replans | 2 |
 | CI wait | 30 min, 2 evidenced infrastructure retries |
 | No-progress supervision cycles before escalation | 2 |
+| Worker dispatches per run | 5 × plan task count, computed and recorded at preflight |
+
+Every dispatch of any type (implementation, review, verification, integration,
+remediation, cleanup) counts against the worker-dispatch budget. It is a churn
+backstop, not a target: a healthy run uses well under it.
 
 Exhaustion produces a terminal `blocked`/`escalated` state with the counter and
 freshest evidence; it never loops silently.
@@ -224,3 +254,10 @@ abandons stale dispatches before resuming (see state-schema.md recovery rules).
 - "Force push will fix the diverged ref" — prohibited; stop and reconcile.
 - "This stray worktree is probably ours" — clean only provenance-matched
   resources.
+- "Each finding gets its own remediation worker" — batch the round's verified
+  merge-blocking findings per owned area; record the rest.
+- "One more full verification re-run can't hurt" — duplicated verification is
+  the main cost driver; re-run only where the profile requires it.
+- "Small milestone, but full ceremony is safer" — ceremony that the profile
+  says to skip is waste, not safety; risk controls live in the
+  non-negotiables, not in extra dispatches.

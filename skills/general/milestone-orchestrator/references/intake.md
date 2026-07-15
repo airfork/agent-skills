@@ -16,6 +16,13 @@ Follow the owning repository's established milestone/document conventions when
 they exist; otherwise create `docs/milestones/<milestone-slug>/` for `SPEC.md`,
 `PLAN.md`, and `STATE.md`.
 
+Distill the grounding into a **grounding digest** — a compact section of
+`PLAN.md` (or `DIGEST.md` beside it when large) covering repo conventions and
+instructions that bind workers, the milestone-relevant architecture and key
+paths, build/test/verification commands, and known pitfalls. Every task packet
+embeds this digest verbatim so workers start implementing instead of
+re-exploring the repository; grounding is paid for once, in PREPARE.
+
 ## Decision inventory
 
 Identify unresolved decisions across:
@@ -61,6 +68,13 @@ model needs, registered verification commands, review points, integration
 order, closeout steps, and the immutable requirement-to-task side of the
 acceptance matrix as a canonical JSON block (see
 [state-schema.md](state-schema.md)).
+
+`PLAN.md` also records the **execution profile** (`full` or `lite`, per the
+SKILL.md table) with its rationale, the grounding digest (or a pointer to
+`DIGEST.md`), and the computed worker-dispatch budget. The profile is part of
+the approved contract and is surfaced in the final approval prompt; moving
+from `lite` to `full` mid-run is a plan-only replan, while relaxing `full` to
+`lite` requires user reapproval.
 
 ## Adversarial review tier selection
 
@@ -142,7 +156,11 @@ RUN starts only after these pass or the approved plan records a safe fallback:
       the plan needs it
 - [ ] Publication envelope complete, effects derived, secret scanner
       identified
-- [ ] Budgets set in PLAN (defaults from SKILL.md if not overridden)
+- [ ] Budgets set in PLAN (defaults from SKILL.md if not overridden), the
+      worker-dispatch budget computed from the plan task count and recorded
+      in STATE
+- [ ] Execution profile recorded in PLAN with rationale; grounding digest
+      written and referenced by the packet template
 
 Then checkpoint-commit the approved `SPEC.md`, `PLAN.md`, initialized
 `STATE.md`, and acceptance mapping on the integration branch using the

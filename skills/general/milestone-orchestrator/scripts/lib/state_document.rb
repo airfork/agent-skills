@@ -27,7 +27,7 @@ module MilestoneOrchestrator
     ].freeze
     REQUIRED_BUDGETS = %w[
       transient_retries task_failures review_remediation_rounds replans
-      ci_wait_seconds ci_infra_retries no_progress_cycles
+      ci_wait_seconds ci_infra_retries no_progress_cycles worker_dispatches
     ].freeze
     FORBIDDEN_AUTHORITY = %w[merge deploy].freeze
     REQUIRED_AUTHORITY_FIELDS = %w[

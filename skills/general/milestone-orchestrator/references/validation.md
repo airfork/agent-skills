@@ -58,6 +58,18 @@ primitives plus the STATE ledger for the capability boundaries in
 manager boundary and publication envelope as policy enforced by instruction
 and validation rather than by sandbox.
 
+## Post-pilot cost revisions (2026-07-15, untested)
+
+The pilot and a subsequent real run showed the v1 process was
+token-inefficient on small milestones (full ceremony applied unconditionally;
+per-finding remediation dispatches; duplicated verification re-runs;
+per-worker repository re-grounding). v1.1 added execution profiles
+(`full`/`lite`), batched merge-blocking-only remediation, the grounding
+digest, and the `worker_dispatches` budget (validator-enforced). Only the
+validator change is covered by deterministic tests; the instruction-level
+behavior of these revisions has not been pressure-tested and inherits layer
+1's deferred status.
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and

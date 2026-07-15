@@ -4,6 +4,14 @@
 **Spec:** `SPEC.md` (sha256 `<64-hex>` at approval)
 **Status:** Draft | Reviewed | Approved
 **Adversarial review:** <tier used and report path>
+**Execution profile:** <full|lite> — <rationale per SKILL.md profile table>
+**Worker-dispatch budget:** <5 × plan task count, or override with justification>
+
+## Grounding digest
+
+<Repo conventions binding workers, milestone-relevant architecture and key
+paths, build/test/verification commands, known pitfalls. Embedded verbatim in
+every task packet; may point to `DIGEST.md` when large.>
 
 ## Task overview
 

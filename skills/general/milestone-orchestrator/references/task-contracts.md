@@ -33,6 +33,8 @@ Every dispatch includes:
   integration target
 - Required logical route, agent family, capability, reasoning level, exact
   host launcher, allowed substitutions, and identity-verification method
+- The PREPARE grounding digest, embedded verbatim (workers implement from the
+  digest; they do not re-survey the repository)
 - Applicable repo instructions and skills
 - Required implementation discipline (e.g. TDD when applicable)
 - Exact task-local verification commands (by registered PLAN command ID)
@@ -61,9 +63,11 @@ record the substitution before dispatch.
 
 ## Waves and isolation
 
-- Independent implementation slices get separate worktrees created from an
-  immutable per-wave base ref at the approved integration SHA; verify the new
-  worktree's observed HEAD before dispatch.
+- Under the `full` profile, independent implementation slices get separate
+  worktrees created from an immutable per-wave base ref at the approved
+  integration SHA; verify the new worktree's observed HEAD before dispatch.
+  Under `lite`, all tasks run serialized in the single integration worktree
+  and worktree-per-task overhead is skipped.
 - One writer per owned path/component. Shared-file, shared-state, or tightly
   coupled tasks are serialized.
 - Choose concurrency from actual independence, repository setup cost, runtime
@@ -80,8 +84,12 @@ gate:
 1. Validate the attempt's structured outcome against the packet's expected
    evidence.
 2. Confirm claimed commits exist and are reachable from the worker branch.
-3. Confirm task-local verification ran the registered commands at the claimed
-   SHA with passing output.
+3. Confirm task-local verification against the registered commands at the
+   claimed SHA: under `full`, re-run them independently (coordinator-run or a
+   verification worker); under `lite`, validate the worker's captured output
+   (registered command ID, SHA, passing result) and re-run only when evidence
+   is suspicious, at shared-path integration boundaries, and at the final
+   repository gate.
 4. Only then advance the durable task stage and release dependents.
 
 No integration or publication dependency ever points directly at a dispatched
@@ -90,21 +98,30 @@ nothing.
 
 ## Review and remediation loop
 
-- Fresh-context reviewers for risky tasks and integration boundaries. A
-  review-only completion reports findings; it never authorizes coordinator
-  edits.
+- Fresh-context reviewers for risky tasks and integration boundaries under
+  the `full` profile; `lite` relies on the mandatory final whole-branch
+  review. A review-only completion reports findings; it never authorizes
+  coordinator edits.
 - Verify findings before acting: do not fix weak or unverified review
   suggestions.
-- Each verified finding becomes a remediation task owned by an implementer
-  (fresh or original, chosen by the coordinator), followed by re-verification
-  and re-review.
+- Triage verified findings: merge-blocking findings are remediated in-run;
+  non-merge-blocking findings are recorded in STATE `findings` and reported
+  at closeout, never dispatched. Grinding a review round to zero total
+  findings is churn, not quality.
+- Batch a review round's merge-blocking findings into one remediation task
+  per owned path/component, owned by an implementer (fresh or original,
+  chosen by the coordinator), followed by re-verification and one re-review
+  scoped to the remediated findings — not a fresh full review.
 - Remediation is a new linked plan task and attempt, not a backward mutation
   erasing earlier evidence.
 
 ## Serial integration
 
 A dedicated integration worker (never the coordinator) brings verified slices
-into the milestone branch on the single integration worktree:
+into the milestone branch on the single integration worktree. (Under the
+`lite` profile there is nothing to integrate — serialized workers commit
+directly on the integration worktree, and the ref/staging rules below bind
+those workers instead.)
 
 - Fetch the remote and compare expected ref OIDs before every integration
   commit; force push is prohibited.
@@ -135,6 +152,9 @@ into the milestone branch on the single integration worktree:
 - Two consecutive supervision cycles with no new commit, evidence, or
   actionable liveness change after steering trigger global no-progress
   escalation.
+- Every dispatch of any type decrements the worker-dispatch budget recorded
+  in STATE. Exhaustion is terminal `blocked`/`escalated` with the dispatch
+  ledger as evidence — never silent continued dispatching.
 
 ## Failure quick reference
 
