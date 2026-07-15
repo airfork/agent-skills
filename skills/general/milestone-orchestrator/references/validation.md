@@ -65,10 +65,20 @@ token-inefficient on small milestones (full ceremony applied unconditionally;
 per-finding remediation dispatches; duplicated verification re-runs;
 per-worker repository re-grounding). v1.1 added execution profiles
 (`full`/`lite`), batched merge-blocking-only remediation, the grounding
-digest, and the `worker_dispatches` budget (validator-enforced). Only the
-validator change is covered by deterministic tests; the instruction-level
-behavior of these revisions has not been pressure-tested and inherits layer
-1's deferred status.
+digest, and the `worker_dispatches` budget (validator-enforced).
+
+v1.2 extended this: lite-profile PREPARE (one combined spec+plan review), the
+`attempt_stall_checks` budget (liveness is not progress), milestone-split
+sizing guidance, lite trust-but-verify re-run checkpoints, capability-tier
+worker routing, the coordinator diff self-audit, and mechanical enforcement
+in `control-state` (attempt recording fenced by `worker_dispatches`, closeout
+fenced by `review_remediation_rounds`) plus phase-gated validator checks
+(`checkpoint_commit` and a computed dispatch budget required once past
+`preparing`).
+
+The script/validator changes are covered by deterministic tests; the
+instruction-level behavior of these revisions has not been pressure-tested
+and inherits layer 1's deferred status.
 
 ## Pressure-test protocol (for layer 1)
 

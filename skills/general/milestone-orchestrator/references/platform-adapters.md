@@ -125,3 +125,13 @@ default, and merge/deploy stopping point. Before RUN each adapter records:
 
 Same-user file modes, hidden paths, and bearer tokens are not isolation
 boundaries — treat them as `detect-only` at best.
+
+**Coordinator diff self-audit.** On `detect-only` adapters the manager
+boundary is enforced by inspection, so make the inspection mechanical: before
+every coordinator-authored commit, and at every reconciliation, run
+`git status --porcelain` plus a staged-diff listing in the coordinator's own
+worktree and confirm every modified path is a milestone control artifact
+(`SPEC.md`, `PLAN.md`, `STATE.md`, `DIGEST.md`, review reports). Any
+implementation path in the coordinator's diff is a zero-tolerance policy
+failure: do not commit it — record the violation in STATE, revert or stash
+the write, and dispatch a worker to redo it legitimately.

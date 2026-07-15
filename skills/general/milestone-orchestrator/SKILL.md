@@ -70,7 +70,7 @@ surface it at approval.
 | Profile | Choose when | Adjustments |
 |---------|-------------|-------------|
 | `full` | Roughly six or more tasks, multiple independent writers, migration/security/data risk, or expensive integration | The process exactly as written |
-| `lite` | Roughly five or fewer tasks, one or two writers, low blast radius, cheap verification | Single shared worktree with serialized tasks; no dedicated integration worker (each verified task lands directly on the integration branch); acceptance gates validate worker-captured verification output instead of re-running commands; per-task fresh-context review is skipped — the mandatory final whole-branch review is the review |
+| `lite` | Roughly five or fewer tasks, one or two writers, low blast radius, cheap verification | PREPARE runs one combined spec+plan adversarial review at default tier instead of two separate reviews; single shared worktree with serialized tasks; no dedicated integration worker (each verified task lands directly on the integration branch); acceptance gates validate worker-captured verification output, re-running only at the checkpoints defined in task-contracts.md; per-task fresh-context review is skipped — the mandatory final whole-branch review is the review |
 
 Profile selection changes ceremony only. It never relaxes authority, the
 publication envelope, the manager-only boundary, secret scanning, budgets, or
@@ -100,7 +100,9 @@ overlapping writers or integration surprises, replan to `full`.
   self-certified by the implementer: under `full` the coordinator (or a
   verification worker) re-runs the commands independently; under `lite` it
   validates the worker's captured output (registered command ID, SHA, passing
-  result) and re-runs only on suspicion and at the final repository gate.
+  result) and re-runs only at the checkpoints defined in task-contracts.md
+  (first completed task, suspicion, shared-path integration, first push,
+  final gate).
   Review findings are remediated by workers, then re-verified and re-reviewed.
   Self-review never releases a gate.
 - **Publication envelope.** Default authority is local commit + push + one
@@ -149,6 +151,8 @@ Read [references/intake.md](references/intake.md), then:
    deliverable-sized tasks, shallow dependency DAG, path ownership,
    role/model needs, registered verification commands, acceptance matrix.
    Re-run `adversarial-review` with spec-plan coverage and drift checks.
+   Under the `lite` profile, steps 5 and 6 collapse into one combined
+   spec+plan review at default tier after both artifacts exist.
 7. **Obtain one final approval** presenting spec, plan, review reports,
    acceptance mapping, and the explicit authority summary (each publication
    action listed separately; merge/deploy always off).
@@ -225,6 +229,7 @@ Explicit and overrideable in `PLAN.md`; never left unset:
 | CI wait | 30 min, 2 evidenced infrastructure retries |
 | No-progress supervision cycles before escalation | 2 |
 | Worker dispatches per run | 5 × plan task count, computed and recorded at preflight |
+| Stalled-attempt supervision checks | 3 — steer the worker after 2 checks with no new evidence; kill the attempt and count a task failure at 3 |
 
 Every dispatch of any type (implementation, review, verification, integration,
 remediation, cleanup) counts against the worker-dispatch budget. It is a churn

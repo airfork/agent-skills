@@ -47,13 +47,18 @@ Every dispatch includes:
 The coordinator is not tied to its own model family. Record the reason for
 each choice; never ask the user for routine routing approval.
 
-| Task shape | Preferred route |
+Routes are described as capability tiers, not model names — concrete models
+change faster than this document. The preflight checklist records the exact
+launcher behind each tier for this run, and any substitution is recorded
+before dispatch.
+
+| Task shape | Capability tier |
 |------------|-----------------|
-| UI implementation, interaction, visual polish | Claude |
-| Architecture, integration, difficult debugging, thorough review | Sol/high or stronger judgment model |
-| Read-heavy exploration and repository mapping | Terra, Luna, Spark, or equivalent fast agent |
-| Mechanical bounded implementation and test execution | Luna, Spark, or equivalent economical worker |
-| Security, migration, broad correctness review | High/xhigh capable model; cross-family review when valuable |
+| UI implementation, interaction, visual polish | Strongest available UI-capable implementation model |
+| Architecture, integration, difficult debugging, thorough review | Frontier judgment model at high reasoning effort |
+| Read-heavy exploration and repository mapping | Fast economical agent |
+| Mechanical bounded implementation and test execution | Economical worker model |
+| Security, migration, broad correctness review | Frontier review model at high/xhigh effort; cross-family review when valuable |
 
 Start with the cheapest model likely to succeed. Escalate when a task is
 ambiguous, high-risk, integration-heavy, or a cheaper worker fails on a
@@ -87,9 +92,12 @@ gate:
 3. Confirm task-local verification against the registered commands at the
    claimed SHA: under `full`, re-run them independently (coordinator-run or a
    verification worker); under `lite`, validate the worker's captured output
-   (registered command ID, SHA, passing result) and re-run only when evidence
-   is suspicious, at shared-path integration boundaries, and at the final
-   repository gate.
+   (registered command ID, SHA, passing result) and re-run only at these
+   checkpoints: the first completed implementation task of the run
+   (trust-but-verify — a systematically false-reporting worker must be caught
+   before dependents build on it), whenever evidence is suspicious, at
+   shared-path integration boundaries, immediately before the first push, and
+   at the final repository gate.
 4. Only then advance the durable task stage and release dependents.
 
 No integration or publication dependency ever points directly at a dispatched
@@ -140,6 +148,13 @@ those workers instead.)
 - A timeout is a liveness checkpoint, not worker failure. Inspect task and
   terminal liveness before intervening; heartbeat or terminal activity proves
   liveness, not completion.
+- Liveness is not progress. An attempt that produces no new commit, evidence,
+  or materially advanced output across consecutive supervision checks is
+  stalled even if its terminal is busy: steer it once at the second such
+  check, and at the stall budget (`attempt_stall_checks`, default 3) kill the
+  attempt, record it `failed` with the stall evidence, and count it against
+  the task's failure budget. A worker allowed to churn indefinitely because
+  it "looks alive" is the single most expensive failure mode.
 - Transient failure with evidence: one retry. Repeated failure: reframe,
   split, or escalate the worker/model; three consecutive failures on a task
   open its circuit (`condition: circuit-open`) and force a replan-or-escalate

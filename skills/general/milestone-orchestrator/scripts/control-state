@@ -180,6 +180,14 @@ when "record-attempt"
   if task["condition"] == "circuit-open"
     reject!("task #{task_id} circuit is open; reset the condition explicitly before new attempts")
   end
+  dispatch_budget = state.dig("budgets", "worker_dispatches")
+  if dispatch_budget
+    total_attempts = state["tasks"].values.sum { |t| t.is_a?(Hash) ? (t["attempts"] || []).length : 0 }
+    if total_attempts >= dispatch_budget
+      reject!("worker-dispatch budget exhausted (#{total_attempts}/#{dispatch_budget}); " \
+              "enter a terminal blocked/escalated state instead of dispatching more workers")
+    end
+  end
   status = attempt["status"]
   reject!("attempt status #{status.inspect} is not one of #{ATTEMPT_STATUSES.join(", ")}") \
     unless ATTEMPT_STATUSES.include?(status)
@@ -239,10 +247,17 @@ when "set-acceptance"
 when "set-closeout"
   raw = options["closeout-json"] || usage!("set-closeout requires --closeout-json")
   begin
-    state["closeout"] = JSON.parse(raw)
+    closeout = JSON.parse(raw)
   rescue JSON::ParserError => e
     usage!("--closeout-json does not parse: #{e.message}")
   end
+  rounds = closeout["review_rounds"]
+  rounds_budget = state.dig("budgets", "review_remediation_rounds")
+  if rounds_budget && rounds.is_a?(Integer) && rounds > rounds_budget
+    reject!("closeout records #{rounds} review rounds, over the review_remediation_rounds " \
+            "budget (#{rounds_budget}); the run must end blocked/escalated, not closed")
+  end
+  state["closeout"] = closeout
 when "append-journal"
   message = positional[0] || usage!("append-journal requires a message")
   journal_note = message

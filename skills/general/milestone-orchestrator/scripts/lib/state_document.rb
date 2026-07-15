@@ -28,6 +28,7 @@ module MilestoneOrchestrator
     REQUIRED_BUDGETS = %w[
       transient_retries task_failures review_remediation_rounds replans
       ci_wait_seconds ci_infra_retries no_progress_cycles worker_dispatches
+      attempt_stall_checks
     ].freeze
     FORBIDDEN_AUTHORITY = %w[merge deploy].freeze
     REQUIRED_AUTHORITY_FIELDS = %w[
@@ -126,6 +127,7 @@ module MilestoneOrchestrator
       validate_budgets(budgets) if budgets
       validate_tasks(tasks) if tasks
       validate_resources(resources) if resources
+      validate_phase_requirements(run, budgets) if run
       validate_template_tokens(state)
 
       if run && run["phase"] == "closed"
@@ -172,6 +174,24 @@ module MilestoneOrchestrator
         elsif !value.is_a?(Integer) || value < 0
           error("invalid_budget", "budgets.#{field}", "budget #{field} must be a non-negative integer")
         end
+      end
+    end
+
+    # Fields that may legitimately be unresolved while phase is "preparing"
+    # but are load-bearing for every later phase.
+    GIT_OID = /\A[0-9a-f]{40}\z/.freeze
+
+    def validate_phase_requirements(run, budgets)
+      return if run["phase"] == "preparing"
+      commit = run["checkpoint_commit"]
+      unless commit.is_a?(String) && commit =~ GIT_OID
+        error("missing_checkpoint_commit", "run.checkpoint_commit",
+              "phase #{run["phase"].inspect} requires checkpoint_commit to be a full git OID")
+      end
+      dispatches = budgets && budgets["worker_dispatches"]
+      if dispatches.is_a?(Integer) && dispatches < 1
+        error("invalid_budget", "budgets.worker_dispatches",
+              "worker_dispatches must be computed at preflight (>= 1) before phase #{run["phase"].inspect}")
       end
     end
 

@@ -133,6 +133,40 @@ class MilestoneOrchestratorControlStateTest < Minitest::Test
     assert_equal "circuit-open", task["condition"]
   end
 
+  def test_record_attempt_rejected_when_dispatch_budget_exhausted
+    state = base_state
+    state["budgets"]["worker_dispatches"] = 1
+    @state_path = write_state(@dir, state)
+    lease = acquire
+    attempt = {"attempt" => 1, "status" => "completed", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
+    _out, _err, exit_code = run_control("record-attempt", "TASK-001", "--attempt-json", attempt,
+                                        *fenced("coordinator", lease))
+    assert_equal 0, exit_code
+    before = File.read(@state_path)
+    second = {"attempt" => 2, "status" => "created", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
+    _out, stderr, exit_code = run_control("record-attempt", "TASK-001", "--attempt-json", second,
+                                          *fenced("coordinator", lease))
+    assert_equal 1, exit_code
+    assert_match(/dispatch budget exhausted/i, stderr)
+    assert_equal before, File.read(@state_path)
+  end
+
+  def test_set_closeout_rejected_when_review_rounds_exceed_budget
+    lease = acquire
+    closeout = {
+      "branch" => "milestone/example", "head_sha" => "e" * 40, "pr" => nil,
+      "verification" => [], "ci" => [], "review_rounds" => 4, "open_findings" => [],
+      "publication_actions" => [], "resources" => {}, "open_risks" => [],
+      "next_action" => "hand off"
+    }.to_json
+    before = File.read(@state_path)
+    _out, stderr, exit_code = run_control("set-closeout", "--closeout-json", closeout,
+                                          *fenced("coordinator", lease))
+    assert_equal 1, exit_code
+    assert_match(/review_remediation_rounds/i, stderr)
+    assert_equal before, File.read(@state_path)
+  end
+
   def test_advance_stage_requires_completed_attempt
     lease = acquire
     before = File.read(@state_path)

@@ -53,7 +53,8 @@ class MilestoneOrchestratorStateValidatorTest < Minitest::Test
         "ci_wait_seconds" => 1800,
         "ci_infra_retries" => 2,
         "no_progress_cycles" => 2,
-        "worker_dispatches" => 35
+        "worker_dispatches" => 35,
+        "attempt_stall_checks" => 3
       },
       "tasks" => {},
       "acceptance" => {},
@@ -183,6 +184,38 @@ class MilestoneOrchestratorStateValidatorTest < Minitest::Test
     state["budgets"].delete("replans")
     report, _stderr, _exit = run_validator(wrap_state(state))
     assert_includes error_codes(report), "missing_budget"
+  end
+
+  def test_missing_checkpoint_commit_rejected_after_preparing
+    state = valid_state
+    state["run"].delete("checkpoint_commit")
+    report, _stderr, _exit = run_validator(wrap_state(state))
+    assert_includes error_codes(report), "missing_checkpoint_commit"
+  end
+
+  def test_missing_checkpoint_commit_allowed_while_preparing
+    state = valid_state
+    state["run"]["phase"] = "preparing"
+    state["run"].delete("checkpoint_commit")
+    report, _stderr, exit_code = run_validator(wrap_state(state))
+    assert_equal 0, exit_code
+    assert_equal true, report.fetch("valid")
+  end
+
+  def test_uncomputed_dispatch_budget_rejected_after_preparing
+    state = valid_state
+    state["budgets"]["worker_dispatches"] = 0
+    report, _stderr, _exit = run_validator(wrap_state(state))
+    assert_includes error_codes(report), "invalid_budget"
+  end
+
+  def test_uncomputed_dispatch_budget_allowed_while_preparing
+    state = valid_state
+    state["run"]["phase"] = "preparing"
+    state["budgets"]["worker_dispatches"] = 0
+    report, _stderr, exit_code = run_validator(wrap_state(state))
+    assert_equal 0, exit_code
+    assert_equal true, report.fetch("valid")
   end
 
   def test_task_with_invalid_stage_rejected

@@ -51,7 +51,8 @@ module MilestoneOrchestratorStateHelper
         "ci_wait_seconds" => 1800,
         "ci_infra_retries" => 2,
         "no_progress_cycles" => 2,
-        "worker_dispatches" => 35
+        "worker_dispatches" => 35,
+        "attempt_stall_checks" => 3
       },
       "tasks" => {
         "TASK-001" => {

@@ -10,7 +10,9 @@ Prefer `scripts/control-state` over hand-editing the STATE block: it acquires
 an exclusive coordinator lease (fencing token + epoch, takeover only after
 expiry), enforces transition rules (forward-only stages gated on a completed
 attempt, circuit-open fencing, closed gated on a complete closeout, epoch
-never decreasing, only recorded resources mutable), validates the resulting
+never decreasing, only recorded resources mutable, attempt recording fenced by
+the `worker_dispatches` budget, closeout fenced by the
+`review_remediation_rounds` budget), validates the resulting
 document, and writes atomically — a rejected mutation leaves the file
 byte-identical. Run `control-state --help`-style usage from its header
 comment; `check-remote --observed absent|OID` gives the fenced
@@ -107,7 +109,8 @@ STATE — never worker-supplied command lines.
     "ci_wait_seconds": 1800,
     "ci_infra_retries": 2,
     "no_progress_cycles": 2,
-    "worker_dispatches": 35
+    "worker_dispatches": 35,
+    "attempt_stall_checks": 3
   },
   "tasks": {},
   "acceptance": {},

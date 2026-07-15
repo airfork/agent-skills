@@ -69,6 +69,15 @@ order, closeout steps, and the immutable requirement-to-task side of the
 acceptance matrix as a canonical JSON block (see
 [state-schema.md](state-schema.md)).
 
+**Milestone sizing.** The run's output contract is one reviewable draft PR.
+When the draft plan exceeds roughly twelve implementation tasks, spans
+unrelated subsystems, or would produce a PR too large to review honestly,
+propose splitting it into sequential milestones during PREPARE — each with its
+own SPEC, PLAN, run, and PR, ordered by dependency — and get the split
+approved rather than running one oversized milestone. Longer unattended runs
+also compound coordinator-recovery and drift risk; splitting is the cheaper
+failure containment.
+
 `PLAN.md` also records the **execution profile** (`full` or `lite`, per the
 SKILL.md table) with its rationale, the grounding digest (or a pointer to
 `DIGEST.md`), and the computed worker-dispatch budget. The profile is part of
@@ -79,8 +88,12 @@ from `lite` to `full` mid-run is a plan-only replan, while relaxing `full` to
 ## Adversarial review tier selection
 
 Use this repository's `adversarial-review` skill on the spec, then again on the
-plan (with coverage mapping and spec-plan drift checks once both exist). Select
-and record the tier rationale:
+plan (with coverage mapping and spec-plan drift checks once both exist). Under
+the `lite` execution profile, run one combined review instead: author both
+artifacts first, then a single default-tier `adversarial-review` pass covering
+the spec, the plan, and their drift/coverage mapping together — two separate
+reviews on a five-task milestone cost more than the implementation they guard.
+Select and record the tier rationale:
 
 | Tier | Use for |
 |------|---------|
@@ -149,7 +162,8 @@ RUN starts only after these pass or the approved plan records a safe fallback:
       before RUN)
 - [ ] Permission mode, credentials, and secret-handling boundaries confirmed
 - [ ] Available Claude and GPT routes with exact launch commands, capability
-      probes, and allowed substitutions recorded
+      probes, and allowed substitutions recorded, each mapped to the routing
+      capability tiers in task-contracts.md
 - [ ] Review-workflow discovery: compatible Codex `code-review` and/or Claude
       `/code-review` recorded for the mandatory final review
 - [ ] Browser capability (Chrome DevTools / Orca embedded browser) probed when
