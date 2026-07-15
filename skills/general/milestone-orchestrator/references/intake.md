@@ -85,25 +85,28 @@ the approved contract and is surfaced in the final approval prompt; moving
 from `lite` to `full` mid-run is a plan-only replan, while relaxing `full` to
 `lite` requires user reapproval.
 
-## Adversarial review tier selection
+## Review depth selection
 
-Use this repository's `adversarial-review` skill on the spec, then again on the
-plan (with coverage mapping and spec-plan drift checks once both exist). Under
-the `lite` execution profile, run one combined review instead: author both
-artifacts first, then a single default-tier `adversarial-review` pass covering
-the spec, the plan, and their drift/coverage mapping together — two separate
-reviews on a five-task milestone cost more than the implementation they guard.
-Select and record the tier rationale:
+Review depth is a coordinator recommendation made from risk after grounding,
+surfaced with its rationale in the final approval prompt, and recorded in
+`PLAN.md`. Default to the cheapest depth that fits the risk — the full
+adversarial pipeline runs every role at xhigh reasoning and can cost more
+than a small milestone's implementation — and let the user override in
+either direction.
 
-| Tier | Use for |
-|------|---------|
-| default | Bounded, well-understood work. All roles still use xhigh reasoning. |
-| `--high` | Architecture-shaping, security-sensitive, ambiguous, cross-cutting, migration-heavy, or expensive-to-rework work. |
-| `--ultra` (Claude only) | The same risks at unusually large scale or with especially high uncertainty. |
+| Depth | Default for | Mechanics |
+|-------|-------------|-----------|
+| `standard` | `lite`-profile milestones and well-understood `full` ones | One fresh-context reviewer at high reasoning effort reviews `SPEC.md` and `PLAN.md` together: acceptance coverage, spec-plan drift, path-ownership gaps and overlaps, verification-command sanity (do they run from a fresh checkout?), feasibility, and unstated assumptions. |
+| `adversarial` | Architecture-shaping, security-sensitive, migration-heavy, ambiguous, cross-cutting, or expensive-to-rework milestones | This repository's `adversarial-review` skill at default tier — spec first, then the plan with coverage and drift checks (combined into one pass under `lite`). |
+| `adversarial --high` / `--ultra` | The same risks at unusually large scale or with especially high uncertainty | Per that skill's tier table (`--ultra` is Claude-only). |
 
-Resolve or explicitly reject all promoted findings per that skill's judge and
-convergence rules. A non-converged review blocks RUN unless the user accepts
-the documented open question.
+At adversarial depths, resolve or explicitly reject all promoted findings per
+that skill's judge and convergence rules; a non-converged review blocks RUN
+unless the user accepts the documented open question. At `standard` depth,
+material findings must be fixed or explicitly accepted by the user before
+approval — the depth is cheaper, not softer about unresolved findings. If a
+`standard` review surfaces architecture-level risk the grounding missed,
+escalate the recommendation to `adversarial` rather than absorbing the risk.
 
 ## Final execution approval
 

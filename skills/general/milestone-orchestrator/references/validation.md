@@ -76,6 +76,14 @@ fenced by `review_remediation_rounds`) plus phase-gated validator checks
 (`checkpoint_commit` and a computed dispatch budget required once past
 `preparing`).
 
+v1.3 replaced the mandatory adversarial reviews with coordinator-recommended
+review depth: `standard` (one fresh-context spec+plan reviewer at high
+effort) is the default, the `adversarial-review` pipeline is reserved for
+genuinely risky milestones, and the mandatory final whole-branch review
+defaults to high effort. Note the pilot's adversarial review did catch two
+real defects — the `standard` depth trades that assurance for cost on
+low-risk work, and the escalate-on-surprise rule in intake.md is the hedge.
+
 The script/validator changes are covered by deterministic tests; the
 instruction-level behavior of these revisions has not been pressure-tested
 and inherits layer 1's deferred status.

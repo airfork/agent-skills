@@ -3,7 +3,7 @@
 **Milestone slug:** `<milestone-slug>`
 **Date:** <YYYY-MM-DD>
 **Status:** Draft | Reviewed | Approved
-**Adversarial review:** <tier used and report path>
+**Review depth:** <standard | adversarial tier used> — <report path>
 
 ## Goals
 

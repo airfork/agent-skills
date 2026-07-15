@@ -3,7 +3,7 @@
 **Milestone slug:** `<milestone-slug>`
 **Spec:** `SPEC.md` (sha256 `<64-hex>` at approval)
 **Status:** Draft | Reviewed | Approved
-**Adversarial review:** <tier used and report path>
+**Review depth:** <standard | adversarial tier used> — <report path and rationale>
 **Execution profile:** <full|lite> — <rationale per SKILL.md profile table>
 **Worker-dispatch budget:** <5 × plan task count, or override with justification>
 

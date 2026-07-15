@@ -70,7 +70,7 @@ surface it at approval.
 | Profile | Choose when | Adjustments |
 |---------|-------------|-------------|
 | `full` | Roughly six or more tasks, multiple independent writers, migration/security/data risk, or expensive integration | The process exactly as written |
-| `lite` | Roughly five or fewer tasks, one or two writers, low blast radius, cheap verification | PREPARE runs one combined spec+plan adversarial review at default tier instead of two separate reviews; single shared worktree with serialized tasks; no dedicated integration worker (each verified task lands directly on the integration branch); acceptance gates validate worker-captured verification output, re-running only at the checkpoints defined in task-contracts.md; per-task fresh-context review is skipped — the mandatory final whole-branch review is the review |
+| `lite` | Roughly five or fewer tasks, one or two writers, low blast radius, cheap verification | PREPARE defaults to `standard` review depth (one fresh-context spec+plan review at high effort — see intake.md); single shared worktree with serialized tasks; no dedicated integration worker (each verified task lands directly on the integration branch); acceptance gates validate worker-captured verification output, re-running only at the checkpoints defined in task-contracts.md; per-task fresh-context review is skipped — the mandatory final whole-branch review is the review |
 
 Profile selection changes ceremony only. It never relaxes authority, the
 publication envelope, the manager-only boundary, secret scanning, budgets, or
@@ -112,7 +112,9 @@ overlapping writers or integration surprises, replan to `full`.
 - **Mandatory final review.** Before presenting merge options, run a
   whole-branch code review with the host's correct workflow: Codex workers use
   this repository's `code-review` skill; Claude workers use Claude's own
-  `/code-review`; never substitute one for the other.
+  `/code-review`; never substitute one for the other. Run it at high effort
+  by default; raise the effort only for milestones whose risk earned an
+  adversarial PREPARE review.
 - **Isolated writers.** One writer per owned path/component. Independent
   slices run in separate worktrees; overlapping or tightly coupled work is
   serialized. Unrelated dirty user state is preserved and never enters
@@ -143,16 +145,16 @@ Read [references/intake.md](references/intake.md), then:
    envelope instead.
 4. **Write `SPEC.md`** from `assets/spec-template.md`. No unresolved TBDs at
    approval.
-5. **Adversarially review the spec** with this repository's
-   `adversarial-review` skill at a tier chosen from risk; record the tier
-   rationale. Non-converged review blocks RUN unless the user accepts the open
-   question.
-6. **Write and review `PLAN.md`** from `assets/plan-template.md`:
-   deliverable-sized tasks, shallow dependency DAG, path ownership,
-   role/model needs, registered verification commands, acceptance matrix.
-   Re-run `adversarial-review` with spec-plan coverage and drift checks.
-   Under the `lite` profile, steps 5 and 6 collapse into one combined
-   spec+plan review at default tier after both artifacts exist.
+5. **Write `PLAN.md`** from `assets/plan-template.md`: deliverable-sized
+   tasks, shallow dependency DAG, path ownership, role/model needs,
+   registered verification commands, acceptance matrix.
+6. **Review the spec and plan** at the coordinator-recommended depth from
+   intake.md's review-depth table: by default one fresh-context reviewer at
+   high effort over both artifacts together; this repository's
+   `adversarial-review` skill only when risk genuinely warrants it (then
+   spec-first, plan after, per intake.md). Record the depth rationale.
+   Unresolved material findings or a non-converged review block RUN unless
+   the user accepts them.
 7. **Obtain one final approval** presenting spec, plan, review reports,
    acceptance mapping, and the explicit authority summary (each publication
    action listed separately; merge/deploy always off).
