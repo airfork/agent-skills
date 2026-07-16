@@ -217,6 +217,23 @@ those workers instead.)
 - Two consecutive supervision cycles with no new commit, evidence, or
   actionable liveness change after steering trigger global no-progress
   escalation.
+- **Spec-attribution checkpoint.** Repeated trouble on one task is often a
+  contract problem wearing an implementation costume — a field run spent 29
+  attempts and 4 replans on a single task whose failures only a user SPEC
+  amendment could resolve. After a task's **second** troubled cycle (a second
+  failed/blocked attempt, a second remediation round in the same area, or a
+  replan that targets it again), the coordinator must record an explicit
+  attribution verdict in STATE before dispatching any further work on it:
+  *implementation-shaped* (the SPEC is clear; the work or its framing is the
+  problem) or *contract-shaped*. Contract-shaped signals: findings that cite
+  SPEC sections, invariants, or acceptance text rather than code; fixing one
+  finding violating another approved requirement; reviewers disagreeing about
+  what correct behavior *is* rather than how to build it; a replan that
+  restructured the task without changing the outcome. A contract-shaped
+  verdict escalates under SKILL.md trigger 3 **now**, with the contradiction
+  and options stated — further attempts, remediation rounds, or plan-only
+  replans on that task are forbidden until the user rules. An
+  implementation-shaped verdict must say what the next attempt changes.
 - Every dispatch of any type decrements the worker-dispatch budget recorded
   in STATE. Exhaustion is terminal `blocked`/`escalated` with the dispatch
   ledger as evidence — never silent continued dispatching.
@@ -228,6 +245,7 @@ those workers instead.)
 | Worker silent | Check liveness evidence first; steer before killing |
 | Evidence contradicts tracker | Field-specific source-of-truth table in [state-schema.md](state-schema.md); record old/new/evidence |
 | Worker claims done, no commits | Reject at the acceptance gate; retry or escalate route |
+| Findings cite SPEC text, or fixes contradict approved requirements | Spec-attribution checkpoint; contract-shaped → escalate trigger 3, no further dispatch on that task |
 | Review finding verified | New remediation task, worker-owned |
 | Integration conflict | Integration worker resolves; coordinator never patches |
 | Relevant dirty user state | Must already have the PREPARE-approved checkpoint strategy; otherwise escalate |

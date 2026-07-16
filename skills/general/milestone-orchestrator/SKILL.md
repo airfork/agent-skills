@@ -213,7 +213,11 @@ reconcile -> select ready tasks -> build packets -> dispatch wave
 1. Destructive or irreversible action outside explicit preauthorization.
 2. Missing credentials, permissions, or a human-only action.
 3. Genuine contradiction in the approved spec with materially different
-   outcomes.
+   outcomes. Do not wait for certainty or budget exhaustion: the
+   spec-attribution checkpoint in task-contracts.md forces this question
+   after two troubled cycles on one task, and a contract-shaped verdict
+   escalates immediately — field runs burned dozens of attempts becoming
+   "sure" about ambiguities only the user could resolve.
 4. Non-converged required review whose open finding changes safety, behavior,
    architecture, or release confidence.
 5. Repeated no-progress after the retry/replan budget.
@@ -281,3 +285,6 @@ abandons stale dispatches before resuming (see state-schema.md recovery rules).
 - "No new output lines, so the worker is dead" — workers in subagent fan-out
   or long tool rounds update in place; diff full terminal snapshots and
   counters, and steer before any kill.
+- "One more attempt/replan will crack this task" — a task in repeated trouble
+  gets a recorded spec-attribution verdict before any further dispatch;
+  contract-shaped trouble goes to the user, not to attempt five.

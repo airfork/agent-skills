@@ -130,6 +130,14 @@ journal growth); `preflight-lint` unadopted so far (m33's PREPARE predated or
 missed it); m33 repeated the wrongful live-worker kill before the
 snapshot-delta liveness rules landed — those rules remain unvalidated.
 
+v1.5 also added the spec-attribution checkpoint (task-contracts.md): after a
+task's second troubled cycle, a recorded implementation-shaped vs
+contract-shaped verdict is mandatory before further dispatch, and
+contract-shaped trouble escalates under trigger 3 immediately — aimed at
+m75's TASK-003 (29 attempts / 4 replans over a spec ambiguity) and m54's
+TASK-102 grind. Instruction-level and unvalidated; the next audit should
+check whether the verdict is actually recorded and whether it fires early.
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and
