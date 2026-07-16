@@ -278,3 +278,6 @@ abandons stale dispatches before resuming (see state-schema.md recovery rules).
   coordinator-side via run-verification.
 - "I'll paste the test output into STATE as evidence" — evidence is a digest
   plus a log path; prose bloats the ledger every later turn re-reads.
+- "No new output lines, so the worker is dead" — workers in subagent fan-out
+  or long tool rounds update in place; diff full terminal snapshots and
+  counters, and steer before any kill.

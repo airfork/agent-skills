@@ -51,6 +51,12 @@ surfaces.
 - **Waits:** Rolling waits on `worker_done`, `escalation`, and
   `decision_gate`. `worker_done` can complete an Orca task even when its
   payload reports failure — always route through the acceptance gate.
+- **Liveness probing:** read the terminal and diff the *full screen* against
+  the previous read — in-place ANSI redraws (spinners, token counters,
+  subagent progress trees) are the primary liveness signal for a worker that
+  prints no new lines. Record the counters seen (elapsed time, token count)
+  in the supervision note so the next check has a comparison point. Steer via
+  `terminal send` before any kill decision.
 - **Worktrees:** One Orca worktree per independent writer, created from the
   immutable wave base ref; verify observed HEAD before dispatch.
 - **Cancellation:** `orca orchestration run-stop` is forbidden unless

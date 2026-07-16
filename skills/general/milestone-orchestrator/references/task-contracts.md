@@ -174,13 +174,28 @@ those workers instead.)
 - A timeout is a liveness checkpoint, not worker failure. Inspect task and
   terminal liveness before intervening; heartbeat or terminal activity proves
   liveness, not completion.
-- Liveness is not progress. An attempt that produces no new commit, evidence,
-  or materially advanced output across consecutive supervision checks is
-  stalled even if its terminal is busy: steer it once at the second such
-  check, and at the stall budget (`attempt_stall_checks`, default 3) kill the
-  attempt, record it `failed` with the stall evidence, and count it against
-  the task's failure budget. A worker allowed to churn indefinitely because
-  it "looks alive" is the single most expensive failure mode.
+- **Liveness is judged on snapshot deltas, never on "new lines printed."**
+  Workers in subagent fan-out, long thinking, or long tool rounds legitimately
+  print nothing for many minutes while their status renders in place — a
+  spinner, elapsed time, growing token/tool-use counters, a subagent progress
+  tree. Compare successive full terminal snapshots (or host task state):
+  changed screen content, advancing counters, or a changed subagent tree all
+  prove the worker is alive and computing. A field run killed a live worker
+  and dispatched a redundant replacement off a "transcript quiet 60+ min"
+  read — quiet is not dead. Before declaring an attempt dead, require two
+  consecutive *identical* snapshots plus a failed steer (send it a status
+  prompt and wait one check); on hosts where the worker cannot be snapshotted
+  (native subagents), a missing completion notification is never death
+  evidence by itself — verify against host task listings.
+- Liveness is not progress. An attempt that produces no new commit or
+  evidence across consecutive supervision checks is stalled even if its
+  snapshots keep changing: steer it once at the second such check, and at the
+  stall budget (`attempt_stall_checks`, default 3) kill the attempt, record
+  it `failed` with the stall evidence, and count it against the task's
+  failure budget. Deep context-gathering early in an attempt is normal —
+  judge stall from the attempt's expected shape, not impatience — but a
+  worker allowed to churn indefinitely because it "looks alive" is the single
+  most expensive failure mode.
 - Transient failure with evidence: one retry. Repeated failure: reframe,
   split, or escalate the worker/model; three consecutive failures on a task
   open its circuit (`condition: circuit-open`) and force a replan-or-escalate
