@@ -132,6 +132,7 @@ module MilestoneOrchestrator
 
       if run && run["phase"] == "closed"
         validate_closeout(state["closeout"])
+        validate_terminal_tasks(tasks) if tasks
       end
     end
 
@@ -269,6 +270,29 @@ module MilestoneOrchestrator
       if findings.is_a?(Array) && !findings.empty?
         error("open_findings_at_closeout", "closeout.open_findings",
               "run may not close with open findings")
+      end
+    end
+
+    # A closed run may not leave tasks blocked, circuit-open, or with an
+    # in-flight attempt — field runs closed over both, hiding unfinished work.
+    def validate_terminal_tasks(tasks)
+      tasks.each do |task_id, task|
+        next unless task.is_a?(Hash)
+        if %w[blocked circuit-open].include?(task["condition"])
+          error("non_terminal_task_at_close", "tasks.#{task_id}.condition",
+                "run is closed but task condition is #{task["condition"].inspect}; " \
+                "resolve, retain with reason, or close as blocked/escalated instead")
+        end
+        attempts = task["attempts"]
+        next unless attempts.is_a?(Array)
+        attempts.each_with_index do |attempt, index|
+          next unless attempt.is_a?(Hash)
+          if %w[created dispatched].include?(attempt["status"])
+            error("non_terminal_task_at_close", "tasks.#{task_id}.attempts[#{index}].status",
+                  "run is closed but an attempt is still #{attempt["status"].inspect}; " \
+                  "complete, fail, or abandon it before closing")
+          end
+        end
       end
     end
 

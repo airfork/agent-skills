@@ -218,6 +218,42 @@ class MilestoneOrchestratorStateValidatorTest < Minitest::Test
     assert_equal true, report.fetch("valid")
   end
 
+  def test_closed_run_with_blocked_task_rejected
+    state = valid_state
+    state["run"]["phase"] = "closed"
+    state["closeout"] = {
+      "branch" => "milestone/example", "head_sha" => "e" * 40, "pr" => nil,
+      "verification" => [], "ci" => [], "review_rounds" => 1, "open_findings" => [],
+      "publication_actions" => [], "resources" => {}, "open_risks" => [],
+      "next_action" => "hand off"
+    }
+    state["tasks"]["TASK-001"] = {
+      "type" => "implementation", "stage" => "pending", "condition" => "blocked",
+      "failure_count" => 0, "attempts" => []
+    }
+    report, _stderr, _exit = run_validator(wrap_state(state))
+    assert_includes error_codes(report), "non_terminal_task_at_close"
+  end
+
+  def test_closed_run_with_inflight_attempt_rejected
+    state = valid_state
+    state["run"]["phase"] = "closed"
+    state["closeout"] = {
+      "branch" => "milestone/example", "head_sha" => "e" * 40, "pr" => nil,
+      "verification" => [], "ci" => [], "review_rounds" => 1, "open_findings" => [],
+      "publication_actions" => [], "resources" => {}, "open_risks" => [],
+      "next_action" => "hand off"
+    }
+    state["tasks"]["TASK-001"] = {
+      "type" => "implementation", "stage" => "implemented", "condition" => "active",
+      "failure_count" => 0,
+      "attempts" => [{"attempt" => 1, "status" => "completed"},
+                     {"attempt" => 2, "status" => "dispatched"}]
+    }
+    report, _stderr, _exit = run_validator(wrap_state(state))
+    assert_includes error_codes(report), "non_terminal_task_at_close"
+  end
+
   def test_oversized_attempt_evidence_rejected
     state = valid_state
     state["run"]["task_allowlist"] = ["TASK-001"]

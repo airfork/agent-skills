@@ -222,13 +222,24 @@ class MilestoneOrchestratorControlStateTest < Minitest::Test
     assert_equal before, File.read(@state_path)
   end
 
-  def test_task_outside_allowlist_rejected
+  def test_unknown_plan_task_rejected
     lease = acquire
     attempt = {"attempt" => 1, "status" => "completed", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
     _out, stderr, exit_code = run_control("record-attempt", "TASK-999", "--attempt-json", attempt,
                                           *fenced("coordinator", lease))
     assert_equal 1, exit_code
-    assert_match(/unknown task/i, stderr)
+    assert_match(/unknown plan task/i, stderr)
+  end
+
+  def test_plan_task_not_gated_by_host_allowlist
+    state = base_state
+    state["run"]["task_allowlist"] = ["ctx_hostid_abc123"]
+    @state_path = write_state(@dir, state)
+    lease = acquire
+    attempt = {"attempt" => 1, "status" => "completed", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
+    _out, _err, exit_code = run_control("record-attempt", "TASK-001", "--attempt-json", attempt,
+                                        *fenced("coordinator", lease))
+    assert_equal 0, exit_code
   end
 
   def test_append_journal

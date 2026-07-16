@@ -110,6 +110,26 @@ The script/validator changes are covered by deterministic tests; the
 instruction-level behavior of these revisions has not been pressure-tested
 and inherits layer 1's deferred status.
 
+## Second field audit (2026-07-16)
+
+Three more runs: exodus m33 (first true new-format run), ai-civ m75 and
+kards-sim m54 (started pre-revision, schema force-migrated mid-run — their
+pain confirms the old format, not the new one). m33 exercised profiles
+(`full`, with reasoned selection), the grounding digest, `standard` review
+depth (worked as designed — findings fixed inline, no report file), and ran
+every long gate coordinator-side via `run-verification` with zero
+backgrounded-gate worker deaths. Defects found and fixed in v1.5:
+`control-state record-attempt` wrongly gated plan task ids on the host
+`task_allowlist` (tool unusable in m33; attempts hand-recorded); runs could
+close with blocked tasks or in-flight attempts (m54, and m75's premature
+Tasks-1–3 closeout) — now `non_terminal_task_at_close`; worktrees removed
+mid-gate orphaned PPID-1 process trees (m75) — cleanup now checks for live
+processes first. Still open: STATE total size (m54 hit 102KB with every
+string under the 1000-char cap; the cap bounds strings, not attempt count ×
+journal growth); `preflight-lint` unadopted so far (m33's PREPARE predated or
+missed it); m33 repeated the wrongful live-worker kill before the
+snapshot-delta liveness rules landed — those rules remain unvalidated.
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and

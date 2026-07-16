@@ -91,11 +91,13 @@ ATTEMPT_STATUSES = MilestoneOrchestrator::StateDocument::ATTEMPT_STATUSES
 RESOURCE_KINDS = MilestoneOrchestrator::StateDocument::RESOURCE_KINDS
 RESOURCE_STATUSES = MilestoneOrchestrator::StateDocument::RESOURCE_STATUSES
 
+# Plan tasks live in state["tasks"]; run.task_allowlist holds HOST task ids
+# (the entities the run may adopt on its runtime) and must never gate plan
+# task ids — a field run found record-attempt unusable when it did.
 def fetch_task(state, task_id)
   task = state["tasks"][task_id]
-  allowlist = state["run"]["task_allowlist"] || []
-  if task.nil? || !allowlist.include?(task_id)
-    reject!("unknown task #{task_id.inspect}: not in tasks and run.task_allowlist")
+  if task.nil?
+    reject!("unknown plan task #{task_id.inspect}: not present in the STATE tasks ledger")
   end
   task
 end

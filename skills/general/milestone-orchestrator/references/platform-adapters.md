@@ -89,8 +89,12 @@ integrated and independently verified:
    revalidation immediately before closure.
 5. Close only run-created, non-configured terminals and tabs whose identity is
    unambiguous.
-6. Remove the completed child worktree; never force-remove one containing
-   unpreserved work.
+6. Confirm no live processes are still rooted in the worktree (check for
+   running gates, test runners, or shells whose cwd is under it) before
+   removal — a field run removed worktrees mid-gate and left orphaned PPID-1
+   process trees executing inside deleted directories, contaminating shared
+   artifact gates. Then remove the completed child worktree; never
+   force-remove one containing unpreserved work.
 7. Verify the resources disappeared from host listings and record cleanup in
    STATE.
 

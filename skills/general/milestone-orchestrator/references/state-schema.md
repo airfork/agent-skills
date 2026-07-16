@@ -123,6 +123,11 @@ STATE — never worker-supplied command lines.
 <!-- /milestone-orchestrator-state -->
 ````
 
+`run.task_allowlist` holds **host** task ids — the runtime entities this run
+may adopt, reconcile, or cancel. Plan `TASK-###` ids live only under `tasks`
+and are never members of the allowlist; a field run lost the use of
+`control-state record-attempt` to exactly this confusion.
+
 ### Enums
 
 | Field | Legal values |
