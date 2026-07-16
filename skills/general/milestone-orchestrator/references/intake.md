@@ -191,3 +191,35 @@ Then checkpoint-commit the approved `SPEC.md`, `PLAN.md`, initialized
 configured human author, record the checkpoint commit in STATE, and use it as
 the first worker base. Validate with `scripts/validate-state` before the first
 dispatch.
+
+## RUN handoff block
+
+PREPARE typically runs on a stronger model than RUN needs (see the
+coordinator-tier section in platform-adapters.md). So end PREPARE by printing
+a copy-pasteable handoff block, then stop — even when the same session could
+continue into RUN. Format:
+
+```text
+PREPARE complete — approved artifacts committed at <checkpoint-sha>.
+
+To run on the recommended RUN tier, start a fresh session and invoke:
+
+  Claude Code:  claude --model opus
+                /milestone-orchestrator run docs/milestones/<slug>/
+
+  Codex:        codex --model <recorded-route>
+                Use $milestone-orchestrator run docs/milestones/<slug>/
+
+  Orca:         spawn a coordinator terminal on the recorded RUN route,
+                then: run docs/milestones/<slug>/
+
+`run` resumes from the approved artifacts; nothing from this session is
+needed. To continue here instead (this session's model: <model>), say
+"continue into RUN" — fine when this model already matches the RUN tier.
+```
+
+Substitute the real slug, checkpoint SHA, session model, and the RUN routes
+recorded at preflight; drop host lines that don't apply to this environment.
+A bare invocation that was approved to continue in-session prints the block
+first anyway, so the user can choose the cheaper path at the moment it
+matters.

@@ -61,7 +61,9 @@ Natural-language equivalents apply, such as "plan this milestone with me, then
 implement it autonomously and open a draft PR." `prepare` stops after the
 approval checkpoint; `run` resumes from approved artifacts; `status` reconciles
 and reports without dispatching new work. A bare invocation runs PREPARE and,
-after explicit approval, continues into RUN.
+after explicit approval, prints the RUN handoff block (intake.md) so the user
+can restart RUN on the cheaper recommended tier — continuing in-session is
+their call after seeing it.
 
 ## Execution Profiles
 
@@ -166,6 +168,10 @@ Read [references/intake.md](references/intake.md), then:
 8. **Initialize `STATE.md`** from `assets/state-template.md`, run the
    preflight checklist in intake.md, checkpoint-commit the approved artifacts
    on the integration branch, and validate with `scripts/validate-state`.
+9. **Print the RUN handoff block** (intake.md): the exact fresh-session
+   command to start RUN on the recommended coordinator tier, since PREPARE
+   usually runs on a stronger model than RUN needs. Continue in-session only
+   if the user chooses that after seeing the block.
 
 ## Phase 2: RUN (unattended)
 
