@@ -8,6 +8,32 @@ how it enforces the manager boundary, worker isolation, and publication
 control. RUN is blocked when the selected adapter can neither prevent nor
 reliably detect coordinator implementation writes.
 
+## Coordinator tier
+
+The two phases have different reasoning profiles; tier the coordinator
+accordingly and record the choice in STATE:
+
+- **PREPARE: strongest available frontier model.** Spec and plan quality
+  determine everything downstream (field runs burned whole milestones on
+  premises baked in at planning time), the decision inventory and risk
+  assessment are the hardest open-ended thinking in the flow, and the phase
+  is short and interactive — high leverage per token.
+- **RUN: a frontier-judgment model one notch down (Opus-class) is
+  sufficient.** The control scripts enforce transition legality, budgets,
+  registered-command execution, and evidence caps mechanically; the
+  coordinator's remaining work — routing, evidence adjudication, stall
+  diagnosis, replan-versus-escalate — is bounded judgment on rails, and the
+  escalation triggers fail safe toward interrupting the user. Since the
+  coordinator is present for every turn of a multi-day run, this is a large
+  share of run cost.
+- **Floor: never below the frontier-judgment class.** Observed mid-tier
+  failure modes — instruction drift across long unattended sessions,
+  rationalized manager-boundary violations, accepting lifecycle completion
+  as correctness — are the zero-tolerance list, and the manager boundary is
+  detect-only on native adapters.
+- Reviewer and judge tiers come from the routing table in task-contracts.md
+  and are never inherited from (or downgraded to) the coordinator's tier.
+
 ## Orca (reference)
 
 Use the installed `orchestration` and `orca-cli` skills for exact command
@@ -76,9 +102,10 @@ location with a retention deadline and are deleted at safe closeout.
 
 ## Native Codex
 
-- Sol-class root coordinator. Probe long-running coordination support; without
-  it, run a tested explicit coordinator loop over STATE, or mark the adapter
-  blocked.
+- Root coordinator per the Coordinator tier section above (record the
+  concrete model at preflight). Probe long-running coordination support;
+  without it, run a tested explicit coordinator loop over STATE, or mark the
+  adapter blocked.
 - Use native custom/built-in agents with direct subagent instructions; keep
   `agents.max_depth = 1` unless a separately reviewed need exists.
 - Native agent threads are not durable truth — the repo-local STATE ledger and
@@ -96,8 +123,8 @@ location with a retention deadline and are deleted at safe closeout.
 
 ## Native Claude Code
 
-- Fable/Opus-class coordinator. Same long-running-coordination probe rule as
-  Codex.
+- Coordinator per the Coordinator tier section above (record the concrete
+  model at preflight). Same long-running-coordination probe rule as Codex.
 - Prefer ordinary custom subagents (Agent tool) with worktree isolation for
   implementation. Workflow scripts suit bounded homogeneous fan-out or
   repeated cross-check stages, not the only recovery record. Experimental

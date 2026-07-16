@@ -98,6 +98,14 @@ mid-run validator schema changes forced a live run (m32) to backfill budget
 keys post-closeout — prefer additive, phase-gated validation rules for
 anything a live run might hold.
 
+v1.4 also added coordinator-tier guidance (platform-adapters.md): strongest
+frontier model for PREPARE, Opus-class for RUN coordination, floor at the
+frontier-judgment class. This is reasoned from the field audit (coordinator
+errors were discipline gaps now script-fenced, not capability gaps) but has
+not itself been A/B validated — the next runs should use an Opus-class RUN
+coordinator and the re-audit should check for wrong stall kills, sloppy
+adjudication, or missed escalations.
+
 The script/validator changes are covered by deterministic tests; the
 instruction-level behavior of these revisions has not been pressure-tested
 and inherits layer 1's deferred status.
