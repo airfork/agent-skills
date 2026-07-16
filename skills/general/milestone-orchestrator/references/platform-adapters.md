@@ -56,7 +56,10 @@ surfaces.
   subagent progress trees) are the primary liveness signal for a worker that
   prints no new lines. Record the counters seen (elapsed time, token count)
   in the supervision note so the next check has a comparison point. Steer via
-  `terminal send` before any kill decision.
+  `terminal send` before any kill decision. Verify launch explicitly (first
+  output or packet acknowledgment) right after spawn — fresh terminals can
+  exit silently in that window — and then retire that caution; it never
+  applies to a worker that has started working (task-contracts.md).
 - **Worktrees:** One Orca worktree per independent writer, created from the
   immutable wave base ref; verify observed HEAD before dispatch.
 - **Cancellation:** `orca orchestration run-stop` is forbidden unless

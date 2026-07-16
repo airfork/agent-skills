@@ -187,6 +187,15 @@ those workers instead.)
   prompt and wait one check); on hosts where the worker cannot be snapshotted
   (native subagents), a missing completion notification is never death
   evidence by itself — verify against host task listings.
+- **Launch-window cautions expire at first sign of work.** "Fresh terminals
+  sometimes exit silently before the first heartbeat" is a real launch-window
+  failure and justifies a quick early liveness check — but it applies *only*
+  between spawn and the worker's first acknowledgment or output. Once a
+  worker has acknowledged its packet, produced output, or committed, the
+  silent-early-exit prior is dead: judge it exclusively by the snapshot-delta
+  rules above. A field coordinator killed a live, working agent because a
+  launch caution primed it to see death mid-task. Task packets and charters
+  must scope any such caution to the pre-acknowledgment window explicitly.
 - Liveness is not progress. An attempt that produces no new commit or
   evidence across consecutive supervision checks is stalled even if its
   snapshots keep changing: steer it once at the second such check, and at the
