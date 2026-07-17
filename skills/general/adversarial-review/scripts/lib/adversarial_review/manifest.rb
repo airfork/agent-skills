@@ -35,6 +35,7 @@ module AdversarialReview
       REQUIREMENT = /\b(?:REQ(?:UIREMENT)?[-_ ]?\d+|R\d+)\b/i
       TASK = /\bTASK[-_ ]?\d+\b/i
       COMMAND = /\A(?:\.?\/?(?:bin|scripts)\/|git\s|bundle\s|ruby\s|rake\s|npm\s|pnpm\s|yarn\s|make(?:\s|\z)|cargo\s|go\s)/
+      PLACEHOLDER_DISPLAY_LIMIT = 16
 
       def self.build(role, path, absolute_path)
         new(role, path, File.read(absolute_path)).build
@@ -95,7 +96,10 @@ module AdversarialReview
           end
           line.to_enum(:scan, PLACEHOLDER).each do
             match = Regexp.last_match
-            placeholders << {"token" => match[0], "line" => line_number}
+            placeholders << {
+              "kind" => placeholder_kind(match[0])[0, PLACEHOLDER_DISPLAY_LIMIT],
+              "line" => line_number
+            }
           end
         end
 
@@ -124,6 +128,16 @@ module AdversarialReview
         value.match?(COMMAND) || (value.include?(" --") && value.include?("/"))
       end
 
+      def placeholder_kind(value)
+        normalized = value.upcase
+        return "todo" if normalized == "TODO"
+        return "tbd" if normalized == "TBD"
+        return "fixme" if normalized == "FIXME"
+        return "question" if value == "???"
+
+        "template"
+      end
+
       def render(headings, requirements, tasks, paths, commands, placeholders)
         lines = ["### #{@role}: `#{@path}`"]
         append_entries(lines, "Headings", headings.map { |line, name| "L#{line} #{name}" })
@@ -132,7 +146,7 @@ module AdversarialReview
         append_entries(lines, "Paths", paths.map { |path| "`#{path}`" })
         append_entries(lines, "Commands", commands.map { |command| "`#{command}`" })
         placeholder_entries = placeholders.map do |entry|
-          "#{entry.fetch("token")} (L#{entry.fetch("line")})"
+          "#{entry.fetch("kind")} (L#{entry.fetch("line")})"
         end
         append_entries(lines, "Unresolved placeholders", placeholder_entries)
         lines << "- Unresolved placeholder count: #{placeholders.length}"
@@ -292,7 +306,11 @@ module AdversarialReview
           "sha256" => Digest::SHA256.file(absolute_path).hexdigest
         }
       end
-      if result.length == 2 && result[0].fetch("path") == result[1].fetch("path")
+      same_file = result.length == 2 && File.identical?(
+        File.join(@root, result[0].fetch("path")),
+        File.join(@root, result[1].fetch("path"))
+      )
+      if same_file
         raise Error.new(
           "ambiguous_role", "one file cannot serve as both spec and plan",
           {"path" => result[0].fetch("path"), "roles" => %w[spec plan]}

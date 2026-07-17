@@ -149,7 +149,7 @@ class AdversarialReviewManifestTest < Minitest::Test
       assert_includes markdown, "`bin/check --fast`"
       assert_includes markdown, "`bundle exec ruby test/widget_test.rb`"
       assert_includes markdown, "- Unresolved placeholder count: 1"
-      assert_equal [{"token" => "TODO", "line" => 5}],
+      assert_equal [{"kind" => "todo", "line" => 5}],
                    inventory.fetch("unresolved_placeholders")
       assert_equal 1, inventory.fetch("placeholder_count")
       assert_equal document.lines.length, inventory.fetch("line_count")
@@ -205,8 +205,8 @@ class AdversarialReviewManifestTest < Minitest::Test
     with_repository(files: {"docs/spec.md" => document}) do |repository|
       inventory = build_manifest(repository, spec: "docs/spec.md").fetch("inventory").first
 
-      assert_equal %w[TODO TBD FIXME ??? {{OWNER}} [PLACEHOLDER] <placeholder>],
-                   inventory.fetch("unresolved_placeholders").map { |item| item.fetch("token") }
+      assert_equal %w[todo tbd fixme question template template template],
+                   inventory.fetch("unresolved_placeholders").map { |item| item.fetch("kind") }
     end
   end
 
@@ -221,7 +221,23 @@ class AdversarialReviewManifestTest < Minitest::Test
       placeholders = build_manifest(repository, spec: "docs/spec.md")
                      .fetch("inventory").first.fetch("unresolved_placeholders")
 
-      assert_equal [{"token" => "TBD", "line" => 4}], placeholders
+      assert_equal [{"kind" => "tbd", "line" => 4}], placeholders
+    end
+  end
+
+  def test_inventory_normalizes_large_template_placeholders_without_content_leakage
+    sentinel = "DO_NOT_COPY_#{"x" * 10_000}"
+    document = "{{#{sentinel}}}\n"
+    with_repository(files: {"docs/spec.md" => document}) do |repository|
+      inventory = build_manifest(repository, spec: "docs/spec.md").fetch("inventory").first
+      rendered = inventory.inspect
+
+      assert_equal [{"kind" => "template", "line" => 1}],
+                   inventory.fetch("unresolved_placeholders")
+      assert_equal 1, inventory.fetch("placeholder_count")
+      assert_includes inventory.fetch("markdown"), "template (L1)"
+      refute_includes rendered, sentinel
+      assert_operator rendered.bytesize, :<, 1_000
     end
   end
 
@@ -358,6 +374,34 @@ class AdversarialReviewManifestTest < Minitest::Test
       end
 
       assert_equal %w[spec plan], error.details.fetch("roles")
+    end
+  end
+
+  def test_rejects_distinct_paths_with_the_same_file_identity_for_both_roles
+    with_repository(files: {"docs/review.md" => "# Review target\n"}) do |repository|
+      source = File.join(repository, "docs/review.md")
+      hard_link = File.join(repository, "docs/review-plan.md")
+      File.link(source, hard_link)
+
+      error = assert_manifest_error("ambiguous_role") do
+        build_manifest(
+          repository,
+          spec: "docs/review.md",
+          plan: "docs/review-plan.md"
+        )
+      end
+      assert_equal %w[spec plan], error.details.fetch("roles")
+
+      case_alias = File.join(repository, "docs/REVIEW.md")
+      if File.exist?(case_alias) && File.identical?(source, case_alias)
+        assert_manifest_error("ambiguous_role") do
+          build_manifest(
+            repository,
+            spec: "docs/review.md",
+            plan: "docs/REVIEW.md"
+          )
+        end
+      end
     end
   end
 
