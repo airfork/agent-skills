@@ -1,5 +1,4 @@
-require "json"
-require "securerandom"
+require "digest"
 
 module AdversarialReview
   module Adapters
@@ -23,33 +22,62 @@ module AdversarialReview
 
       def run(task, run_dir)
         state = State.load(run_dir)
-        validate_task!(task, state.manifest_snapshot)
-        canonical_run_dir = File.realpath(File.expand_path(run_dir))
-        task_path = File.join(canonical_run_dir, "tasks", "#{task.fetch("task_id")}.json")
-        write_new_json(task_path, task)
+        task_path = state.create_task_bundle(task.fetch("task_id")) do |manifest, state_data|
+          current_digests = state_data.fetch("current_target_digests")
+          canonical_task = validate_task!(task, manifest, current_digests)
+          live_digests = live_target_digests(manifest)
+          unless live_digests == current_digests &&
+                 task.fetch("artifact_digests") == current_digests
+            raise Error.new(
+              "target_digest_mismatch",
+              "live target digests do not match the authoritative run snapshot"
+            )
+          end
+          canonical_task
+        end
         {
           "status" => "awaiting-results",
           "task_path" => task_path,
           "capability_declaration_template" => task.fetch("capability_declaration_template"),
           "next_action" => "Return a schema-shaped result and parent capability declaration."
         }
+      rescue State::Error => error
+        code = case error.code
+               when "unsafe_path" then "unsafe_task_path"
+               else error.code
+               end
+        raise Error.new(code, error.message)
       end
 
-      def ingest_capability_declaration(declaration, task)
-        template = task.fetch("capability_declaration_template")
-        normalized = Capabilities.normalize(
-          declaration,
-          requested_model: template.fetch("model_selection").fetch("requested"),
-          requested_effort: template.fetch("effort_selection").fetch("requested")
-        )
-        Capabilities.gate(normalized, "PASS").merge("capabilities" => normalized)
+      def ingest_capability_declaration(declaration, task, run_dir)
+        unless task.is_a?(Hash) && task["task_id"].is_a?(String)
+          raise Error.new("invalid_task", "capability declaration task identity is invalid")
+        end
+        state = State.load(run_dir)
+        state.read_task_bundle(task.fetch("task_id")) do |manifest, state_data, emitted|
+          current_digests = state_data.fetch("current_target_digests")
+          validate_task!(emitted, manifest, current_digests)
+          unless emitted == task && live_target_digests(manifest) == current_digests &&
+                 emitted.fetch("artifact_digests") == current_digests
+            raise Error.new("invalid_task", "capability declaration task is not authoritative")
+          end
+          template = emitted.fetch("capability_declaration_template")
+          normalized = Capabilities.normalize(
+            declaration,
+            requested_model: template.fetch("model_selection").fetch("requested"),
+            requested_effort: template.fetch("effort_selection").fetch("requested")
+          )
+          Capabilities.gate(normalized, "PASS").merge("capabilities" => normalized)
+        end
       rescue KeyError => error
         raise Error.new("invalid_task", "capability template is missing #{error.key.inspect}")
+      rescue State::Error => error
+        raise Error.new("invalid_task", error.message)
       end
 
       private
 
-      def validate_task!(task, manifest)
+      def validate_task!(task, manifest, current_digests)
         unless task.is_a?(Hash) && task.keys.sort == TASK_KEYS.sort
           raise Error.new("invalid_task", "task bundle is not a closed object")
         end
@@ -102,14 +130,50 @@ module AdversarialReview
         unless manifest.fetch("enabled_tasks").include?(angle)
           raise Error.new("invalid_task", "task angle is not enabled by the run manifest")
         end
-        expected_task = Prompts.attack_task(manifest, angle, attempt, round: round)
+        expected_task = Prompts.attack_task(
+          manifest, angle, attempt, round: round, current_digests: current_digests
+        )
         unless task == expected_task
           raise Error.new("invalid_task", "task does not match the authoritative run manifest")
         end
+        expected_task
       rescue KeyError => error
         raise Error.new("invalid_task", "task is missing #{error.key.inspect}")
       rescue Prompts::Error => error
         raise Error.new("invalid_task", "authoritative task could not be rebuilt: #{error.message}")
+      end
+
+      def live_target_digests(manifest)
+        root = manifest.fetch("repository").fetch("root")
+        canonical_root = File.realpath(root)
+        unless canonical_root == root && File.directory?(canonical_root)
+          raise Error.new("target_digest_mismatch", "authoritative repository root is invalid")
+        end
+        manifest.fetch("targets").each_with_object({}) do |target, digests|
+          path = target.fetch("path")
+          unless safe_relative_path?(path)
+            raise Error.new("target_digest_mismatch", "authoritative target path is invalid")
+          end
+          absolute = File.expand_path(path, canonical_root)
+          unless absolute.start_with?(canonical_root + File::SEPARATOR) &&
+                 File.realpath(absolute) == absolute
+            raise Error.new("target_digest_mismatch", "authoritative target escapes repository")
+          end
+          expected = File.lstat(absolute)
+          flags = File::RDONLY
+          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+          File.open(absolute, flags) do |file|
+            opened = file.stat
+            unless opened.file? && !expected.symlink? &&
+                   expected.dev == opened.dev && expected.ino == opened.ino
+              raise Error.new("target_digest_mismatch", "authoritative target identity changed")
+            end
+            digests[path] = Digest::SHA256.hexdigest(file.read)
+          end
+        end
+      rescue KeyError, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP,
+             Errno::EACCES, Errno::EPERM => error
+        raise Error.new("target_digest_mismatch", "authoritative target is unavailable: #{error.class}")
       end
 
       def safe_relative_path?(path)
@@ -117,40 +181,6 @@ module AdversarialReview
           path.split(File::SEPARATOR).none? { |part| part.empty? || part == "." || part == ".." }
       end
 
-      def write_new_json(path, value)
-        destination_name = File.basename(path)
-        temporary_name = ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
-        created = false
-        Atomic.with_bound_directory(File.dirname(path)) do |_parent, directory|
-          begin
-            if Atomic.reject_relative_nonregular(directory, destination_name)
-              raise Error.new("task_collision", "task bundle already exists")
-            end
-            flags = File::WRONLY | File::CREAT | File::EXCL
-            flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-            file = Atomic.open_relative(directory, temporary_name, flags, 0o600)
-            created = true
-            begin
-              file.chmod(0o600)
-              file.write(JSON.generate(value))
-              file.write("\n")
-              file.flush
-              file.fsync
-            ensure
-              file.close unless file.closed?
-            end
-            Atomic.link_relative(directory, temporary_name, destination_name)
-            directory.fsync
-          rescue Errno::EEXIST
-            raise Error.new("task_collision", "task bundle already exists")
-          ensure
-            Atomic.unlink_relative(directory, temporary_name) if created
-          end
-        end
-        path
-      rescue Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
-        raise Error.new("unsafe_task_path", "task path is unsafe: #{error.class}")
-      end
     end
   end
 end

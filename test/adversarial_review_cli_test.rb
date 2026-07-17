@@ -216,6 +216,37 @@ class AdversarialReviewCliTest < Minitest::Test
     assert_includes error.message, "normalized"
   end
 
+  def test_capability_gate_only_suppresses_an_ordinary_pass
+    enforced = AdversarialReview::Capabilities.normalize(
+      complete_capability_declaration("enforced")
+    )
+    degraded_declaration = complete_capability_declaration("enforced")
+    degraded_declaration.fetch("fresh_context")["status"] = "unavailable"
+    degraded = AdversarialReview::Capabilities.normalize(degraded_declaration)
+
+    degraded_pass = AdversarialReview::Capabilities.gate(degraded, "PASS")
+    degraded_fail = AdversarialReview::Capabilities.gate(degraded, "FAIL")
+    enforced_pass = AdversarialReview::Capabilities.gate(enforced, "PASS")
+    enforced_fail = AdversarialReview::Capabilities.gate(enforced, "FAIL")
+
+    assert_equal "DEGRADED CAPABILITIES", degraded_pass.fetch("verdict")
+    assert_equal true, degraded_pass.fetch("ordinary_verdict_suppressed")
+    assert_equal "DEGRADED CAPABILITIES", degraded_pass.fetch("capability_status")
+    assert_includes degraded_pass.fetch("degraded_capabilities"), "fresh_context"
+    assert_equal true, degraded_pass.fetch("findings_usable")
+
+    assert_equal "FAIL", degraded_fail.fetch("verdict")
+    assert_equal false, degraded_fail.fetch("ordinary_verdict_suppressed")
+    assert_equal "DEGRADED CAPABILITIES", degraded_fail.fetch("capability_status")
+    assert_includes degraded_fail.fetch("degraded_capabilities"), "fresh_context"
+    assert_equal true, degraded_fail.fetch("findings_usable")
+
+    assert_equal "PASS", enforced_pass.fetch("verdict")
+    assert_equal "CAPABILITIES SATISFIED", enforced_pass.fetch("capability_status")
+    assert_equal "FAIL", enforced_fail.fetch("verdict")
+    assert_equal "CAPABILITIES SATISFIED", enforced_fail.fetch("capability_status")
+  end
+
   def test_generic_adapter_emits_one_private_pending_task_without_launching_a_process
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md")
@@ -295,18 +326,23 @@ class AdversarialReviewCliTest < Minitest::Test
           "observation_source" => "parent dispatcher"
         }
       }
+      Dir.mktmpdir("adversarial-review-capability-ingest") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+        adapter.run(task, run_dir)
 
-      ingested = adapter.ingest_capability_declaration(declaration, task)
+        ingested = adapter.ingest_capability_declaration(declaration, task, run_dir)
 
-      assert_equal "DEGRADED CAPABILITIES", ingested.fetch("verdict")
-      assert_equal true, ingested.fetch("findings_usable")
-      assert_equal "enforced", ingested.dig("capabilities", "read_only", "status")
-      assert_equal "parent dispatcher", ingested.dig("capabilities", "read_only", "source")
-      assert_equal "unavailable", ingested.dig("capabilities", "fresh_context", "status")
-      assert_equal "reviewer-model", ingested.dig("capabilities", "model_selection", "requested")
-      assert_equal "high", ingested.dig("capabilities", "effort_selection", "requested")
-      refute_respond_to adapter, :ingest
-      refute_respond_to adapter, :ingest_result
+        assert_equal "DEGRADED CAPABILITIES", ingested.fetch("verdict")
+        assert_equal true, ingested.fetch("findings_usable")
+        assert_equal "enforced", ingested.dig("capabilities", "read_only", "status")
+        assert_equal "parent dispatcher", ingested.dig("capabilities", "read_only", "source")
+        assert_equal "unavailable", ingested.dig("capabilities", "fresh_context", "status")
+        assert_equal "reviewer-model", ingested.dig("capabilities", "model_selection", "requested")
+        assert_equal "high", ingested.dig("capabilities", "effort_selection", "requested")
+        refute_respond_to adapter, :ingest
+        refute_respond_to adapter, :ingest_result
+      end
     end
   end
 
@@ -509,6 +545,211 @@ class AdversarialReviewCliTest < Minitest::Test
 
         assert_equal "invalid_task", error.code
         assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_generic_adapter_rejects_stale_live_target_digests
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      Dir.mktmpdir("adversarial-review-live-digest") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+        File.binwrite(File.join(repository, "docs/spec.md"), "# Changed after preparation\n")
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.run(task, run_dir)
+        end
+
+        assert_equal "target_digest_mismatch", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_attack_task_uses_an_authoritative_current_digest_override
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      current_digests = {"docs/spec.md" => "b" * 64}
+
+      task = AdversarialReview::Prompts.attack_task(
+        manifest,
+        "assumptions-checker",
+        1,
+        round: 2,
+        current_digests: current_digests
+      )
+
+      assert_equal current_digests, task.fetch("artifact_digests")
+      assert_equal "b" * 64, task.dig("targets", 0, "sha256")
+      refute_equal current_digests, {
+        "docs/spec.md" => manifest.dig("targets", 0, "sha256")
+      }
+    end
+  end
+
+  def test_generic_adapter_rejects_a_substituted_run_after_state_authentication
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      Dir.mktmpdir("adversarial-review-run-substitution") do |directory|
+        run_dir = File.join(directory, "run")
+        moved_run_dir = File.join(directory, "authenticated-run")
+        AdversarialReview::State.create(run_dir, manifest)
+        authenticated = AdversarialReview::State.load(run_dir)
+        File.rename(run_dir, moved_run_dir)
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = AdversarialReview::State.stub(:load, authenticated) do
+          assert_raises(AdversarialReview::Adapters::Generic::Error) do
+            AdversarialReview::Adapters::Generic.new.run(task, run_dir)
+          end
+        end
+
+        assert_equal "unsafe_run_dir", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+        assert_empty Dir.children(File.join(moved_run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_mutating_returned_restriction_text_cannot_change_the_canonical_task
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      original = task.fetch("mutation_restrictions").first.dup
+      begin
+        task.fetch("mutation_restrictions").first.replace("tampered mutable restriction")
+        rebuilt = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+
+        assert_equal original, rebuilt.fetch("mutation_restrictions").first
+        Dir.mktmpdir("adversarial-review-mutable-restriction") do |directory|
+          run_dir = File.join(directory, "run")
+          AdversarialReview::State.create(run_dir, manifest)
+          error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+            AdversarialReview::Adapters::Generic.new.run(task, run_dir)
+          end
+          assert_equal "invalid_task", error.code
+          assert_empty Dir.children(File.join(run_dir, "tasks"))
+        end
+      ensure
+        canonical = AdversarialReview::Prompts::MUTATION_RESTRICTIONS.first
+        canonical.replace(original) unless canonical.frozen? || canonical == original
+      end
+    end
+  end
+
+  def test_capability_ingest_rejects_a_fabricated_unemitted_task
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      fabricated = AdversarialReview::Prompts.attack_task(
+        manifest, "assumptions-checker", 1
+      )
+      declaration = complete_capability_declaration("enforced")
+      Dir.mktmpdir("adversarial-review-capability-binding") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.ingest_capability_declaration(
+            declaration, fabricated, run_dir
+          )
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_capability_ingest_rejects_a_forged_template_for_an_emitted_task
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      forged = JSON.parse(JSON.generate(task))
+      forged.dig("capability_declaration_template", "model_selection")["requested"] =
+        "forged-model"
+      declaration = complete_capability_declaration("enforced")
+      Dir.mktmpdir("adversarial-review-forged-capability") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+        adapter = AdversarialReview::Adapters::Generic.new
+        adapter.run(task, run_dir)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          adapter.ingest_capability_declaration(declaration, forged, run_dir)
+        end
+
+        assert_equal "invalid_task", error.code
+      end
+    end
+  end
+
+  def test_role_contract_parser_does_not_strip_an_unspaced_closing_hash
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      Dir.mktmpdir("adversarial-review-commonmark-heading") do |directory|
+        angles = File.join(directory, "angles.md")
+        File.binwrite(angles, <<~MARKDOWN)
+          # Angles
+
+          ## Assumptions Checker#
+          This is a different CommonMark heading.
+        MARKDOWN
+
+        assert_raises(AdversarialReview::Prompts::Error) do
+          AdversarialReview::Prompts.attack_task(
+            manifest, "assumptions-checker", 1, attack_angles_path: angles
+          )
+        end
+      end
+    end
+  end
+
+  def test_role_contract_parser_accepts_a_spaced_closing_hash_sequence
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      Dir.mktmpdir("adversarial-review-commonmark-heading") do |directory|
+        angles = File.join(directory, "angles.md")
+        File.binwrite(angles, <<~MARKDOWN)
+          # Angles
+
+          ## Assumptions Checker ##
+          Valid contract.
+        MARKDOWN
+
+        task = AdversarialReview::Prompts.attack_task(
+          manifest, "assumptions-checker", 1, attack_angles_path: angles
+        )
+
+        assert_equal "## Assumptions Checker ##\nValid contract.",
+                     task.fetch("role_contract")
+      end
+    end
+  end
+
+  def test_generic_adapter_serializes_rebuilt_canonical_task_bytes
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      canonical = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      reordered = canonical.to_a.reverse.each_with_object({}) do |(key, value), task|
+        task[key] = value
+      end
+      assert_equal canonical, reordered
+
+      Dir.mktmpdir("adversarial-review-canonical-bytes") do |directory|
+        canonical_run = File.join(directory, "canonical-run")
+        reordered_run = File.join(directory, "reordered-run")
+        AdversarialReview::State.create(canonical_run, manifest)
+        AdversarialReview::State.create(reordered_run, manifest)
+        adapter = AdversarialReview::Adapters::Generic.new
+
+        canonical_path = adapter.run(canonical, canonical_run).fetch("task_path")
+        reordered_path = adapter.run(reordered, reordered_run).fetch("task_path")
+
+        assert_equal File.binread(canonical_path), File.binread(reordered_path)
+        assert_equal JSON.generate(canonical) + "\n", File.binread(reordered_path)
       end
     end
   end

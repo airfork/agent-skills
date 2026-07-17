@@ -100,9 +100,12 @@ module AdversarialReview
         required.include?(field) && record.fetch(field).fetch("status") == "behavioral"
       end)
       degraded.uniq!
-      suppressed = !degraded.empty?
+      capabilities_degraded = !degraded.empty?
+      suppressed = capabilities_degraded && ordinary_verdict == "PASS"
       {
         "verdict" => suppressed ? "DEGRADED CAPABILITIES" : ordinary_verdict,
+        "capability_status" => capabilities_degraded ?
+          "DEGRADED CAPABILITIES" : "CAPABILITIES SATISFIED",
         "ordinary_verdict_suppressed" => suppressed,
         "findings_usable" => true,
         "degraded_capabilities" => degraded

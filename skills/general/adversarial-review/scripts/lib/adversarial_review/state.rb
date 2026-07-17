@@ -105,6 +105,8 @@ module AdversarialReview
 
     def self.create(run_dir, manifest)
       created_run_dir = nil
+      run_identity = nil
+      tasks_identity = nil
       run_id = manifest.fetch("run_id")
       validate_run_id!(run_id)
       digests = target_digests(manifest)
@@ -153,8 +155,13 @@ module AdversarialReview
         validate_snapshot!(manifest, data)
         Atomic.write_json(File.join(canonical_run_dir, "manifest.json"), manifest)
         Atomic.write_json(File.join(canonical_run_dir, "state.json"), data)
+        run_identity = File.lstat(canonical_run_dir)
+        tasks_identity = File.lstat(File.join(canonical_run_dir, "tasks"))
       end
-      new(canonical_run_dir, data, manifest)
+      new(
+        canonical_run_dir, data, manifest,
+        run_identity: run_identity, tasks_identity: tasks_identity
+      )
     rescue KeyError => error
       cleanup_created_run(created_run_dir)
       raise Error.new("invalid_manifest", "manifest is missing required state fields", {"field" => error.key}, 3)
@@ -172,18 +179,27 @@ module AdversarialReview
       lock_path = File.join(canonical_run_dir, ".state.lock")
       manifest = nil
       data = nil
+      run_identity = nil
+      tasks_identity = nil
       Atomic.open_lock(lock_path, exclusive: false) do
         manifest = Atomic.read_json(File.join(canonical_run_dir, "manifest.json"))
         data = Atomic.read_json(File.join(canonical_run_dir, "state.json"))
         validate_snapshot!(manifest, data)
+        run_identity = File.lstat(canonical_run_dir)
+        tasks_identity = File.lstat(File.join(canonical_run_dir, "tasks"))
       end
-      new(canonical_run_dir, data, manifest)
+      new(
+        canonical_run_dir, data, manifest,
+        run_identity: run_identity, tasks_identity: tasks_identity
+      )
     end
 
-    def initialize(run_dir, data, manifest)
+    def initialize(run_dir, data, manifest, run_identity:, tasks_identity:)
       @run_dir = run_dir
       @data = data
       @manifest = manifest
+      @run_identity = run_identity
+      @tasks_identity = tasks_identity
     end
 
     def to_h
@@ -193,7 +209,12 @@ module AdversarialReview
 
     def manifest_snapshot
       snapshot = nil
-      Atomic.open_lock(File.join(@run_dir, ".state.lock"), exclusive: false) do
+      Atomic.open_lock(
+        File.join(@run_dir, ".state.lock"),
+        exclusive: false,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do
         manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
         data = Atomic.read_json(File.join(@run_dir, "state.json"))
         self.class.validate_snapshot!(manifest, data)
@@ -202,6 +223,68 @@ module AdversarialReview
         snapshot = deep_freeze(deep_copy(manifest))
       end
       snapshot
+    end
+
+    def create_task_bundle(task_id)
+      unless task_id.is_a?(String) && RUN_ID.match?(task_id) && task_id != "." && task_id != ".."
+        raise Error.new("invalid_task_id", "task ID contains unsafe characters", {"task_id" => task_id})
+      end
+      task_path = File.join(@run_dir, "tasks", "#{task_id}.json")
+      Atomic.open_lock(
+        File.join(@run_dir, ".state.lock"),
+        exclusive: true,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do
+        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+        self.class.validate_snapshot!(manifest, data)
+        value = yield(
+          deep_freeze(deep_copy(manifest)),
+          deep_freeze(deep_copy(data))
+        )
+        Atomic.with_bound_directory(
+          File.dirname(task_path),
+          code: "unsafe_task_path",
+          expected_identity: @tasks_identity
+        ) do |_parent, tasks_directory|
+          Atomic.write_new_json(tasks_directory, File.basename(task_path), value)
+        end
+      end
+      task_path
+    end
+
+    def read_task_bundle(task_id)
+      unless task_id.is_a?(String) && RUN_ID.match?(task_id) && task_id != "." && task_id != ".."
+        raise Error.new("invalid_task_id", "task ID contains unsafe characters", {"task_id" => task_id})
+      end
+      task_path = File.join(@run_dir, "tasks", "#{task_id}.json")
+      result = nil
+      Atomic.open_lock(
+        File.join(@run_dir, ".state.lock"),
+        exclusive: false,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do
+        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+        self.class.validate_snapshot!(manifest, data)
+        Atomic.with_bound_directory(
+          File.dirname(task_path),
+          code: "unsafe_task_path",
+          expected_identity: @tasks_identity
+        ) do |_parent, tasks_directory|
+          emitted = Atomic.read_json_relative(
+            tasks_directory, File.basename(task_path), code: "invalid_task"
+          )
+          result = yield(
+            deep_freeze(deep_copy(manifest)),
+            deep_freeze(deep_copy(data)),
+            deep_freeze(emitted)
+          )
+        end
+      end
+      result
     end
 
     def transition_to(next_stage)

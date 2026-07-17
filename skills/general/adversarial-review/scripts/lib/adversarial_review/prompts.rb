@@ -28,12 +28,12 @@ module AdversarialReview
     MUTATION_RESTRICTIONS = [
       "Do not edit, create, delete, rename, format, or mutate repository files.",
       "Do not mutate review state or task/result bundles."
-    ].freeze
+    ].map(&:freeze).freeze
     TOOL_RESTRICTIONS = [
       "Use read-only file inspection and search only.",
       "Do not invoke builds, tests, formatters, installers, migrations, or application commands.",
       "Do not invoke or dispatch recursive agents."
-    ].freeze
+    ].map(&:freeze).freeze
     INVENTORY_KEYS = %w[
       role path markdown word_count line_count placeholder_count
       unresolved_placeholders referenced_paths entry_counts
@@ -42,6 +42,7 @@ module AdversarialReview
     module_function
 
     def attack_task(manifest, angle, attempt, round: 1,
+                    current_digests: nil,
                     attack_angles_path: File.join(AdversarialReview.root, "attack-angles.md"))
       validate_identity!(manifest, angle, attempt, round)
       targets = manifest.fetch("targets").map do |target|
@@ -52,12 +53,27 @@ module AdversarialReview
           "sha256" => target.fetch("sha256")
         }
       end
-      artifact_digests = targets.each_with_object({}) do |target, digests|
+      manifest_digests = targets.each_with_object({}) do |target, digests|
         digests[target.fetch("path")] = target.fetch("sha256")
       end
-      if artifact_digests.length != targets.length ||
+      if manifest_digests.length != targets.length ||
          targets.map { |target| target.fetch("role") }.uniq.length != targets.length
         raise Error, "target paths and roles must be unique"
+      end
+      source_digests = current_digests || manifest_digests
+      unless source_digests.is_a?(Hash) &&
+             source_digests.keys.sort == manifest_digests.keys.sort &&
+             source_digests.values.all? do |digest|
+               digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
+             end
+        raise Error, "current target digests are malformed"
+      end
+      artifact_digests = targets.each_with_object({}) do |target, copy|
+        path = target.fetch("path")
+        copy[path] = source_digests.fetch(path)
+      end
+      targets = targets.map do |target|
+        target.merge("sha256" => artifact_digests.fetch(target.fetch("path")))
       end
       inventory = canonical_inventory(manifest, targets)
       context_pointers = context_records(manifest)
@@ -81,8 +97,8 @@ module AdversarialReview
           requested_model: manifest.fetch("requested_model"),
           requested_effort: manifest.fetch("requested_effort")
         ),
-        "mutation_restrictions" => MUTATION_RESTRICTIONS.dup,
-        "tool_restrictions" => TOOL_RESTRICTIONS.dup,
+        "mutation_restrictions" => MUTATION_RESTRICTIONS.map(&:dup),
+        "tool_restrictions" => TOOL_RESTRICTIONS.map(&:dup),
         "prompt" => CANONICAL_PROMPT
       }
     rescue KeyError => error
@@ -242,13 +258,14 @@ module AdversarialReview
           fence_length = opening[1].length
           next
         end
-        heading = line.match(/\A {0,3}(\#{1,6})[ \t]+(.+?)[ \t]*\#*[ \t]*(?:\r?\n)?\z/)
+        heading = line.match(/\A {0,3}(\#{1,6})[ \t]+(.+?)[ \t]*(?:\r?\n)?\z/)
         next unless heading
 
+        name = heading[2].rstrip.sub(/[ \t]+\#+\z/, "").rstrip
         headings << {
           "index" => index,
           "level" => heading[1].length,
-          "name" => heading[2].rstrip
+          "name" => name
         }
       end
       headings.map.with_index do |heading, heading_index|

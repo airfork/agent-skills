@@ -66,7 +66,63 @@ module AdversarialReview
       raise_state_error("unsafe_path", "atomic write path is unsafe", {"path" => path, "cause" => error.class.name})
     end
 
-    def with_bound_directory(path, code: "unsafe_path")
+    def write_new_json(directory, destination_name, value)
+      validate_relative_name!(destination_name)
+      temporary_name = ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
+      created = false
+      begin
+        if reject_relative_nonregular(directory, destination_name, "task_collision")
+          raise_state_error(
+            "task_collision", "task bundle already exists", {"path" => destination_name}
+          )
+        end
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        file = open_relative(directory, temporary_name, flags, 0o600)
+        created = true
+        begin
+          file.chmod(0o600)
+          file.write(JSON.generate(value))
+          file.write("\n")
+          file.flush
+          file.fsync
+        ensure
+          file.close unless file.closed?
+        end
+        link_relative(directory, temporary_name, destination_name)
+        directory.fsync
+      rescue Errno::EEXIST
+        raise_state_error(
+          "task_collision", "task bundle already exists", {"path" => destination_name}
+        )
+      ensure
+        unlink_relative(directory, temporary_name) if created
+      end
+      destination_name
+    rescue Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      raise_state_error(
+        "unsafe_task_path", "task bundle path is unsafe",
+        {"path" => destination_name, "cause" => error.class.name}
+      )
+    end
+
+    def read_json_relative(directory, name, code: "invalid_task")
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      file = open_relative(directory, name, flags)
+      begin
+        reject_nonregular_handle(file, name)
+        JSON.parse(file.read)
+      ensure
+        file.close if file && !file.closed?
+      end
+    rescue JSON::ParserError => error
+      raise_state_error(code, "task bundle JSON is invalid", {"path" => name, "cause" => error.message}, 3)
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      raise_state_error(code, "task bundle is unavailable", {"path" => name, "cause" => error.class.name}, 3)
+    end
+
+    def with_bound_directory(path, code: "unsafe_path", expected_identity: nil)
       unless Native::AVAILABLE
         raise_state_error(code, "descriptor-relative filesystem operations are unavailable", {"path" => path})
       end
@@ -78,6 +134,9 @@ module AdversarialReview
       File.open(expanded, flags) do |directory|
         unless directory.stat.directory? && same_identity?(expected, directory.stat)
           raise_state_error(code, "directory changed while it was opened", {"path" => expanded})
+        end
+        if expected_identity && !same_identity?(expected_identity, directory.stat)
+          raise_state_error(code, "directory identity does not match authenticated state", {"path" => expanded})
         end
         verify_directory_identity!(expanded, directory, code: code)
         yield expanded, directory
@@ -164,10 +223,15 @@ module AdversarialReview
       raise SystemCallError.new("#{operation} #{path}", error_number)
     end
 
-    def open_lock(path, exclusive:)
+    def open_lock(path, exclusive:, expected_directory_identity: nil,
+                  identity_code: "unsafe_lock")
       name = File.basename(path)
       anchor_name = "#{name}.anchor"
-      with_bound_directory(File.dirname(path), code: "unsafe_lock") do |parent, directory|
+      with_bound_directory(
+        File.dirname(path),
+        code: identity_code,
+        expected_identity: expected_directory_identity
+      ) do |parent, directory|
         flags = File::RDWR
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         file = nil

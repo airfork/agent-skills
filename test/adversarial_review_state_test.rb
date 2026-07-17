@@ -224,6 +224,76 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_create_task_bundle_yields_frozen_snapshots_and_writes_under_the_state_lock
+    with_state do |state, run_dir|
+      state_before = File.binread(File.join(run_dir, "state.json"))
+      lock_was_held = nil
+      task = {"task_id" => "attack-test-r1-a1", "payload" => "canonical"}
+
+      task_path = state.create_task_bundle(task.fetch("task_id")) do |manifest_snapshot, state_snapshot|
+        File.open(File.join(run_dir, ".state.lock"), File::RDWR) do |lock|
+          lock_was_held = !lock.flock(File::LOCK_EX | File::LOCK_NB)
+        end
+        assert_predicate manifest_snapshot, :frozen?
+        assert_predicate state_snapshot, :frozen?
+        task
+      end
+
+      assert_equal true, lock_was_held
+      assert_equal File.join(File.realpath(run_dir), "tasks", "attack-test-r1-a1.json"), task_path
+      assert_equal JSON.generate(task) + "\n", File.binread(task_path)
+      assert_equal 0o600, File.stat(task_path).mode & 0o777
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+    end
+  end
+
+  def test_create_task_bundle_rejects_a_substituted_run_directory_identity
+    Dir.mktmpdir("adversarial-review-state-task-substitution") do |directory|
+      run_dir = File.join(directory, "run")
+      moved_run_dir = File.join(directory, "authenticated-run")
+      state = AdversarialReview::State.create(run_dir, manifest)
+      File.rename(run_dir, moved_run_dir)
+      AdversarialReview::State.create(run_dir, manifest)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.create_task_bundle("attack-test-r1-a1") { manifest }
+      end
+
+      assert_equal "unsafe_run_dir", error.code
+      assert_empty Dir.children(File.join(run_dir, "tasks"))
+      assert_empty Dir.children(File.join(moved_run_dir, "tasks"))
+    end
+  end
+
+  def test_create_task_bundle_rejects_a_substituted_tasks_directory_identity
+    with_state do |state, run_dir|
+      tasks_dir = File.join(run_dir, "tasks")
+      moved_tasks_dir = File.join(run_dir, "authenticated-tasks")
+      File.rename(tasks_dir, moved_tasks_dir)
+      Dir.mkdir(tasks_dir, 0o700)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.create_task_bundle("attack-test-r1-a1") { manifest }
+      end
+
+      assert_equal "unsafe_task_path", error.code
+      assert_empty Dir.children(tasks_dir)
+      assert_empty Dir.children(moved_tasks_dir)
+    end
+  end
+
+  def test_read_task_bundle_rejects_a_missing_emitted_task
+    with_state do |state, _run_dir|
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.read_task_bundle("attack-missing-r1-a1") do
+          flunk "missing task unexpectedly yielded"
+        end
+      end
+
+      assert_equal "invalid_task", error.code
+    end
+  end
+
   def test_load_ignores_an_interrupted_sibling_temporary_file
     with_state do |state, run_dir|
       File.write(File.join(run_dir, ".state.json.tmp-orphan"), "{\"stage\":")
