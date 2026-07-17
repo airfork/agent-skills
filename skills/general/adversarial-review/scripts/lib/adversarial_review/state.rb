@@ -191,6 +191,19 @@ module AdversarialReview
       deep_copy(@data)
     end
 
+    def manifest_snapshot
+      snapshot = nil
+      Atomic.open_lock(File.join(@run_dir, ".state.lock"), exclusive: false) do
+        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+        self.class.validate_snapshot!(manifest, data)
+        @manifest = manifest
+        @data = data
+        snapshot = deep_freeze(deep_copy(manifest))
+      end
+      snapshot
+    end
+
     def transition_to(next_stage)
       mutate! do |data|
         current = data.fetch("stage")

@@ -23,7 +23,7 @@ module AdversarialReview
 
       def run(task, run_dir)
         state = State.load(run_dir)
-        validate_task!(task, state.to_h.fetch("run_id"))
+        validate_task!(task, state.manifest_snapshot)
         canonical_run_dir = File.realpath(File.expand_path(run_dir))
         task_path = File.join(canonical_run_dir, "tasks", "#{task.fetch("task_id")}.json")
         write_new_json(task_path, task)
@@ -49,11 +49,12 @@ module AdversarialReview
 
       private
 
-      def validate_task!(task, run_id)
+      def validate_task!(task, manifest)
         unless task.is_a?(Hash) && task.keys.sort == TASK_KEYS.sort
           raise Error.new("invalid_task", "task bundle is not a closed object")
         end
-        unless task.fetch("schema_version") == 1 && task.fetch("run_id") == run_id
+        unless task.fetch("schema_version") == 1 &&
+               task.fetch("run_id") == manifest.fetch("run_id")
           raise Error.new("invalid_task_identity", "task identity does not match the run")
         end
         task_id = task.fetch("task_id")
@@ -98,8 +99,17 @@ module AdversarialReview
         unless expected_digests.length == targets.length && expected_digests == digests
           raise Error.new("invalid_task_digests", "task artifact digests do not match targets")
         end
+        unless manifest.fetch("enabled_tasks").include?(angle)
+          raise Error.new("invalid_task", "task angle is not enabled by the run manifest")
+        end
+        expected_task = Prompts.attack_task(manifest, angle, attempt, round: round)
+        unless task == expected_task
+          raise Error.new("invalid_task", "task does not match the authoritative run manifest")
+        end
       rescue KeyError => error
         raise Error.new("invalid_task", "task is missing #{error.key.inspect}")
+      rescue Prompts::Error => error
+        raise Error.new("invalid_task", "authoritative task could not be rebuilt: #{error.message}")
       end
 
       def safe_relative_path?(path)

@@ -422,6 +422,97 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_generic_adapter_rejects_coherently_changed_target_digests
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      changed_digest = "b" * 64
+      tampered = task.merge(
+        "targets" => [task.fetch("targets").first.merge("sha256" => changed_digest)],
+        "artifact_digests" => {"docs/spec.md" => changed_digest}
+      )
+      Dir.mktmpdir("adversarial-review-authoritative-digest") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.run(tampered, run_dir)
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_generic_adapter_rejects_a_syntactically_valid_disabled_angle
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      tampered = task.merge(
+        "angle" => "disabled-angle",
+        "task_id" => "attack-disabled-angle-r1-a1"
+      )
+      Dir.mktmpdir("adversarial-review-authoritative-angle") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.run(tampered, run_dir)
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_generic_adapter_rejects_coherently_changed_target_role_and_path
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      digest = task.dig("targets", 0, "sha256")
+      tampered = task.merge(
+        "targets" => [{"role" => "plan", "path" => "docs/other.md", "sha256" => digest}],
+        "artifact_digests" => {"docs/other.md" => digest}
+      )
+      Dir.mktmpdir("adversarial-review-authoritative-target") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.run(tampered, run_dir)
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
+  def test_generic_adapter_rejects_a_coherently_changed_disabled_schema_role
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
+      tampered = task.merge(
+        "angle" => "divergence-probe-1",
+        "task_id" => "attack-divergence-probe-1-r1-a1",
+        "schema" => "assets/schemas/divergence.json"
+      )
+      Dir.mktmpdir("adversarial-review-authoritative-schema") do |directory|
+        run_dir = File.join(directory, "run")
+        AdversarialReview::State.create(run_dir, manifest)
+
+        error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.new.run(tampered, run_dir)
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+      end
+    end
+  end
+
   private
 
   def build_manifest(repository, spec: nil, plan: nil, context_paths: [], tier: "default")

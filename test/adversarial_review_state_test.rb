@@ -211,6 +211,19 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_manifest_snapshot_is_a_deep_frozen_copy_read_under_the_state_lock
+    with_state do |state, _run_dir|
+      snapshot = state.manifest_snapshot
+
+      assert_equal manifest, snapshot
+      assert_predicate snapshot, :frozen?
+      assert_predicate snapshot.fetch("targets"), :frozen?
+      assert_predicate snapshot.fetch("targets").first, :frozen?
+      assert_raises(FrozenError) { snapshot.fetch("targets").first["path"] = "changed" }
+      refute_same snapshot, state.manifest_snapshot
+    end
+  end
+
   def test_load_ignores_an_interrupted_sibling_temporary_file
     with_state do |state, run_dir|
       File.write(File.join(run_dir, ".state.json.tmp-orphan"), "{\"stage\":")
