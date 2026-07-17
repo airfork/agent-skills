@@ -9,6 +9,7 @@ module AdversarialReview
     MODES = %w[critique revise].freeze
     OUTPUTS = %w[chat file both].freeze
     EXECUTORS = %w[auto codex claude cursor gemini generic].freeze
+    ULTRA_INCOMPATIBLE_EXECUTORS = %w[codex cursor gemini].freeze
 
     BASE_TASKS = %w[
       implementer tester user assumptions-checker pre-mortem
@@ -36,9 +37,17 @@ module AdversarialReview
       TASK = /\bTASK[-_ ]?\d+\b/i
       COMMAND = /\A(?:\.?\/?(?:bin|scripts)\/|git\s|bundle\s|ruby\s|rake\s|npm\s|pnpm\s|yarn\s|make(?:\s|\z)|cargo\s|go\s)/
       PLACEHOLDER_DISPLAY_LIMIT = 16
+      MAX_HEADING_ENTRIES = 32
+      MAX_REQUIREMENT_ENTRIES = 32
+      MAX_TASK_ENTRIES = 32
+      MAX_PATH_ENTRIES = 32
+      MAX_COMMAND_ENTRIES = 32
+      MAX_PLACEHOLDER_ENTRIES = 32
+      MAX_ENTRY_CHARS = 160
+      MAX_RENDERED_CHARS = 16_384
 
-      def self.build(role, path, absolute_path)
-        new(role, path, File.read(absolute_path)).build
+      def self.build(role, path, contents)
+        new(role, path, contents).build
       end
 
       def initialize(role, path, contents)
@@ -61,18 +70,18 @@ module AdversarialReview
         @contents.lines.each_with_index do |line, index|
           line_number = index + 1
           if fence_character
-            closing_fence = /^\s*#{Regexp.escape(fence_character)}{#{fence_length},}\s*$/
+            closing_fence = /\A {0,3}#{Regexp.escape(fence_character)}{#{fence_length},}[ \t]*\r?\n?\z/
             if line.match?(closing_fence)
               fence_character = nil
               fence_length = nil
               next
             end
             candidate = line.strip
-            commands << candidate if command?(candidate)
+            commands << bounded_text(candidate) if command?(candidate)
             next
           end
 
-          opening_fence = line.match(/^\s*(`{3,}|~{3,})/)
+          opening_fence = line.match(/\A {0,3}(`{3,}|~{3,})/)
           if opening_fence
             fence_character = opening_fence[1][0]
             fence_length = opening_fence[1].length
@@ -83,16 +92,16 @@ module AdversarialReview
           if heading
             level = heading[1].length
             ancestry = ancestry.first(level - 1)
-            ancestry[level - 1] = heading[2]
-            headings << [line_number, ancestry.compact.join(" > ")]
+            ancestry[level - 1] = bounded_text(heading[2])
+            headings << [line_number, bounded_text(ancestry.compact.join(" > "))]
           end
 
-          line.scan(REQUIREMENT) { |label| requirements << [label, line_number] }
-          line.scan(TASK) { |label| tasks << [label, line_number] }
+          line.scan(REQUIREMENT) { |label| requirements << [bounded_text(label), line_number] }
+          line.scan(TASK) { |label| tasks << [bounded_text(label), line_number] }
           line.scan(/`([^`\n]+)`/) do |match|
             value = match.first.strip
-            paths << value if path_like?(value)
-            commands << value if command?(value)
+            paths << bounded_text(value) if path_like?(value)
+            commands << bounded_text(value) if command?(value)
           end
           line.to_enum(:scan, PLACEHOLDER).each do
             match = Regexp.last_match
@@ -103,8 +112,28 @@ module AdversarialReview
           end
         end
 
-        markdown = render(headings, requirements, tasks, paths.uniq.sort,
-                          commands.uniq.sort, placeholders)
+        retained_headings, heading_counts = retain(headings, MAX_HEADING_ENTRIES)
+        retained_requirements, requirement_counts = retain(
+          requirements, MAX_REQUIREMENT_ENTRIES
+        )
+        retained_tasks, task_counts = retain(tasks, MAX_TASK_ENTRIES)
+        retained_paths, path_counts = retain(paths.uniq.sort, MAX_PATH_ENTRIES)
+        retained_commands, command_counts = retain(commands.uniq.sort, MAX_COMMAND_ENTRIES)
+        retained_placeholders, placeholder_counts = retain(
+          placeholders, MAX_PLACEHOLDER_ENTRIES
+        )
+        entry_counts = {
+          "headings" => heading_counts,
+          "requirements" => requirement_counts,
+          "tasks" => task_counts,
+          "paths" => path_counts,
+          "commands" => command_counts,
+          "placeholders" => placeholder_counts
+        }
+        markdown = render(
+          retained_headings, retained_requirements, retained_tasks,
+          retained_paths, retained_commands, retained_placeholders, entry_counts
+        )
         {
           "role" => @role,
           "path" => @path,
@@ -112,8 +141,9 @@ module AdversarialReview
           "word_count" => @contents.scan(/\b[[:alnum:]_'-]+\b/).length,
           "line_count" => @contents.lines.length,
           "placeholder_count" => placeholders.length,
-          "unresolved_placeholders" => placeholders,
-          "referenced_paths" => paths.uniq.sort
+          "unresolved_placeholders" => retained_placeholders,
+          "referenced_paths" => retained_paths,
+          "entry_counts" => entry_counts
         }
       end
 
@@ -138,8 +168,33 @@ module AdversarialReview
         "template"
       end
 
-      def render(headings, requirements, tasks, paths, commands, placeholders)
+      def bounded_text(value)
+        redacted = value.gsub(PLACEHOLDER) { |match| "<#{placeholder_kind(match)}>" }
+        return redacted if redacted.length <= MAX_ENTRY_CHARS
+
+        marker = "...[truncated]"
+        redacted[0, MAX_ENTRY_CHARS - marker.length] + marker
+      end
+
+      def retain(entries, limit)
+        retained = entries.first(limit)
+        [
+          retained,
+          {
+            "total_count" => entries.length,
+            "retained_count" => retained.length,
+            "truncated" => entries.length > retained.length
+          }
+        ]
+      end
+
+      def render(headings, requirements, tasks, paths, commands, placeholders, entry_counts)
         lines = ["### #{@role}: `#{@path}`"]
+        lines << "#### Inventory entry counts"
+        entry_counts.each do |name, counts|
+          suffix = counts.fetch("truncated") ? " (truncated)" : ""
+          lines << "- #{name}: #{counts.fetch("retained_count")}/#{counts.fetch("total_count")}#{suffix}"
+        end
         append_entries(lines, "Headings", headings.map { |line, name| "L#{line} #{name}" })
         append_entries(lines, "Requirements", requirements.map { |label, line| "#{label} (L#{line})" })
         append_entries(lines, "Tasks", tasks.map { |label, line| "#{label} (L#{line})" })
@@ -149,10 +204,18 @@ module AdversarialReview
           "#{entry.fetch("kind")} (L#{entry.fetch("line")})"
         end
         append_entries(lines, "Unresolved placeholders", placeholder_entries)
-        lines << "- Unresolved placeholder count: #{placeholders.length}"
+        total_placeholders = entry_counts.fetch("placeholders").fetch("total_count")
+        lines << "- Unresolved placeholder count: #{total_placeholders}"
         lines << "- Words: #{@contents.scan(/\b[[:alnum:]_'-]+\b/).length}"
         lines << "- Lines: #{@contents.lines.length}"
-        lines.join("\n")
+        bound_rendered(lines.join("\n"))
+      end
+
+      def bound_rendered(markdown)
+        return markdown if markdown.length <= MAX_RENDERED_CHARS
+
+        marker = "\n...[inventory truncated]"
+        markdown[0, MAX_RENDERED_CHARS - marker.length] + marker
       end
 
       def append_entries(lines, heading, entries)
@@ -201,15 +264,12 @@ module AdversarialReview
       validate_enum("mode", @mode, MODES)
       validate_enum("output", @output, OUTPUTS)
       validate_enum("executor", @executor, EXECUTORS)
+      validate_compatible_options
 
       @root = repository_root
-      built_targets = targets
-      built_inventory = built_targets.map do |target|
-        Inventory.build(
-          target.fetch("role"), target.fetch("path"),
-          File.join(@root, target.fetch("path"))
-        )
-      end
+      snapshots = target_snapshots
+      built_targets = snapshots.map { |snapshot| snapshot.fetch("target") }
+      built_inventory = snapshots.map { |snapshot| snapshot.fetch("inventory") }
       {
         "schema_version" => 1,
         "run_id" => run_id,
@@ -239,84 +299,161 @@ module AdversarialReview
       )
     end
 
+    def validate_compatible_options
+      return unless @tier == "ultra" && ULTRA_INCOMPATIBLE_EXECUTORS.include?(@executor)
+
+      raise Error.new(
+        "incompatible_options", "ultra requires Claude or a portable execution route",
+        {"tier" => @tier, "executor" => @executor}
+      )
+    end
+
     def run_id
       "ar-#{Time.now.utc.strftime("%Y%m%dT%H%M%S%6NZ")}-#{SecureRandom.hex(4)}"
     end
 
     def repository_root
       repository = File.expand_path(@repository)
-      output, status = Open3.capture2e(
-        "git", "-C", repository, "rev-parse", "--show-toplevel"
-      )
-      unless status.success?
+      output, status = run_git(repository, "rev-parse", "--show-toplevel")
+      unless status.success? && !output.strip.empty?
         raise Error.new(
           "repository_root_unresolved", "could not resolve Git repository root",
-          {"repository" => repository}
+          {
+            "repository" => repository,
+            "context" => "repository_root",
+            "command" => ["git", "-C", repository, "rev-parse", "--show-toplevel"]
+          }
         )
       end
       File.realpath(output.strip)
     end
 
     def repository_metadata
-      head, head_status = git("rev-parse", "HEAD")
-      status_output, status_status = git("status", "--porcelain=v1", "--untracked-files=all")
-      status_lines = status_status.success? ? status_output.lines.map(&:chomp) : []
+      head = required_git("repository_head", true, "rev-parse", "HEAD")
+      status_output = required_git(
+        "repository_status", false, "status", "--porcelain=v1", "--untracked-files=all"
+      )
+      status_lines = status_output.lines.map(&:chomp)
       {
         "root" => @root,
-        "head" => head_status.success? ? head.strip : nil,
+        "head" => head.strip,
         "dirty" => !status_lines.empty?,
         "status" => status_lines
       }
     end
 
-    def git(*arguments)
-      Open3.capture2e("git", "-C", @root, *arguments)
+    def required_git(context, require_output, *arguments)
+      output, status = run_git(@root, *arguments)
+      return output if status.success? && (!require_output || !output.strip.empty?)
+
+      raise Error.new(
+        "git_command_failed", "Git metadata command failed: #{context}",
+        {
+          "context" => context,
+          "arguments" => arguments,
+          "command" => ["git", "-C", @root] + arguments
+        }
+      )
     end
 
-    def targets
+    def run_git(directory, *arguments)
+      Open3.capture2e("git", "-C", directory, *arguments)
+    end
+
+    def target_snapshots
       result = [["spec", @spec], ["plan", @plan]].each_with_object([]) do |(role, path), items|
         next unless path
 
-        expanded_path = File.expand_path(path, @root)
-        begin
-          absolute_path = File.realpath(expanded_path)
-        rescue Errno::ENOENT, Errno::ENOTDIR
-          raise Error.new(
-            "missing_file", "#{role} file does not exist: #{path}",
-            {"role" => role, "path" => path}
-          )
-        end
-        unless contained?(absolute_path)
-          raise Error.new(
-            "outside_repository", "#{role} path is outside the repository: #{path}",
-            {"role" => role, "path" => path}
-          )
-        end
-        unless File.file?(absolute_path)
-          raise Error.new(
-            "missing_file", "#{role} path is not a file: #{path}",
-            {"role" => role, "path" => path}
-          )
-        end
-        relative_path = Pathname.new(absolute_path).relative_path_from(Pathname.new(@root)).to_s
-
-        items << {
-          "role" => role,
-          "path" => relative_path,
-          "sha256" => Digest::SHA256.file(absolute_path).hexdigest
-        }
+        items << read_target_snapshot(role, path)
       end
-      same_file = result.length == 2 && File.identical?(
-        File.join(@root, result[0].fetch("path")),
-        File.join(@root, result[1].fetch("path"))
-      )
+      same_file = result.length == 2 &&
+                  result[0].fetch("identity") == result[1].fetch("identity")
       if same_file
         raise Error.new(
           "ambiguous_role", "one file cannot serve as both spec and plan",
-          {"path" => result[0].fetch("path"), "roles" => %w[spec plan]}
+          {"path" => result[0].fetch("target").fetch("path"), "roles" => %w[spec plan]}
         )
       end
       result
+    end
+
+    def read_target_snapshot(role, path)
+      absolute_path, relative_path, expected_stat = canonical_target(role, path)
+      before_target_open(role, path, absolute_path)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      begin
+        File.open(absolute_path, flags) do |file|
+          opened_stat = file.stat
+          unless opened_stat.file? && same_identity?(expected_stat, opened_stat)
+            raise target_changed_error(role, path)
+          end
+          contents = file.read
+          {
+            "target" => {
+              "role" => role,
+              "path" => relative_path,
+              "sha256" => Digest::SHA256.hexdigest(contents)
+            },
+            "inventory" => Inventory.build(role, relative_path, contents),
+            "identity" => [opened_stat.dev, opened_stat.ino]
+          }
+        end
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP
+        raise target_changed_error(role, path)
+      rescue Errno::EACCES, Errno::EPERM, Errno::EIO
+        raise Error.new(
+          "target_unreadable", "#{role} target could not be read: #{path}",
+          {"role" => role, "path" => path}
+        )
+      end
+    end
+
+    def canonical_target(role, path)
+      expanded_path = File.expand_path(path, @root)
+      begin
+        absolute_path = File.realpath(expanded_path)
+        expected_stat = File.stat(absolute_path)
+      rescue Errno::ENOENT, Errno::ENOTDIR
+        raise Error.new(
+          "missing_file", "#{role} file does not exist: #{path}",
+          {"role" => role, "path" => path}
+        )
+      rescue Errno::ELOOP, Errno::EACCES, Errno::EPERM, Errno::ENAMETOOLONG
+        raise Error.new(
+          "invalid_path", "#{role} path could not be resolved: #{path}",
+          {"role" => role, "path" => path}
+        )
+      end
+      unless contained?(absolute_path)
+        raise Error.new(
+          "outside_repository", "#{role} path is outside the repository: #{path}",
+          {"role" => role, "path" => path}
+        )
+      end
+      unless expected_stat.file?
+        raise Error.new(
+          "target_unreadable", "#{role} target is not a regular file: #{path}",
+          {"role" => role, "path" => path}
+        )
+      end
+      relative_path = Pathname.new(absolute_path).relative_path_from(Pathname.new(@root)).to_s
+      [absolute_path, relative_path, expected_stat]
+    end
+
+    def before_target_open(_role, _path, _absolute_path)
+      nil
+    end
+
+    def same_identity?(left, right)
+      left.dev == right.dev && left.ino == right.ino
+    end
+
+    def target_changed_error(role, path)
+      Error.new(
+        "target_changed", "#{role} target changed while the manifest was built: #{path}",
+        {"role" => role, "path" => path}
+      )
     end
 
     def contained?(path)
@@ -342,7 +479,8 @@ module AdversarialReview
             if contained?(real_path)
               paths << Pathname.new(real_path).relative_path_from(Pathname.new(@root)).to_s
             end
-          rescue Errno::ENOENT, Errno::ENOTDIR
+          rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP,
+                 Errno::EACCES, Errno::EPERM, Errno::ENAMETOOLONG
             # References to paths that do not exist are not context pointers.
           end
         end
@@ -363,7 +501,8 @@ module AdversarialReview
     def safe_repository_file?(relative_path)
       absolute_path = File.realpath(File.join(@root, relative_path))
       contained?(absolute_path) && File.file?(absolute_path)
-    rescue Errno::ENOENT, Errno::ENOTDIR
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP,
+           Errno::EACCES, Errno::EPERM, Errno::ENAMETOOLONG
       false
     end
 
@@ -373,6 +512,11 @@ module AdversarialReview
       rescue Errno::ENOENT, Errno::ENOTDIR
         raise Error.new(
           "missing_file", "context path does not exist: #{path}",
+          {"role" => "context", "path" => path}
+        )
+      rescue Errno::ELOOP, Errno::EACCES, Errno::EPERM, Errno::ENAMETOOLONG
+        raise Error.new(
+          "invalid_path", "context path could not be resolved: #{path}",
           {"role" => "context", "path" => path}
         )
       end

@@ -2,7 +2,7 @@ require "fileutils"
 require "tmpdir"
 
 module AdversarialReviewHelper
-  def with_repository(files: {}, commit: false)
+  def with_repository(files: {}, commit: true)
     Dir.mktmpdir("adversarial-review-test") do |repository|
       git(repository, "init", "--quiet")
       git(repository, "config", "user.name", "Test User")
@@ -16,7 +16,7 @@ module AdversarialReviewHelper
 
       if commit
         git(repository, "add", ".")
-        git(repository, "commit", "--quiet", "-m", "fixture")
+        git(repository, "commit", "--quiet", "--allow-empty", "-m", "fixture")
       end
 
       yield repository

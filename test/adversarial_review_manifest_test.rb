@@ -9,6 +9,11 @@ require_relative "support/adversarial_review_helper"
 
 class AdversarialReviewManifestTest < Minitest::Test
   include AdversarialReviewHelper
+  CommandStatus = Struct.new(:ok) do
+    def success?
+      ok
+    end
+  end
 
   def test_builds_a_spec_only_manifest
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
@@ -113,6 +118,52 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_rejects_failed_git_head_metadata
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      manifest_class = manifest_with_git_results(repository, head_success: false)
+
+      error = assert_manifest_error("git_command_failed") do
+        build_manifest_with(manifest_class, repository, spec: "docs/spec.md")
+      end
+      assert_equal "repository_head", error.details.fetch("context")
+      assert_equal %w[rev-parse HEAD], error.details.fetch("arguments")
+    end
+  end
+
+  def test_rejects_failed_git_status_metadata_instead_of_reporting_clean
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      manifest_class = manifest_with_git_results(repository, status_success: false)
+
+      error = assert_manifest_error("git_command_failed") do
+        build_manifest_with(manifest_class, repository, spec: "docs/spec.md")
+      end
+      assert_equal "repository_status", error.details.fetch("context")
+      assert_equal ["status", "--porcelain=v1", "--untracked-files=all"],
+                   error.details.fetch("arguments")
+    end
+  end
+
+  def test_rejects_a_target_swapped_after_canonical_resolution
+    with_repository(files: {"docs/spec.md" => "# Original\n"}) do |repository|
+      Dir.mktmpdir("outside-swap") do |outside|
+        outside_path = File.join(outside, "replacement.md")
+        File.write(outside_path, "# Replacement\n")
+        swapping_manifest = Class.new(AdversarialReview::Manifest) do
+          define_method(:before_target_open) do |_role, _path, absolute_path|
+            File.unlink(absolute_path)
+            File.symlink(outside_path, absolute_path)
+          end
+          private :before_target_open
+        end
+
+        error = assert_manifest_error("target_changed") do
+          build_manifest_with(swapping_manifest, repository, spec: "docs/spec.md")
+        end
+        assert_equal "spec", error.details.fetch("role")
+      end
+    end
+  end
+
   def test_assigns_well_formed_collision_resistant_run_ids
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       first = build_manifest(repository, spec: "docs/spec.md").fetch("run_id")
@@ -191,6 +242,16 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_context_paths_exclude_invalid_implicit_symlink_pointers
+    with_repository(files: {"docs/spec.md" => "See `loop.md`.\n"}) do |repository|
+      File.symlink("loop.md", File.join(repository, "loop.md"))
+      File.symlink("AGENTS.md", File.join(repository, "AGENTS.md"))
+
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      assert_equal [], manifest.fetch("context_paths")
+    end
+  end
+
   def test_inventory_detects_supported_placeholder_forms_in_prose
     document = <<~MARKDOWN
       TODO owner
@@ -225,6 +286,32 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_inventory_applies_commonmark_fence_indentation_limits
+    document = <<~MARKDOWN
+          ```
+      TODO visible after an invalid four-space opener
+          ```
+         ```
+      FIXME fenced
+          ```
+      ??? still fenced after an invalid four-space closer
+      ```
+      ~~~
+      TBD fenced
+      ~~~
+      TODO genuine prose
+    MARKDOWN
+    with_repository(files: {"docs/spec.md" => document}) do |repository|
+      placeholders = build_manifest(repository, spec: "docs/spec.md")
+                     .fetch("inventory").first.fetch("unresolved_placeholders")
+
+      assert_equal [
+        {"kind" => "todo", "line" => 2},
+        {"kind" => "todo", "line" => 12}
+      ], placeholders
+    end
+  end
+
   def test_inventory_normalizes_large_template_placeholders_without_content_leakage
     sentinel = "DO_NOT_COPY_#{"x" * 10_000}"
     document = "{{#{sentinel}}}\n"
@@ -238,6 +325,43 @@ class AdversarialReviewManifestTest < Minitest::Test
       assert_includes inventory.fetch("markdown"), "template (L1)"
       refute_includes rendered, sentinel
       assert_operator rendered.bytesize, :<, 1_000
+    end
+  end
+
+  def test_inventory_caps_sections_and_redacts_captured_template_content
+    sentinel = "DO_NOT_COPY_SECRET"
+    lines = []
+    100.times do |index|
+      lines << "# Heading #{index} {{#{sentinel}}} #{"x" * 300}"
+      lines << "REQ-#{index}: `src/file#{index}.rb`"
+      lines << "TASK-#{index}: `git show #{index} {{#{sentinel}}}`"
+    end
+    document = lines.join("\n") + "\n"
+
+    with_repository(files: {"docs/spec.md" => document}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      inventory = manifest.fetch("inventory").first
+      markdown = inventory.fetch("markdown")
+
+      assert_operator markdown.length, :<=, 16_384
+      refute_includes manifest.inspect, sentinel
+      assert_includes markdown, "- Unresolved placeholder count: 200"
+      counts = inventory.fetch("entry_counts")
+      {
+        "headings" => 100,
+        "requirements" => 100,
+        "tasks" => 100,
+        "paths" => 100,
+        "commands" => 100,
+        "placeholders" => 200
+      }.each do |section, total|
+        assert_equal total, counts.fetch(section).fetch("total_count"), section
+        assert_equal true, counts.fetch(section).fetch("truncated"), section
+        assert_operator counts.fetch(section).fetch("retained_count"), :<, total, section
+      end
+      refute_includes markdown,
+                      "x" * (AdversarialReview::Manifest::Inventory::MAX_ENTRY_CHARS + 1)
+      assert_operator manifest.inspect.bytesize, :<, 50_000
     end
   end
 
@@ -311,6 +435,32 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_ultra_rejects_non_claude_direct_executors_but_allows_portable_routes
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      %w[codex cursor gemini].each do |executor|
+        error = assert_manifest_error("incompatible_options") do
+          build_manifest(
+            repository,
+            spec: "docs/spec.md",
+            tier: "ultra",
+            executor: executor
+          )
+        end
+        assert_equal({"tier" => "ultra", "executor" => executor}, error.details)
+      end
+
+      %w[claude auto generic].each do |executor|
+        manifest = build_manifest(
+          repository,
+          spec: "docs/spec.md",
+          tier: "ultra",
+          executor: executor
+        )
+        assert_equal executor, manifest.fetch("requested_executor")
+      end
+    end
+  end
+
   def test_rejects_a_missing_target_file
     with_repository do |repository|
       error = assert_manifest_error("missing_file") do
@@ -349,6 +499,17 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_normalizes_a_target_symlink_loop_to_a_structured_error
+    with_repository do |repository|
+      File.symlink("loop.md", File.join(repository, "loop.md"))
+
+      error = assert_manifest_error("invalid_path") do
+        build_manifest(repository, spec: "loop.md")
+      end
+      assert_equal "spec", error.details.fetch("role")
+    end
+  end
+
   def test_rejects_an_explicit_context_path_outside_the_repository
     with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
       Dir.mktmpdir("outside-context") do |outside|
@@ -360,6 +521,21 @@ class AdversarialReviewManifestTest < Minitest::Test
         end
         assert_equal "context", error.details.fetch("role")
       end
+    end
+  end
+
+  def test_normalizes_an_explicit_context_symlink_loop_to_a_structured_error
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      File.symlink("context-loop.md", File.join(repository, "context-loop.md"))
+
+      error = assert_manifest_error("invalid_path") do
+        build_manifest(
+          repository,
+          spec: "docs/spec.md",
+          context_paths: ["context-loop.md"]
+        )
+      end
+      assert_equal "context", error.details.fetch("role")
     end
   end
 
@@ -413,13 +589,18 @@ class AdversarialReviewManifestTest < Minitest::Test
         build_manifest(directory, spec: "spec.md")
       end
       assert_equal File.expand_path(directory), error.details.fetch("repository")
+      assert_equal "repository_root", error.details.fetch("context")
     end
   end
 
   private
 
   def build_manifest(repository, overrides = {})
-    AdversarialReview::Manifest.build(
+    build_manifest_with(AdversarialReview::Manifest, repository, overrides)
+  end
+
+  def build_manifest_with(manifest_class, repository, overrides = {})
+    manifest_class.build(
       **{
         repository: repository,
         tier: "default",
@@ -435,6 +616,26 @@ class AdversarialReviewManifestTest < Minitest::Test
       implementer tester user assumptions-checker pre-mortem
       consistency-smells feasibility
     ]
+  end
+
+  def manifest_with_git_results(repository, head_success: true, status_success: true)
+    success_status = CommandStatus.new(true)
+    failed_status = CommandStatus.new(false)
+    Class.new(AdversarialReview::Manifest) do
+      define_method(:run_git) do |_directory, *arguments|
+        case arguments
+        when ["rev-parse", "--show-toplevel"]
+          ["#{repository}\n", success_status]
+        when ["rev-parse", "HEAD"]
+          [head_success ? "a" * 40 : "fatal: head failed", head_success ? success_status : failed_status]
+        when ["status", "--porcelain=v1", "--untracked-files=all"]
+          [status_success ? "" : "fatal: status failed", status_success ? success_status : failed_status]
+        else
+          raise "unexpected git arguments: #{arguments.inspect}"
+        end
+      end
+      private :run_git
+    end
   end
 
 
