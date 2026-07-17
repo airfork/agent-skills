@@ -194,12 +194,48 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_includes errors.map { |error| error.fetch("path") }, "/verdicts/0/candidate_id"
   end
 
+  def test_judge_schema_rejects_candidate_id_with_trailing_control_suffix
+    ["\n", "\r", "\r\n"].each do |suffix|
+      value = valid_judge
+      verdict = value.fetch("verdicts").first.merge(
+        "candidate_id" => "C-assumptions-checker-1-1#{suffix}"
+      )
+      errors = AdversarialReview::Schema.validate("judge", value.merge("verdicts" => [verdict]))
+
+      assert_includes errors.map { |error| error.fetch("code") }, "pattern", suffix.inspect
+      assert_includes errors.map { |error| error.fetch("path") }, "/verdicts/0/candidate_id", suffix.inspect
+    end
+  end
+
   def test_attack_schema_validates_dynamic_artifact_digest_values
     value = valid_attack.merge("artifact_digests" => {"docs/v1.2/spec[old].md" => "A" * 64})
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "pattern"
     assert_includes errors.map { |error| error.fetch("path") }, "/artifact_digests/docs~1v1.2~1spec[old].md"
+  end
+
+  def test_attack_schema_rejects_digest_with_trailing_control_suffix
+    ["\n", "\r", "\r\n"].each do |suffix|
+      digest = ("a" * 64) + suffix
+      value = valid_attack.merge("artifact_digests" => {"docs/spec.md" => digest})
+      errors = AdversarialReview::Schema.validate("attack", value)
+
+      assert_includes errors.map { |error| error.fetch("code") }, "pattern", suffix.inspect
+      assert_includes errors.map { |error| error.fetch("path") }, "/artifact_digests/docs~1spec.md", suffix.inspect
+    end
+  end
+
+  def test_unanchored_schema_pattern_uses_search_semantics
+    schema = {"type" => "string", "pattern" => "needle"}
+
+    assert_empty AdversarialReview::Schema.new(schema, "inline").validate("hay needle stack")
+  end
+
+  def test_escaped_terminal_dollar_is_not_treated_as_end_anchor
+    schema = {"type" => "string", "pattern" => "^price\\$"}
+
+    assert_empty AdversarialReview::Schema.new(schema, "inline").validate("price$ plus tax")
   end
 
   def test_error_paths_escape_tilde_in_dynamic_keys

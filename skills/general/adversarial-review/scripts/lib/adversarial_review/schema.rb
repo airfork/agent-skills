@@ -50,7 +50,7 @@ module AdversarialReview
       if schema.key?("minLength") && value.length < schema.fetch("minLength")
         add_error("min_length", path, "string is shorter than the minimum length")
       end
-      if schema.key?("pattern") && !Regexp.new(schema.fetch("pattern")).match?(value)
+      if schema.key?("pattern") && !schema_pattern(schema.fetch("pattern")).match?(value)
         add_error("pattern", path, "string does not match the required pattern")
       end
 
@@ -87,6 +87,23 @@ module AdversarialReview
 
     def pointer(*segments)
       segments.reduce("") { |path, segment| child_path(path, segment) }
+    end
+
+    def schema_pattern(pattern)
+      source = explicitly_anchored_pattern?(pattern) ? "\\A(?:#{pattern})\\z" : pattern
+      Regexp.new(source)
+    end
+
+    def explicitly_anchored_pattern?(pattern)
+      return false unless pattern.start_with?("^") && pattern.end_with?("$")
+
+      backslashes = 0
+      index = pattern.length - 2
+      while index >= 0 && pattern[index] == "\\"
+        backslashes += 1
+        index -= 1
+      end
+      backslashes.even?
     end
 
     def matches_type?(type, value)
