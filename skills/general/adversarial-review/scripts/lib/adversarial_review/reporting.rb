@@ -307,8 +307,11 @@ module AdversarialReview
         unless reason.nil? || (reason.is_a?(String) && !reason.strip.empty?)
           invalid!("invalid_angles", "angle failure reason must be a non-empty string or null", {"name" => name})
         end
-        if %w[failed skipped].include?(status) && reason.nil?
-          invalid!("invalid_angles", "failed and skipped angles require a reason", {"name" => name})
+        if %w[failed skipped combined].include?(status) && reason.nil?
+          invalid!(
+            "invalid_angles", "failed, skipped, and combined angles require a reason",
+            {"name" => name}
+          )
         end
         retry_reasons = angle.fetch("retry_reasons")
         unless retry_reasons.is_a?(Array) && retry_reasons.length == retries &&

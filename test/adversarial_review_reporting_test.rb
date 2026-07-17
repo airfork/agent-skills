@@ -104,6 +104,21 @@ class AdversarialReviewReportingTest < Minitest::Test
     assert_equal "invalid_angles", error.code
   end
 
+  def test_combined_angles_require_a_nonempty_reason
+    [nil, "   "].each do |missing_reason|
+      source = summary_source
+      angle = source.fetch("angles").first
+      angle["status"] = "combined"
+      angle["failure_reason"] = missing_reason
+
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.summary(source)
+      end
+
+      assert_equal "invalid_angles", error.code
+    end
+  end
+
   def test_rejects_a_finding_source_angle_outside_the_recorded_inventory
     source = summary_source
     source.dig("findings", 0, "sources", 0)["angle"] = "invented-angle"
