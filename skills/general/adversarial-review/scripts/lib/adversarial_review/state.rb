@@ -147,7 +147,7 @@ module AdversarialReview
         "semantic_groups" => {},
         "judge_votes" => {},
         "evidence_gaps" => [],
-        "overflow" => {"total" => 0, "by_category_severity" => {}},
+        "overflow" => {"total" => 0, "by_category_severity" => {}, "items" => []},
         "candidates" => [],
         "findings" => [],
         "author_actions" => {},
@@ -525,6 +525,7 @@ module AdversarialReview
       mutate! do |data|
         ensure_mutation_stage!(data, "promote")
         promoted = apply_promotions_to_data!(data, groups)
+        rerank_reported_findings!(data)
       end
       deep_freeze(deep_copy(promoted))
     end
@@ -906,12 +907,13 @@ module AdversarialReview
           source["attempt"] == candidate.fetch("attempt")
       end
       sources_valid &&
-        finding["id"].is_a?(String) && finding["id"].match?(/\AAR-[0-9a-f]{8}-\d{3}\z/) &&
+        finding["id"].is_a?(String) && finding["id"].match?(/\AAR-[0-9a-f]{8}-\d{3,}\z/) &&
         finding["group_id"].is_a?(String) && !finding["group_id"].empty? &&
         SEVERITY_RANK.key?(finding["severity"]) && finding["confidence"].is_a?(Numeric) &&
         finding["path"].is_a?(String) && !finding["path"].empty? &&
         finding["line"].is_a?(Integer) && !finding["line"].negative? &&
         [1, 2].include?(finding["round"]) &&
+        [true, false].include?(finding["reported"]) &&
         %w[pending resolved rejected contested stuck].include?(finding["state"])
     end
 
@@ -949,8 +951,12 @@ module AdversarialReview
     end
 
     def self.valid_ingestion_snapshot?(data)
+      candidate_records = {}
       candidate_ids = data.fetch("candidates").each_with_object({}) do |candidate, indexed|
-        indexed[candidate["id"]] = true if candidate.is_a?(Hash) && candidate["id"].is_a?(String)
+        if candidate.is_a?(Hash) && candidate["id"].is_a?(String)
+          indexed[candidate["id"]] = true
+          candidate_records[candidate["id"]] = candidate
+        end
       end
       valid_results = data.fetch("ingested_results").all? do |task_id, record|
         task_id.is_a?(String) && RUN_ID.match?(task_id) && record.is_a?(Hash) &&
@@ -983,11 +989,26 @@ module AdversarialReview
       valid_groups = data.fetch("semantic_groups").all? do |group_id, group|
         required_group_keys = %w[candidate_ids group_id location round source_angles summary task_id]
         allowed_group_keys = required_group_keys + %w[arbiter_decision arbiter_evidence]
+        location = group["location"] if group.is_a?(Hash)
+        source_angles = group["source_angles"] if group.is_a?(Hash)
         group.is_a?(Hash) && group_id == group["group_id"] &&
+          group_id.is_a?(String) && !group_id.strip.empty? &&
           (required_group_keys - group.keys).empty? && (group.keys - allowed_group_keys).empty? &&
+          group["summary"].is_a?(String) && !group["summary"].strip.empty? &&
+          location.is_a?(Hash) && location.keys.sort == %w[heading line_end line_start path] &&
+          location["path"].is_a?(String) && !location["path"].strip.empty? &&
+          location["heading"].is_a?(String) && !location["heading"].strip.empty? &&
+          location["line_start"].is_a?(Integer) && !location["line_start"].negative? &&
+          location["line_end"].is_a?(Integer) && location["line_end"] >= location["line_start"] &&
+          source_angles.is_a?(Array) && !source_angles.empty? &&
+          source_angles.uniq.length == source_angles.length &&
+          source_angles.all? { |angle| angle.is_a?(String) && !angle.strip.empty? } &&
           group["candidate_ids"].is_a?(Array) && !group["candidate_ids"].empty? &&
           group["candidate_ids"].uniq.length == group["candidate_ids"].length &&
           group["candidate_ids"].all? { |candidate_id| candidate_ids.key?(candidate_id) } &&
+          group["candidate_ids"].map do |candidate_id|
+            candidate_records.fetch(candidate_id)["angle"]
+          end.uniq.sort == source_angles.sort &&
           [1, 2].include?(group["round"]) && group["task_id"].is_a?(String) &&
           data.fetch("ingested_results").key?(group["task_id"]) &&
           (!group.key?("arbiter_decision") ||
@@ -996,19 +1017,40 @@ module AdversarialReview
       end
       candidate_groups_valid = data.fetch("candidates").all? do |candidate|
         next false unless candidate.is_a?(Hash)
-        next true unless candidate.key?("group_id")
 
-        group = data.fetch("semantic_groups")[candidate["group_id"]]
-        group && group.fetch("candidate_ids").include?(candidate["id"])
+        memberships = data.fetch("semantic_groups").values.select do |group|
+          group.is_a?(Hash) && group["candidate_ids"].is_a?(Array) &&
+            group["candidate_ids"].include?(candidate["id"])
+        end.map { |group| group["group_id"] }
+        if memberships.empty?
+          !candidate.key?("group_id")
+        else
+          memberships.length == 1 && candidate["group_id"] == memberships.first
+        end
       end
       overflow = data.fetch("overflow")
-      valid_overflow = overflow.keys.sort == %w[by_category_severity total] &&
+      valid_overflow = overflow.keys.sort == %w[by_category_severity items total] &&
         overflow["total"].is_a?(Integer) && !overflow["total"].negative? &&
+        overflow["items"].is_a?(Array) && overflow["items"].uniq == overflow["items"] &&
+        overflow["items"].all? { |finding_id| finding_id.is_a?(String) } &&
         overflow["by_category_severity"].is_a?(Hash) &&
         overflow["by_category_severity"].all? do |key, count|
           key.is_a?(String) && !key.empty? && count.is_a?(Integer) && count.positive?
         end
       valid_overflow &&= overflow["total"] == overflow["by_category_severity"].values.inject(0, :+)
+      unreported_ids = data.fetch("findings").select do |finding|
+        finding.is_a?(Hash) && finding["reported"] == false
+      end.map { |finding| finding["id"] }
+      valid_overflow &&= overflow["items"].sort == unreported_ids.sort &&
+        overflow["total"] == unreported_ids.length
+      expected_overflow_counts = Hash.new(0)
+      data.fetch("findings").each do |finding|
+        next unless finding.is_a?(Hash) && finding["reported"] == false
+
+        category = finding.fetch("category", "Uncategorized")
+        expected_overflow_counts["#{category}:#{finding["severity"]}"] += 1
+      end
+      valid_overflow &&= overflow["by_category_severity"] == expected_overflow_counts.sort.to_h
       valid_votes = data.fetch("judge_votes").all? do |subject_id, votes|
         referenced = candidate_ids.key?(subject_id) || data.fetch("semantic_groups").key?(subject_id)
         next false unless referenced && votes.is_a?(Array) && !votes.empty?
@@ -1069,6 +1111,13 @@ module AdversarialReview
       blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
       data.fetch("findings").each do |finding|
         finding_id = finding.fetch("id")
+        unless finding.fetch("reported")
+          if %w[CRITICAL HIGH].include?(finding.fetch("severity")) &&
+             !%w[resolved rejected].include?(finding.fetch("state"))
+            blockers << "overflow-blocker:#{finding_id}"
+          end
+          next
+        end
         action = data.fetch("author_actions")[finding_id]
         resolution = data.fetch("resolution_checks")[finding_id]
         blockers << "author-action:#{finding_id}" unless valid_author_action_snapshot?(action)
@@ -1472,20 +1521,20 @@ module AdversarialReview
       invalid_result!("unknown_finding", "arbiter finding does not exist", {"id" => finding_id}) unless finding
       case decision
       when "RESOLVED"
-        finding["state"] = "rejected"
-        data.fetch("resolution_checks")[finding_id] = "rejected"
+        action = data.fetch("author_actions")[finding_id]
+        action_status = action.is_a?(Hash) ? action["status"] : action
+        unless %w[fixed rejected].include?(action_status)
+          invalid_result!("invalid_arbiter_decision", "author dispute has no valid recorded action")
+        end
+        status = action_status == "fixed" ? "resolved" : "rejected"
+        finding["state"] = status
+        data.fetch("resolution_checks")[finding_id] = status
         data.fetch("pending_arbiter_subjects").delete(finding_id)
       when "UNRESOLVED"
         status = data.fetch("revise_round") >= 2 ? "stuck" : "contested"
         finding["state"] = status
         data.fetch("resolution_checks")[finding_id] = status
         data.fetch("pending_arbiter_subjects").delete(finding_id)
-      when "UNPROVEN"
-        finding["state"] = "contested"
-        data.fetch("resolution_checks")[finding_id] = "contested"
-        data.fetch("pending_arbiter_subjects") << finding_id
-        data.fetch("pending_arbiter_subjects").uniq!
-        data.fetch("pending_arbiter_subjects").sort!
       else
         invalid_result!("invalid_arbiter_decision", "decision is invalid for an author dispute")
       end
@@ -1549,7 +1598,9 @@ module AdversarialReview
 
     def apply_author_actions_result!(data, task, payload)
       pending_ids = data.fetch("findings").select do |finding|
-        finding.fetch("state") == "pending" && !data.fetch("author_actions").key?(finding.fetch("id"))
+        actionable = finding.fetch("reported") || %w[CRITICAL HIGH].include?(finding.fetch("severity"))
+        actionable && finding.fetch("state") == "pending" &&
+          !data.fetch("author_actions").key?(finding.fetch("id"))
       end.map { |finding| finding.fetch("id") }
       actions = payload.fetch("actions")
       require_exact_subject_coverage!(
@@ -1754,7 +1805,7 @@ module AdversarialReview
       data.fetch("pending_arbiter_subjects").concat(arbitration)
       data.fetch("pending_arbiter_subjects").uniq!
       data.fetch("pending_arbiter_subjects").sort!
-      promoted, overflowed = promote_with_cap!(data, promotion_groups)
+      promoted, overflowed, evicted, _new_findings = promote_with_cap!(data, promotion_groups)
       {
         "schema" => "judge",
         "task_id" => task.fetch("task_id"),
@@ -1762,7 +1813,9 @@ module AdversarialReview
         "refuted_candidate_ids" => refuted_ids.sort,
         "unproven_candidate_ids" => unproven_ids.sort,
         "pending_arbiter_subjects" => arbitration.sort,
-        "overflow_count" => overflowed.length
+        "overflow_count" => overflowed.length,
+        "overflow_ids" => data.fetch("overflow").fetch("items").dup,
+        "evicted_ids" => evicted
       }
     end
 
@@ -1812,7 +1865,10 @@ module AdversarialReview
         conflicting_ballot = votes.group_by { |vote| vote.fetch("voter_id") }.any? do |_voter, ballot|
           ballot.map { |vote| vote.fetch("effective_disposition") }.uniq.length > 1
         end
-        if conflicting_ballot
+        has_unproven = votes.any? do |vote|
+          vote.fetch("effective_disposition") == "UNPROVEN"
+        end
+        if has_unproven || conflicting_ballot
           pending << subject_id
         elsif promote_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
           promotion_groups << promotion_group_from_verdicts(data, subject_id, promote_votes)
@@ -1832,7 +1888,7 @@ module AdversarialReview
       data.fetch("pending_arbiter_subjects").concat(pending)
       data.fetch("pending_arbiter_subjects").uniq!
       data.fetch("pending_arbiter_subjects").sort!
-      promoted, overflowed = promote_with_cap!(data, promotion_groups)
+      promoted, overflowed, evicted, _new_findings = promote_with_cap!(data, promotion_groups)
       {
         "schema" => "judge",
         "task_id" => task.fetch("task_id"),
@@ -1841,6 +1897,8 @@ module AdversarialReview
         "unproven_candidate_ids" => [],
         "pending_arbiter_subjects" => pending.sort,
         "overflow_count" => overflowed.length,
+        "overflow_ids" => data.fetch("overflow").fetch("items").dup,
+        "evicted_ids" => evicted,
         "votes_recorded" => normalized.length
       }
     end
@@ -1964,17 +2022,46 @@ module AdversarialReview
     end
 
     def promote_with_cap!(data, groups)
-      ordered = sort_promotion_groups(groups)
-      capacity = [50 - data.fetch("findings").length, 0].max
-      selected = ordered.take(capacity)
-      overflowed = ordered.drop(capacity)
-      overflowed.each do |group|
-        key = "#{group.fetch("category")}:#{group.fetch("severity")}"
-        data.fetch("overflow")["total"] += 1
-        counts = data.fetch("overflow").fetch("by_category_severity")
-        counts[key] = counts.fetch(key, 0) + 1
+      previously_reported = data.fetch("findings").select do |finding|
+        finding.fetch("reported")
+      end.map { |finding| finding.fetch("id") }
+      new_findings = apply_promotions_to_data!(data, groups)
+      rerank_reported_findings!(data)
+      currently_reported = data.fetch("findings").select do |finding|
+        finding.fetch("reported")
+      end.map { |finding| finding.fetch("id") }
+      promoted = new_findings.select { |finding| finding.fetch("reported") }
+      overflowed = new_findings.reject { |finding| finding.fetch("reported") }
+      evicted = previously_reported - currently_reported
+      [promoted, overflowed, evicted.sort, new_findings]
+    end
+
+    def rerank_reported_findings!(data)
+      ordered = data.fetch("findings").sort_by do |finding|
+        [
+          SEVERITY_RANK.fetch(finding.fetch("severity")),
+          -Float(finding.fetch("confidence")),
+          finding.fetch("path", "").to_s,
+          Integer(finding.fetch("line", 0)),
+          finding.fetch("group_id"),
+          finding.fetch("id")
+        ]
       end
-      [apply_promotions_to_data!(data, selected), overflowed]
+      reported_ids = ordered.take(50).map { |finding| finding.fetch("id") }
+      data.fetch("findings").each do |finding|
+        finding["reported"] = reported_ids.include?(finding.fetch("id"))
+      end
+      overflow_findings = ordered.drop(50)
+      counts = Hash.new(0)
+      overflow_findings.each do |finding|
+        category = finding.fetch("category", "Uncategorized")
+        counts["#{category}:#{finding.fetch("severity")}"] += 1
+      end
+      data["overflow"] = {
+        "total" => overflow_findings.length,
+        "by_category_severity" => counts.sort.to_h,
+        "items" => overflow_findings.map { |finding| finding.fetch("id") }
+      }
     end
 
     def sort_promotion_groups(groups)
@@ -2023,6 +2110,7 @@ module AdversarialReview
         deep_copy(group).merge(
           "id" => id,
           "state" => "pending",
+          "reported" => false,
           "round" => data.fetch("revise_round"),
           "sources" => candidates.map do |candidate|
             {
