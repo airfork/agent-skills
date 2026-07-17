@@ -1,0 +1,735 @@
+require "open3"
+require "digest"
+
+module AdversarialReview
+  class State
+    class Error < StandardError
+      attr_reader :code, :details, :exit_status
+
+      def initialize(code, message, details = {}, exit_status = 2)
+        @code = code
+        @details = details
+        @exit_status = exit_status
+        super(message)
+      end
+
+      def to_h
+        {
+          "code" => code,
+          "message" => message,
+          "details" => details,
+          "exit_status" => exit_status
+        }
+      end
+    end
+
+    RUN_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/.freeze
+    TRANSITIONS = {
+      "prepared" => %w[attacking].freeze,
+      "attacking" => %w[deduplicating].freeze,
+      "deduplicating" => %w[culling].freeze,
+      "culling" => %w[awaiting-author complete].freeze,
+      "awaiting-author" => %w[resolving].freeze,
+      "resolving" => %w[fresh-sweep arbitrating complete did-not-converge].freeze,
+      "fresh-sweep" => %w[culling-new-findings].freeze,
+      "culling-new-findings" => %w[awaiting-author arbitrating complete did-not-converge].freeze,
+      "arbitrating" => %w[awaiting-author complete did-not-converge].freeze
+    }.freeze
+    NEXT_ACTIONS = {
+      "prepared" => "attack",
+      "attacking" => "collect-attacks",
+      "deduplicating" => "deduplicate",
+      "culling" => "cull",
+      "awaiting-author" => "collect-author-actions",
+      "resolving" => "resolve",
+      "fresh-sweep" => "attack",
+      "culling-new-findings" => "cull",
+      "arbitrating" => "arbitrate",
+      "complete" => nil,
+      "did-not-converge" => nil
+    }.freeze
+    SEVERITY_RANK = {
+      "CRITICAL" => 0,
+      "HIGH" => 1,
+      "MEDIUM" => 2,
+      "LOW" => 3
+    }.freeze
+
+    def self.default_run_dir(repository:, run_id:)
+      validate_run_id!(run_id)
+      repository = File.realpath(File.expand_path(repository))
+      arguments = ["git", "-C", repository, "rev-parse", "--git-path", "adversarial-review/runs"]
+      output, status = Open3.capture2e(*arguments)
+      unless status.success? && !output.strip.empty?
+        raise Error.new(
+          "git_path_unresolved", "could not resolve the adversarial-review run directory",
+          {
+            "command" => arguments,
+            "output" => output.to_s.strip,
+            "git_exit_status" => status.respond_to?(:exitstatus) ? status.exitstatus : nil
+          }
+        )
+      end
+      parent = canonical_missing_path(File.expand_path(output.strip, repository))
+      run_dir = File.expand_path(run_id, parent)
+      unless run_dir.start_with?(parent + File::SEPARATOR)
+        raise Error.new("run_path_escape", "run directory escapes the Git run root", {"path" => run_dir})
+      end
+      run_dir
+    rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM => error
+      raise Error.new(
+        "git_error", "could not invoke Git to resolve the run directory",
+        {"command" => arguments, "cause" => error.class.name, "errno" => error.respond_to?(:errno) ? error.errno : nil}
+      )
+    end
+
+    class << self
+      alias resolve_run_dir default_run_dir
+    end
+
+    def self.create(run_dir, manifest)
+      run_id = manifest.fetch("run_id")
+      validate_run_id!(run_id)
+      digests = target_digests(manifest)
+      expanded_run_dir = Atomic.normalize_root_alias(File.expand_path(run_dir))
+      if File.symlink?(expanded_run_dir)
+        raise Error.new("unsafe_run_dir", "review run path must not be a symlink", {"run_dir" => expanded_run_dir})
+      end
+      parent = Atomic.secure_directory(File.dirname(expanded_run_dir))
+      canonical_run_dir = File.join(parent, File.basename(run_dir))
+      begin
+        Dir.mkdir(canonical_run_dir, 0o700)
+      rescue Errno::EEXIST
+        raise Error.new("run_exists", "review run already exists", {"run_dir" => canonical_run_dir})
+      end
+      File.chmod(0o700, canonical_run_dir)
+      %w[tasks results events].each do |entry|
+        path = File.join(canonical_run_dir, entry)
+        Dir.mkdir(path, 0o700)
+        File.chmod(0o700, path)
+      end
+      lock_path = File.join(canonical_run_dir, ".state.lock")
+      create_lock(lock_path)
+      data = {
+        "schema_version" => 1,
+        "run_id" => run_id,
+        "mode" => manifest.fetch("mode"),
+        "stage" => "prepared",
+        "revise_round" => 1,
+        "task_attempts" => {},
+        "candidates" => [],
+        "findings" => [],
+        "author_actions" => {},
+        "resolution_checks" => {},
+        "pending_arbiter_subjects" => [],
+        "target_digest_history" => [digests],
+        "current_target_digests" => digests,
+        "fresh_sweep_required" => false,
+        "fresh_sweep_completed" => false,
+        "degraded_capabilities" => [],
+        "events" => [],
+        "next_action" => "attack"
+      }
+      Atomic.open_lock(lock_path, exclusive: true) do
+        validate_snapshot!(manifest, data)
+        Atomic.write_json(File.join(canonical_run_dir, "manifest.json"), manifest)
+        Atomic.write_json(File.join(canonical_run_dir, "state.json"), data)
+      end
+      new(canonical_run_dir, data, manifest)
+    rescue KeyError => error
+      raise Error.new("invalid_manifest", "manifest is missing required state fields", {"field" => error.key}, 3)
+    end
+
+    def self.load(run_dir)
+      canonical_run_dir = secure_run_directory(run_dir)
+      lock_path = File.join(canonical_run_dir, ".state.lock")
+      manifest = nil
+      data = nil
+      Atomic.open_lock(lock_path, exclusive: false) do
+        manifest = Atomic.read_json(File.join(canonical_run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(canonical_run_dir, "state.json"))
+        validate_snapshot!(manifest, data)
+      end
+      new(canonical_run_dir, data, manifest)
+    end
+
+    def initialize(run_dir, data, manifest)
+      @run_dir = run_dir
+      @data = data
+      @manifest = manifest
+    end
+
+    def to_h
+      refresh!
+      deep_copy(@data)
+    end
+
+    def transition_to(next_stage)
+      mutate! do |data|
+        current = data.fetch("stage")
+        unless TRANSITIONS.fetch(current, []).include?(next_stage)
+          raise Error.new(
+            "invalid_transition", "state transition is not allowed",
+            {"from" => current, "to" => next_stage}, 3
+          )
+        end
+        if next_stage == "fresh-sweep"
+          if data.fetch("revise_round") >= 2
+            raise Error.new(
+              "revise_round_cap", "review cannot enter a third revise round",
+              {"revise_round" => data.fetch("revise_round")}, 3
+            )
+          end
+          data["revise_round"] += 1
+          data["fresh_sweep_required"] = true
+          data["fresh_sweep_completed"] = false
+        elsif current == "fresh-sweep" && next_stage == "culling-new-findings"
+          data["fresh_sweep_completed"] = true
+        end
+        if next_stage == "complete"
+          blockers = completion_blockers(data, from_stage: current)
+          unless can_complete?(data, from_stage: current)
+            raise Error.new(
+              "completion_blocked", "review state does not satisfy completion invariants",
+              {"blockers" => blockers}, 3
+            )
+          end
+        end
+        data["stage"] = next_stage
+        data["next_action"] = NEXT_ACTIONS.fetch(next_stage)
+        data.fetch("events") << {"type" => "transition", "from" => current, "to" => next_stage}
+      end
+      self
+    end
+
+    alias transition transition_to
+
+    def can_complete?(data = nil, from_stage: nil)
+      unless data
+        refresh!
+        data = @data
+      end
+      from_stage ||= data.fetch("stage")
+      completion_blockers(data, from_stage: from_stage).empty?
+    end
+
+    def ingest_candidate(angle, attempt, finding)
+      unless finding.is_a?(Hash) && (finding.keys & %w[id state angle attempt sequence candidate_ids]).empty?
+        raise Error.new("invalid_finding", "candidate finding contains reserved or invalid fields", {}, 3)
+      end
+      unless attempt.is_a?(Integer) && attempt.positive?
+        raise Error.new("invalid_attempt", "candidate attempt must be a positive integer", {"attempt" => attempt}, 3)
+      end
+      slug = sanitize_angle(angle)
+      created = nil
+      mutate! do |data|
+        sequence = data.fetch("candidates").count do |candidate|
+          candidate.fetch("angle") == slug && candidate.fetch("attempt") == attempt
+        end + 1
+        id = "C-#{slug}-#{attempt}-#{sequence}"
+        if data.fetch("candidates").any? { |candidate| candidate.fetch("id") == id }
+          raise Error.new("candidate_collision", "candidate ID already exists", {"id" => id}, 3)
+        end
+        created = deep_copy(finding).merge(
+          "id" => id,
+          "state" => "candidate",
+          "angle" => slug,
+          "attempt" => attempt,
+          "sequence" => sequence,
+          "round" => data.fetch("revise_round")
+        )
+        data.fetch("candidates") << created
+      end
+      deep_freeze(deep_copy(created))
+    end
+
+    def promote(groups)
+      unless groups.is_a?(Array)
+        raise Error.new("invalid_promotion", "promotion groups must be an array", {}, 3)
+      end
+      promoted = nil
+      mutate! do |data|
+        validated_groups = groups.map { |group| validate_promotion_group!(group) }
+        group_ids = validated_groups.map { |group| group.fetch("group_id") }
+        duplicate_group_id = group_ids.group_by { |id| id }.find { |_id, ids| ids.length > 1 }
+        if duplicate_group_id
+          raise Error.new(
+            "invalid_promotion", "promotion group IDs must be unique",
+            {"group_id" => duplicate_group_id.first}, 3
+          )
+        end
+        ordered = validated_groups.sort_by do |group|
+          [
+            SEVERITY_RANK.fetch(group.fetch("severity")),
+            -Float(group.fetch("confidence")),
+            group.fetch("path", "").to_s,
+            Integer(group.fetch("line", 0)),
+            group.fetch("group_id")
+          ]
+        end
+        seen_candidate_ids = {}
+        first_number = data.fetch("findings").length + 1
+        fingerprint = Digest::SHA256.hexdigest(data.fetch("run_id"))[0, 8]
+        promoted = ordered.each_with_index.map do |group, index|
+          candidates = group.fetch("candidate_ids").map do |candidate_id|
+            if seen_candidate_ids[candidate_id]
+              raise Error.new("candidate_collision", "candidate belongs to multiple promotion groups", {"id" => candidate_id}, 3)
+            end
+            seen_candidate_ids[candidate_id] = true
+            candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
+            unless candidate && candidate.fetch("state") == "candidate"
+              raise Error.new("invalid_candidate", "candidate cannot be promoted", {"id" => candidate_id}, 3)
+            end
+            candidate
+          end
+          id = format("AR-%s-%03d", fingerprint, first_number + index)
+          if data.fetch("findings").any? { |finding| finding.fetch("id") == id }
+            raise Error.new("finding_collision", "promoted finding ID already exists", {"id" => id}, 3)
+          end
+          candidates.each { |candidate| candidate["state"] = "promoted" }
+          deep_copy(group).merge(
+            "id" => id,
+            "state" => "pending",
+            "round" => data.fetch("revise_round"),
+            "sources" => candidates.map do |candidate|
+              {
+                "candidate_id" => candidate.fetch("id"),
+                "angle" => candidate.fetch("angle"),
+                "attempt" => candidate.fetch("attempt")
+              }
+            end
+          )
+        end
+        data.fetch("findings").concat(promoted)
+      end
+      deep_freeze(deep_copy(promoted))
+    end
+
+    def candidates
+      to_h.fetch("candidates")
+    end
+
+    def candidate(id)
+      item = candidates.find { |candidate_item| candidate_item.fetch("id") == id }
+      raise Error.new("unknown_candidate", "candidate does not exist", {"id" => id}, 3) unless item
+
+      item
+    end
+
+    def findings
+      to_h.fetch("findings")
+    end
+
+    def record_author_action(finding_id, action)
+      mutate! do |data|
+        find_finding!(data, finding_id)
+        status = action.is_a?(Hash) ? action["status"] : action
+        unless status.is_a?(String) && !status.empty?
+          raise Error.new("invalid_author_action", "author action must have a status", {"id" => finding_id}, 3)
+        end
+        data.fetch("author_actions")[finding_id] = deep_copy(action)
+      end
+      self
+    end
+
+    def record_resolution(finding_id, status)
+      allowed = %w[pending resolved rejected contested stuck]
+      unless allowed.include?(status)
+        raise Error.new("invalid_resolution", "resolution state is invalid", {"status" => status}, 3)
+      end
+      mutate! do |data|
+        finding = find_finding!(data, finding_id)
+        data.fetch("resolution_checks")[finding_id] = status
+        finding["state"] = status
+      end
+      self
+    end
+
+    def set_pending_arbiter_subjects(finding_ids)
+      unless finding_ids.is_a?(Array) && finding_ids.all? { |id| id.is_a?(String) }
+        raise Error.new("invalid_arbiter_subjects", "arbiter subjects must be finding IDs", {}, 3)
+      end
+      mutate! do |data|
+        finding_ids.each { |id| find_finding!(data, id) }
+        data["pending_arbiter_subjects"] = finding_ids.uniq.sort
+      end
+      self
+    end
+
+    def require_fresh_sweep!
+      mutate! do |data|
+        data["fresh_sweep_required"] = true
+        data["fresh_sweep_completed"] = false
+      end
+      self
+    end
+
+    def mark_fresh_sweep_completed!
+      mutate! { |data| data["fresh_sweep_completed"] = true }
+      self
+    end
+
+    def record_degraded_capability(capability)
+      unless capability.is_a?(String) && !capability.empty?
+        raise Error.new("invalid_capability", "degraded capability must be named", {}, 3)
+      end
+      mutate! do |data|
+        data.fetch("degraded_capabilities") << capability
+        data.fetch("degraded_capabilities").uniq!
+        data.fetch("degraded_capabilities").sort!
+      end
+      self
+    end
+
+    def update_current_digests(digests)
+      validate_digest_set!(digests)
+      mutate! do |data|
+        unless digests.keys.sort == data.fetch("current_target_digests").keys.sort
+          raise Error.new("target_digest_mismatch", "target digest paths changed", {"current" => digests}, 3)
+        end
+        snapshot = deep_copy(digests)
+        data["current_target_digests"] = snapshot
+        data.fetch("target_digest_history") << deep_copy(snapshot)
+      end
+      self
+    end
+
+    def check_current_digests!(digests)
+      validate_digest_set!(digests)
+      refresh!
+      return true if @data.fetch("current_target_digests") == digests
+
+      raise Error.new(
+        "target_digest_mismatch", "observed target digests do not match current state",
+        {"expected" => @data.fetch("current_target_digests"), "current" => digests}, 3
+      )
+    end
+
+    def apply_arbiter(finding_id, verdict)
+      unless %w[author-is-right judge-is-right needs-human].include?(verdict)
+        raise Error.new("invalid_arbiter_verdict", "arbiter verdict is invalid", {"verdict" => verdict}, 3)
+      end
+      mutate! do |data|
+        finding = find_finding!(data, finding_id)
+        case verdict
+        when "author-is-right"
+          finding["state"] = "rejected"
+          data.fetch("resolution_checks")[finding_id] = "rejected"
+          data.fetch("pending_arbiter_subjects").delete(finding_id)
+        when "judge-is-right"
+          state = data.fetch("revise_round") >= 2 ? "stuck" : "contested"
+          finding["state"] = state
+          data.fetch("resolution_checks")[finding_id] = state
+          data.fetch("pending_arbiter_subjects").delete(finding_id)
+        when "needs-human"
+          finding["state"] = "contested"
+          data.fetch("resolution_checks")[finding_id] = "contested"
+          data.fetch("pending_arbiter_subjects") << finding_id
+          data.fetch("pending_arbiter_subjects").uniq!
+          data.fetch("pending_arbiter_subjects").sort!
+        end
+      end
+      self
+    end
+
+    private
+
+    def self.validate_run_id!(run_id)
+      return if run_id.is_a?(String) && RUN_ID.match?(run_id) && run_id != "." && run_id != ".."
+
+      raise Error.new("invalid_run_id", "run ID contains unsafe characters", {"run_id" => run_id})
+    end
+
+    def self.secure_run_directory(run_dir)
+      expanded = Atomic.normalize_root_alias(File.expand_path(run_dir))
+      Atomic.secure_directory(File.dirname(expanded))
+      stat = File.lstat(expanded)
+      unless stat.directory? && !stat.symlink?
+        raise Error.new("unsafe_run_dir", "run directory must be a real directory", {"run_dir" => expanded})
+      end
+      File.realpath(expanded)
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM => error
+      raise Error.new("unsafe_run_dir", "run directory could not be opened safely", {"run_dir" => expanded, "cause" => error.class.name})
+    end
+
+    def self.validate_snapshot!(manifest, data)
+      unless manifest.is_a?(Hash) && data.is_a?(Hash)
+        raise Error.new("invalid_state", "manifest and state must be JSON objects", {}, 3)
+      end
+      required = %w[
+        schema_version run_id mode stage revise_round task_attempts candidates findings
+        author_actions resolution_checks pending_arbiter_subjects target_digest_history
+        current_target_digests fresh_sweep_required fresh_sweep_completed
+        degraded_capabilities events next_action
+      ]
+      missing = required.reject { |key| data.key?(key) }
+      unless missing.empty?
+        raise Error.new("invalid_state", "persisted state is incomplete", {"missing" => missing}, 3)
+      end
+      unless manifest["run_id"] == data["run_id"] && data["schema_version"] == 1 &&
+             manifest["schema_version"] == 1 && RUN_ID.match?(data["run_id"].to_s)
+        raise Error.new("invalid_state", "manifest and state identities do not match", {}, 3)
+      end
+      valid_stages = TRANSITIONS.keys + %w[complete did-not-converge]
+      unless valid_stages.include?(data["stage"]) && %w[critique revise].include?(data["mode"]) &&
+             manifest["mode"] == data["mode"] && [1, 2].include?(data["revise_round"])
+        raise Error.new("invalid_state", "persisted stage, mode, or revise round is invalid", {}, 3)
+      end
+      unless data["target_digest_history"].is_a?(Array) && !data["target_digest_history"].empty? &&
+             data["target_digest_history"].all? { |entry| entry.is_a?(Hash) } &&
+             data["current_target_digests"].is_a?(Hash)
+        raise Error.new("invalid_state", "target digest state is invalid", {}, 3)
+      end
+      initial_digests = target_digests(manifest)
+      unless data["target_digest_history"].first == initial_digests
+        raise Error.new("invalid_state", "initial target digest history was rewritten", {}, 3)
+      end
+      digest_keys = initial_digests.keys.sort
+      valid_history = data.fetch("target_digest_history").all? do |entry|
+        valid_digest_mapping?(entry) && entry.keys.sort == digest_keys
+      end
+      unless valid_history && valid_digest_mapping?(data.fetch("current_target_digests")) &&
+             data.fetch("current_target_digests").keys.sort == digest_keys
+        raise Error.new("invalid_state", "target digest history contains invalid snapshots", {}, 3)
+      end
+      unless data["candidates"].is_a?(Array) && data["findings"].is_a?(Array) &&
+             data["task_attempts"].is_a?(Hash) && data["author_actions"].is_a?(Hash) &&
+             data["resolution_checks"].is_a?(Hash) && data["pending_arbiter_subjects"].is_a?(Array) &&
+             data["degraded_capabilities"].is_a?(Array) && data["events"].is_a?(Array) &&
+             [true, false].include?(data["fresh_sweep_required"]) &&
+             [true, false].include?(data["fresh_sweep_completed"])
+        raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
+      end
+      unless data.fetch("candidates").all? { |candidate| valid_candidate_snapshot?(candidate) }
+        raise Error.new("invalid_state", "persisted candidates are invalid", {}, 3)
+      end
+      candidate_ids = data.fetch("candidates").map { |candidate| candidate.is_a?(Hash) ? candidate["id"] : nil }
+      duplicate_candidate_id = candidate_ids.compact.group_by { |id| id }.find { |_id, ids| ids.length > 1 }
+      if duplicate_candidate_id
+        raise Error.new(
+          "candidate_collision", "persisted candidate IDs are not unique",
+          {"id" => duplicate_candidate_id.first}, 3
+        )
+      end
+      candidates_by_id = data.fetch("candidates").each_with_object({}) do |candidate, indexed|
+        indexed[candidate.fetch("id")] = candidate
+      end
+      unless data.fetch("findings").all? do |finding|
+               valid_finding_snapshot?(finding, candidates_by_id)
+             end
+        raise Error.new("invalid_state", "persisted findings are invalid", {}, 3)
+      end
+      finding_ids = data.fetch("findings").map { |finding| finding.is_a?(Hash) ? finding["id"] : nil }
+      if finding_ids.any?(&:nil?) || finding_ids.uniq.length != finding_ids.length
+        raise Error.new("finding_collision", "persisted finding IDs are invalid or non-unique", {}, 3)
+      end
+      true
+    rescue KeyError, TypeError => error
+      raise Error.new("invalid_state", "persisted state structure is invalid", {"cause" => error.message}, 3)
+    end
+
+    def self.valid_candidate_snapshot?(candidate)
+      return false unless candidate.is_a?(Hash)
+
+      angle = candidate["angle"]
+      attempt = candidate["attempt"]
+      sequence = candidate["sequence"]
+      expected_id = "C-#{angle}-#{attempt}-#{sequence}"
+      candidate["id"] == expected_id &&
+        angle.is_a?(String) && angle.match?(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/) &&
+        attempt.is_a?(Integer) && attempt.positive? &&
+        sequence.is_a?(Integer) && sequence.positive? &&
+        [1, 2].include?(candidate["round"]) &&
+        %w[candidate promoted refuted unproven].include?(candidate["state"])
+    end
+
+    def self.valid_finding_snapshot?(finding, candidates_by_id)
+      return false unless finding.is_a?(Hash)
+
+      candidate_ids = finding["candidate_ids"]
+      sources = finding["sources"]
+      return false unless candidate_ids.is_a?(Array) && !candidate_ids.empty? &&
+                          candidate_ids.all? { |id| id.is_a?(String) && candidates_by_id.key?(id) } &&
+                          candidate_ids.uniq.length == candidate_ids.length &&
+                          sources.is_a?(Array) && sources.length == candidate_ids.length
+
+      sources_valid = sources.each_with_index.all? do |source, index|
+        candidate = candidates_by_id[candidate_ids[index]]
+        source.is_a?(Hash) && source["candidate_id"] == candidate.fetch("id") &&
+          source["angle"] == candidate.fetch("angle") &&
+          source["attempt"] == candidate.fetch("attempt")
+      end
+      sources_valid &&
+        finding["id"].is_a?(String) && finding["id"].match?(/\AAR-[0-9a-f]{8}-\d{3}\z/) &&
+        finding["group_id"].is_a?(String) && !finding["group_id"].empty? &&
+        SEVERITY_RANK.key?(finding["severity"]) && finding["confidence"].is_a?(Numeric) &&
+        finding["path"].is_a?(String) && !finding["path"].empty? &&
+        finding["line"].is_a?(Integer) && !finding["line"].negative? &&
+        [1, 2].include?(finding["round"]) &&
+        %w[pending resolved rejected contested stuck].include?(finding["state"])
+    end
+
+    def self.canonical_missing_path(path)
+      missing = []
+      cursor = path
+      until File.exist?(cursor) || File.symlink?(cursor)
+        missing.unshift(File.basename(cursor))
+        parent = File.dirname(cursor)
+        raise Error.new("run_path_escape", "could not resolve the Git run root", {"path" => path}) if parent == cursor
+        cursor = parent
+      end
+      if File.symlink?(cursor)
+        raise Error.new("unsafe_path", "Git run root contains a symlink", {"path" => cursor})
+      end
+      File.join(Atomic.secure_directory(cursor), *missing)
+    end
+
+    def self.create_lock(path)
+      flags = File::WRONLY | File::CREAT | File::EXCL
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      File.open(path, flags, 0o600) do |file|
+        file.flush
+        file.fsync
+      end
+      File.chmod(0o600, path)
+      Atomic.fsync_directory(File.dirname(path))
+    end
+
+    def self.target_digests(manifest)
+      digests = manifest.fetch("targets").each_with_object({}) do |target, collected|
+        path = target.fetch("path")
+        digest = target.fetch("sha256")
+        unless path.is_a?(String) && !path.empty? &&
+               digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/) &&
+               !collected.key?(path)
+          raise Error.new(
+            "invalid_digest", "manifest target digests must be unique path-to-SHA256 mappings",
+            {"path" => path, "sha256" => digest}, 3
+          )
+        end
+        collected[path] = digest
+      end
+      if digests.empty?
+        raise Error.new("invalid_digest", "manifest must contain at least one target digest", {}, 3)
+      end
+      digests
+    end
+
+    def self.valid_digest_mapping?(digests)
+      digests.is_a?(Hash) && !digests.empty? && digests.all? do |path, digest|
+        path.is_a?(String) && !path.empty? && digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
+      end
+    end
+
+    def deep_copy(value)
+      JSON.parse(JSON.generate(value))
+    end
+
+    def mutate!
+      lock_path = File.join(@run_dir, ".state.lock")
+      Atomic.open_lock(lock_path, exclusive: true) do
+        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+        self.class.validate_snapshot!(manifest, data)
+        verify_target_digests!(data)
+        yield data
+        self.class.validate_snapshot!(manifest, data)
+        Atomic.write_json(File.join(@run_dir, "state.json"), data)
+        @manifest = manifest
+        @data = data
+      end
+    end
+
+    def completion_blockers(data, from_stage:)
+      blockers = []
+      blockers << "target-digest-mismatch" unless target_digests_match?(data)
+      blockers << "pending-arbiter" unless data.fetch("pending_arbiter_subjects").empty?
+      if data.fetch("fresh_sweep_required") && !data.fetch("fresh_sweep_completed")
+        blockers << "fresh-sweep-incomplete"
+      end
+      blockers << "degraded-capabilities" unless data.fetch("degraded_capabilities").empty?
+      blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
+      data.fetch("findings").each do |finding|
+        finding_id = finding.fetch("id")
+        blockers << "author-action:#{finding_id}" unless terminal_author_action?(data["author_actions"][finding_id])
+        blockers << "resolution:#{finding_id}" unless %w[resolved rejected stuck].include?(data["resolution_checks"][finding_id])
+      end
+      blockers
+    end
+
+    def terminal_author_action?(action)
+      status = action.is_a?(Hash) ? action["status"] : action
+      status.is_a?(String) && !status.empty? && status != "pending"
+    end
+
+    def target_digests_match?(data)
+      data.fetch("current_target_digests") == data.fetch("target_digest_history").last
+    end
+
+    def verify_target_digests!(data)
+      return if target_digests_match?(data)
+
+      raise Error.new(
+        "target_digest_mismatch", "current target digests do not match the expected snapshot",
+        {
+          "expected" => data.fetch("target_digest_history").last,
+          "current" => data.fetch("current_target_digests")
+        }, 3
+      )
+    end
+
+    def sanitize_angle(angle)
+      slug = angle.to_s.downcase.gsub(/[^a-z0-9]+/, "-").gsub(/\A-+|-+\z/, "")
+      if slug.empty?
+        raise Error.new("invalid_angle", "candidate angle cannot be sanitized", {"angle" => angle}, 3)
+      end
+      slug
+    end
+
+    def validate_promotion_group!(group)
+      unless group.is_a?(Hash) && group["group_id"].is_a?(String) && !group["group_id"].empty? &&
+             group["candidate_ids"].is_a?(Array) && !group["candidate_ids"].empty? &&
+             SEVERITY_RANK.key?(group["severity"]) && group["confidence"].is_a?(Numeric)
+        raise Error.new("invalid_promotion", "promotion group is incomplete or invalid", {"group" => group}, 3)
+      end
+      group
+    end
+
+    def deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| deep_freeze(key); deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
+    end
+
+    def find_finding!(data, finding_id)
+      finding = data.fetch("findings").find { |item| item.fetch("id") == finding_id }
+      unless finding
+        raise Error.new("unknown_finding", "promoted finding does not exist", {"id" => finding_id}, 3)
+      end
+      finding
+    end
+
+    def validate_digest_set!(digests)
+      valid = digests.is_a?(Hash) && !digests.empty? && digests.all? do |path, digest|
+        path.is_a?(String) && !path.empty? && digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
+      end
+      return if valid
+
+      raise Error.new("invalid_digest", "target digests must be path-to-SHA256 mappings", {}, 3)
+    end
+
+    def refresh!
+      Atomic.open_lock(File.join(@run_dir, ".state.lock"), exclusive: false) do
+        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
+        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+        self.class.validate_snapshot!(manifest, data)
+        @manifest = manifest
+        @data = data
+      end
+    end
+  end
+end
