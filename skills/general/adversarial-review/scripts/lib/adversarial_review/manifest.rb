@@ -357,7 +357,19 @@ module AdversarialReview
     end
 
     def run_git(directory, *arguments)
-      Open3.capture2e("git", "-C", directory, *arguments)
+      command = ["git", "-C", directory] + arguments
+      begin
+        Open3.capture2e(*command)
+      rescue SystemCallError => error
+        raise Error.new(
+          "git_error", "could not start Git command",
+          {
+            "context" => "git_spawn",
+            "command" => command,
+            "errno" => error.errno
+          }
+        )
+      end
     end
 
     def target_snapshots

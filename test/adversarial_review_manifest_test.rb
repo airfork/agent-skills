@@ -143,6 +143,47 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
+  def test_normalizes_a_missing_git_executable_to_a_structured_error
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      original_path = ENV["PATH"]
+      ENV["PATH"] = File.join(repository, "missing-bin")
+
+      error = assert_manifest_error("git_error") do
+        build_manifest(repository, spec: "docs/spec.md")
+      end
+
+      assert_equal "git_spawn", error.details.fetch("context")
+      assert_equal [
+        "git", "-C", File.expand_path(repository),
+        "rev-parse", "--show-toplevel"
+      ], error.details.fetch("command")
+      assert_equal Errno::ENOENT::Errno, error.details.fetch("errno")
+    ensure
+      ENV["PATH"] = original_path
+    end
+  end
+
+  def test_normalizes_a_permission_denied_git_spawn_to_a_structured_error
+    with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
+      spawn_failure = lambda do |*_arguments|
+        raise Errno::EACCES, "Permission denied - git"
+      end
+
+      Open3.stub(:capture2e, spawn_failure) do
+        error = assert_manifest_error("git_error") do
+          build_manifest(repository, spec: "docs/spec.md")
+        end
+
+        assert_equal "git_spawn", error.details.fetch("context")
+        assert_equal [
+          "git", "-C", File.expand_path(repository),
+          "rev-parse", "--show-toplevel"
+        ], error.details.fetch("command")
+        assert_equal Errno::EACCES::Errno, error.details.fetch("errno")
+      end
+    end
+  end
+
   def test_rejects_a_target_swapped_after_canonical_resolution
     with_repository(files: {"docs/spec.md" => "# Original\n"}) do |repository|
       Dir.mktmpdir("outside-swap") do |outside|
