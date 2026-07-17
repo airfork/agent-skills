@@ -1,4 +1,6 @@
 require "fileutils"
+require "json"
+require "rbconfig"
 require "tmpdir"
 
 module AdversarialReviewHelper
@@ -21,6 +23,35 @@ module AdversarialReviewHelper
 
       yield repository
     end
+  end
+
+  def write_fake_executable(directory, name: "fake-agent", body: nil)
+    path = File.join(directory, name)
+    source = body || <<~RUBY
+      \#!#{RbConfig.ruby}
+      require "json"
+      log = ENV.fetch("FAKE_CLI_LOG")
+      File.open(log, "a", 0o600) do |file|
+        file.puts(JSON.generate({"argv" => ARGV, "stdin" => STDIN.read,
+                                "env" => ENV.to_h, "cwd" => Dir.pwd}))
+      end
+      STDOUT.write(ENV.fetch("FAKE_STDOUT", ""))
+      STDERR.write(ENV.fetch("FAKE_STDERR", ""))
+      exit(Integer(ENV.fetch("FAKE_EXIT", "0")))
+    RUBY
+    File.write(path, source)
+    File.chmod(0o700, path)
+    path
+  end
+
+  def fake_cli_records(path)
+    return [] unless File.exist?(path)
+
+    File.readlines(path).map { |line| JSON.parse(line) }
+  end
+
+  def ruby_script(source)
+    [RbConfig.ruby, "-e", source]
   end
 
   private
