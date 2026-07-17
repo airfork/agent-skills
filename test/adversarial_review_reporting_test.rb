@@ -24,6 +24,118 @@ class AdversarialReviewReportingTest < Minitest::Test
                  summary.dig("provenance", "angles").map { |angle| angle.fetch("name") }
   end
 
+  def test_uses_the_authoritative_normalized_capability_contract
+    source = summary_source(
+      "capabilities" => capability_declaration,
+      "degraded_capabilities" => []
+    )
+
+    summary = AdversarialReview::Reporting.summary(source)
+
+    assert_equal AdversarialReview::Capabilities::FIELDS.sort,
+                 summary.dig("provenance", "capabilities").keys.sort
+    repository_access = summary.dig("provenance", "capabilities", "repository_access")
+    assert_equal true, repository_access.fetch("requested")
+    assert_equal "enforced", repository_access.fetch("status")
+    assert_equal "fixture attestation", repository_access.fetch("evidence")
+    assert_equal "test fixture", repository_access.fetch("source")
+    markdown = AdversarialReview::Reporting.markdown(summary)
+    assert_includes markdown, "| Capability | Requested | Status | Evidence | Source |"
+    assert_includes markdown,
+                    "| repository_access | true | enforced | fixture attestation | test fixture |"
+  end
+
+  def test_capability_gate_suppresses_an_ordinary_pass
+    source = resolved_revise_source
+    declaration = capability_declaration
+    declaration.fetch("fresh_context")["status"] = "behavioral"
+    source["capabilities"] = declaration
+    source["degraded_capabilities"] = ["fresh_context"]
+
+    summary = AdversarialReview::Reporting.summary(source)
+
+    assert_equal "DEGRADED CAPABILITIES", summary.fetch("verdict")
+    assert_equal ["fresh_context"], summary.fetch("degraded_capabilities")
+  end
+
+  def test_each_behavioral_or_unavailable_safety_boundary_suppresses_pass
+    AdversarialReview::Capabilities::SAFETY_BOUNDARIES.product(
+      %w[behavioral unavailable]
+    ).each do |field, status|
+      source = resolved_revise_source
+      declaration = capability_declaration
+      declaration.fetch(field)["status"] = status
+      source["capabilities"] = declaration
+      source["degraded_capabilities"] = [field]
+
+      summary = AdversarialReview::Reporting.summary(source)
+
+      assert_equal "DEGRADED CAPABILITIES", summary.fetch("verdict"), "#{field}=#{status}"
+    end
+  end
+
+  def test_requires_enabled_angle_inventory_and_exact_coverage
+    source = summary_source
+    source.delete("enabled_tasks")
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_summary", error.code
+    assert_includes error.details.fetch("missing"), "enabled_tasks"
+
+    incomplete = summary_source
+    incomplete.fetch("angles").pop
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(incomplete)
+    end
+    assert_equal "invalid_angles", error.code
+  end
+
+  def test_every_angle_requires_explicit_failure_status_data
+    source = summary_source
+    source.fetch("angles").first.delete("failure_reason")
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_angles", error.code
+  end
+
+  def test_rejects_a_finding_source_angle_outside_the_recorded_inventory
+    source = summary_source
+    source.dig("findings", 0, "sources", 0)["angle"] = "invented-angle"
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_findings", error.code
+  end
+
+  def test_retries_require_one_recorded_reason_per_retry
+    source = summary_source
+    source.fetch("angles").find { |angle| angle.fetch("retries").positive? }
+          .delete("retry_reasons")
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_angles", error.code
+  end
+
+  def test_schema_version_is_present_in_markdown_provenance_and_chat
+    summary = AdversarialReview::Reporting.summary(summary_source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+    chat = AdversarialReview::Reporting.chat_payload(summary)
+
+    assert_match(/\| Run ID \| run-report-1 \|\n\| Schema version \| 1 \|/, markdown)
+    assert_equal 1, chat.fetch("schema_version")
+  end
+
   def test_rejects_incomplete_or_malformed_provenance
     missing = summary_source
     missing.delete("ended_at")
@@ -96,12 +208,12 @@ class AdversarialReviewReportingTest < Minitest::Test
   end
 
   def test_discloses_degraded_capabilities_and_requested_observed_runtime
+    capabilities = capability_declaration
+    capabilities.fetch("usage_metrics")["status"] = "unavailable"
+    capabilities.fetch("usage_metrics")["evidence"] = "CLI omitted usage"
     source = summary_source(
       "degraded_capabilities" => ["usage_metrics"],
-      "capabilities" => summary_source.fetch("capabilities").map do |capability|
-        capability.fetch("name") == "usage_metrics" ?
-          capability.merge("status" => "unavailable", "evidence" => "CLI omitted usage") : capability
-      end
+      "capabilities" => capabilities
     )
     markdown = AdversarialReview::Reporting.markdown(
       AdversarialReview::Reporting.summary(source)
@@ -355,10 +467,17 @@ class AdversarialReviewReportingTest < Minitest::Test
       "requested_effort" => "xhigh",
       "observed_effort" => "xhigh",
       "angles" => [
-        {"name" => "traceability", "status" => "completed", "failure_reason" => nil, "retries" => 1},
-        {"name" => "assumptions-checker", "status" => "completed", "failure_reason" => nil, "retries" => 0}
+        {
+          "name" => "traceability", "status" => "completed", "failure_reason" => nil,
+          "retries" => 1, "retry_reasons" => ["First response failed schema validation"]
+        },
+        {
+          "name" => "assumptions-checker", "status" => "completed", "failure_reason" => nil,
+          "retries" => 0, "retry_reasons" => []
+        }
       ],
-      "capabilities" => capability_records,
+      "enabled_tasks" => ["traceability", "assumptions-checker"],
+      "capabilities" => capability_declaration,
       "degraded_capabilities" => [],
       "usage" => {
         "prompt_bytes" => 900, "input_tokens" => 200, "cached_input_tokens" => 20,
@@ -392,13 +511,36 @@ class AdversarialReviewReportingTest < Minitest::Test
     deep_merge(source, overrides)
   end
 
-  def capability_records
-    %w[
-      fresh_context read_only model_selection effort_selection structured_output
-      usage_metrics parallel_dispatch
-    ].map do |name|
-      {"name" => name, "status" => "enforced", "evidence" => "fixture attestation"}
+  def capability_declaration(status = "enforced")
+    AdversarialReview::Capabilities::FIELDS.each_with_object({}) do |field, declarations|
+      requested = case field
+                  when "model_selection" then "gpt-review"
+                  when "effort_selection" then "xhigh"
+                  else true
+                  end
+      declarations[field] = {
+        "requested" => requested,
+        "status" => status,
+        "evidence" => "fixture attestation",
+        "source" => "test fixture"
+      }
     end
+  end
+
+  def resolved_revise_source
+    finding_id = expected_finding_id("run-report-1")
+    source = summary_source(
+      "mode" => "revise",
+      "author_actions" => {
+        finding_id => {
+          "status" => "fixed", "rationale" => "Added an explicit owner.",
+          "changed_paths" => ["docs/spec.md"]
+        }
+      },
+      "resolution_checks" => {finding_id => "resolved"}
+    )
+    source.fetch("findings").first["state"] = "resolved"
+    source
   end
 
   def expected_finding_id(run_id)

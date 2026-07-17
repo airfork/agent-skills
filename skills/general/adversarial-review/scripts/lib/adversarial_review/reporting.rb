@@ -28,17 +28,12 @@ module AdversarialReview
     REQUIRED_SOURCE_KEYS = %w[
       schema_version run_id targets repository started_at ended_at tier mode output
       requested_executor selected_executor cli requested_model observed_model
-      requested_effort observed_effort angles capabilities degraded_capabilities usage
+      requested_effort observed_effort enabled_tasks angles capabilities degraded_capabilities usage
       findings semantic_groups author_actions resolution_checks evidence_gaps metrics
-    ].freeze
-    REQUIRED_CAPABILITIES = %w[
-      fresh_context read_only model_selection effort_selection structured_output
-      usage_metrics parallel_dispatch
     ].freeze
     USAGE_KEYS = %w[
       prompt_bytes input_tokens cached_input_tokens output_tokens reasoning_tokens total_tokens
     ].freeze
-    CAPABILITY_STATUSES = %w[enforced behavioral unavailable].freeze
     ANGLE_STATUSES = %w[completed failed skipped combined].freeze
     SEVERITIES = %w[CRITICAL HIGH MEDIUM LOW].freeze
     MAX_REPORT_BYTES = 64 * 1024 * 1024
@@ -70,18 +65,33 @@ module AdversarialReview
       cli = canonical_cli(source.fetch("cli"))
       model = observed_pair(source, "model")
       effort = observed_pair(source, "effort")
-      angles = canonical_angles(source.fetch("angles"), source["enabled_tasks"])
+      enabled_tasks = canonical_enabled_tasks(source.fetch("enabled_tasks"))
+      angles = canonical_angles(source.fetch("angles"), enabled_tasks)
       capabilities = canonical_capabilities(
-        source.fetch("capabilities"), source.fetch("degraded_capabilities")
+        source.fetch("capabilities"),
+        requested_model: source.fetch("requested_model"),
+        requested_effort: source.fetch("requested_effort")
       )
       usage = canonical_usage(source.fetch("usage"))
-      findings = canonical_findings(source, run_id)
+      findings = canonical_findings(source, run_id, angles.map { |angle| angle.fetch("name") })
       actions = canonical_actions(source.fetch("author_actions"), findings)
       resolution_checks = canonical_resolutions(source.fetch("resolution_checks"), findings)
       evidence_gaps = canonical_evidence_gaps(source.fetch("evidence_gaps"))
-      degraded = capabilities.reject { |record| record.fetch("status") == "enforced" }
-                             .map { |record| record.fetch("name") }
-      verdict = verdict_for(mode, findings, evidence_gaps)
+      ordinary_verdict = verdict_for(mode, findings, evidence_gaps)
+      capability_gate = Capabilities.gate(
+        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
+      )
+      degraded = capability_gate.fetch("degraded_capabilities")
+      disclosed = source.fetch("degraded_capabilities")
+      unless disclosed.is_a?(Array) && disclosed.all? { |name| name.is_a?(String) } &&
+             disclosed.uniq.sort == degraded.sort
+        invalid!(
+          "invalid_capabilities",
+          "degraded capability disclosure does not match the authoritative gate",
+          {"expected" => degraded.sort, "observed" => disclosed}
+        )
+      end
+      verdict = capability_gate.fetch("verdict") == "PASS" ? "PASSED" : capability_gate.fetch("verdict")
 
       result = {
         "schema_version" => 1,
@@ -97,6 +107,7 @@ module AdversarialReview
         "open_questions" => open_questions(findings, actions, evidence_gaps),
         "degraded_capabilities" => degraded,
         "provenance" => {
+          "schema_version" => 1,
           "run_id" => run_id,
           "targets" => targets,
           "repository" => repository,
@@ -109,6 +120,7 @@ module AdversarialReview
           "cli" => cli,
           "model" => model,
           "effort" => effort,
+          "enabled_tasks" => enabled_tasks,
           "angles" => angles,
           "capabilities" => capabilities,
           "retries" => angles.sum { |angle| angle.fetch("retries") },
@@ -156,6 +168,7 @@ module AdversarialReview
     def chat_payload(value)
       validate_render_summary!(value)
       {
+        "schema_version" => value.fetch("schema_version"),
         "run_id" => value.fetch("run_id"),
         "verdict" => value.fetch("verdict"),
         "findings" => deep_copy(value.fetch("findings")),
@@ -269,6 +282,15 @@ module AdversarialReview
       {"requested" => requested, "observed" => observed}
     end
 
+    def canonical_enabled_tasks(enabled_tasks)
+      unless enabled_tasks.is_a?(Array) && !enabled_tasks.empty? &&
+             enabled_tasks.all? { |name| name.is_a?(String) && name.match?(/\A[a-z0-9]+(?:-[a-z0-9]+)*\z/) } &&
+             enabled_tasks.uniq.length == enabled_tasks.length
+        invalid!("invalid_angles", "enabled angle inventory must contain unique normalized names")
+      end
+      enabled_tasks.sort
+    end
+
     def canonical_angles(angles, enabled_tasks)
       unless angles.is_a?(Array) && !angles.empty?
         invalid!("invalid_angles", "angle provenance must be a non-empty array")
@@ -288,48 +310,40 @@ module AdversarialReview
         if %w[failed skipped].include?(status) && reason.nil?
           invalid!("invalid_angles", "failed and skipped angles require a reason", {"name" => name})
         end
-        {"name" => name, "status" => status, "failure_reason" => reason, "retries" => retries}
+        retry_reasons = angle.fetch("retry_reasons")
+        unless retry_reasons.is_a?(Array) && retry_reasons.length == retries &&
+               retry_reasons.all? { |entry| entry.is_a?(String) && !entry.strip.empty? }
+          invalid!(
+            "invalid_angles", "each retry requires one recorded non-empty reason",
+            {"name" => name, "retries" => retries}
+          )
+        end
+        {
+          "name" => name, "status" => status, "failure_reason" => reason,
+          "retries" => retries, "retry_reasons" => retry_reasons.dup
+        }
       rescue KeyError => error
         invalid!("invalid_angles", "angle provenance is incomplete", {"field" => error.key})
       end
       names = records.map { |record| record.fetch("name") }
       invalid!("invalid_angles", "angle names must be unique") unless names.uniq.length == names.length
-      if enabled_tasks
-        unless enabled_tasks.is_a?(Array) && enabled_tasks.all? { |name| name.is_a?(String) } &&
-               enabled_tasks.sort == names.sort
-          invalid!("invalid_angles", "angle provenance does not cover every enabled angle")
-        end
+      unless enabled_tasks == names.sort
+        invalid!("invalid_angles", "angle provenance does not cover every enabled angle")
       end
       records.sort_by { |record| record.fetch("name") }
     end
 
-    def canonical_capabilities(capabilities, disclosed_degraded)
-      unless capabilities.is_a?(Array)
-        invalid!("invalid_capabilities", "capability provenance must be an array")
-      end
-      records = capabilities.map do |capability|
-        require_hash!(capability, "capability")
-        name = nonempty_string!(capability.fetch("name"), "capability name")
-        status = validate_enum!("capability status", capability.fetch("status"), CAPABILITY_STATUSES)
-        evidence = nonempty_string!(capability.fetch("evidence"), "capability evidence")
-        {"name" => name, "status" => status, "evidence" => evidence}
-      rescue KeyError => error
-        invalid!("invalid_capabilities", "capability provenance is incomplete", {"field" => error.key})
-      end
-      names = records.map { |record| record.fetch("name") }
-      unless names.sort == REQUIRED_CAPABILITIES.sort
-        invalid!(
-          "invalid_capabilities", "capability provenance must cover the portable contract",
-          {"expected" => REQUIRED_CAPABILITIES.sort, "observed" => names.sort}
-        )
-      end
-      degraded = records.reject { |record| record.fetch("status") == "enforced" }
-                        .map { |record| record.fetch("name") }.sort
-      unless disclosed_degraded.is_a?(Array) && disclosed_degraded.all? { |name| name.is_a?(String) } &&
-             disclosed_degraded.uniq.sort == degraded
-        invalid!("invalid_capabilities", "degraded capability disclosure does not match capability statuses")
-      end
-      records.sort_by { |record| record.fetch("name") }
+    def canonical_capabilities(capabilities, requested_model:, requested_effort:)
+      Capabilities.normalize(
+        capabilities,
+        requested_model: requested_model,
+        requested_effort: requested_effort
+      )
+    rescue Capabilities::Error => error
+      invalid!(
+        "invalid_capabilities", "capability provenance does not match the shared contract",
+        {"cause" => error.message}
+      )
     end
 
     def canonical_usage(usage)
@@ -346,7 +360,7 @@ module AdversarialReview
       end
     end
 
-    def canonical_findings(source, run_id)
+    def canonical_findings(source, run_id, recorded_angles)
       findings = source.fetch("findings")
       groups = source.fetch("semantic_groups")
       unless findings.is_a?(Array) && groups.is_a?(Hash)
@@ -379,6 +393,13 @@ module AdversarialReview
                end
           invalid!("invalid_findings", "finding sources are incomplete", {"id" => expected_id})
         end
+        source_angles = sources.map { |item| item.fetch("angle") }.uniq.sort
+        unless (source_angles - recorded_angles).empty?
+          invalid!(
+            "invalid_findings", "finding source angle is absent from run provenance",
+            {"id" => expected_id, "unknown_angles" => source_angles - recorded_angles}
+          )
+        end
         group = groups.fetch(finding.fetch("group_id"))
         require_hash!(group, "semantic group")
         text = nonempty_string!(group.fetch("summary"), "finding summary")
@@ -392,7 +413,7 @@ module AdversarialReview
           "summary" => text,
           "consequence" => nonempty_string!(finding.fetch("consequence"), "finding consequence"),
           "confidence" => confidence,
-          "source_angles" => sources.map { |item| item.fetch("angle") }.uniq.sort,
+          "source_angles" => source_angles,
           "round" => finding.fetch("round"),
           "state" => validate_enum!(
             "finding state", finding.fetch("state"), %w[pending resolved rejected contested stuck]
@@ -590,6 +611,7 @@ module AdversarialReview
       lines << "| Field | Value |"
       lines << "|---|---|"
       lines << table_row(["Run ID", provenance.fetch("run_id")])
+      lines << table_row(["Schema version", provenance.fetch("schema_version")])
       lines << table_row(["Started", provenance.fetch("started_at")])
       lines << table_row(["Ended", provenance.fetch("ended_at")])
       lines << table_row(["Tier", provenance.fetch("tier")])
@@ -609,22 +631,24 @@ module AdversarialReview
       lines << ""
       lines << "### Angles"
       lines << ""
-      lines << "| Angle | Status | Retries | Failure reason |"
-      lines << "|---|---|---|---|"
+      lines << "| Angle | Status | Retries | Retry reasons | Failure reason |"
+      lines << "|---|---|---|---|---|"
       provenance.fetch("angles").each do |angle|
         lines << table_row([
           angle.fetch("name"), angle.fetch("status"), angle.fetch("retries"),
+          angle.fetch("retry_reasons").join("; "),
           angle.fetch("failure_reason")
         ])
       end
       lines << ""
       lines << "### Capabilities"
       lines << ""
-      lines << "| Capability | Status | Evidence |"
-      lines << "|---|---|---|"
-      provenance.fetch("capabilities").each do |capability|
+      lines << "| Capability | Requested | Status | Evidence | Source |"
+      lines << "|---|---|---|---|---|"
+      provenance.fetch("capabilities").each do |name, capability|
         lines << table_row([
-          capability.fetch("name"), capability.fetch("status"), capability.fetch("evidence")
+          name, capability.fetch("requested"), capability.fetch("status"),
+          capability.fetch("evidence"), capability.fetch("source")
         ])
       end
       lines << ""
@@ -769,7 +793,8 @@ module AdversarialReview
       end
       provenance = value.fetch("provenance")
       require_hash!(provenance, "provenance")
-      unless provenance["run_id"] == value["run_id"] && provenance["mode"] == value["mode"] &&
+      unless provenance["schema_version"] == value["schema_version"] &&
+             provenance["run_id"] == value["run_id"] && provenance["mode"] == value["mode"] &&
              provenance["tier"] == value["tier"] && provenance["output"] == value["output"]
         invalid!("invalid_summary", "render summary identity and provenance disagree")
       end
@@ -798,12 +823,28 @@ module AdversarialReview
           end
         end
       end
-      angles = canonical_angles(provenance.fetch("angles"), nil)
+      enabled_tasks = canonical_enabled_tasks(provenance.fetch("enabled_tasks"))
+      unless provenance.fetch("enabled_tasks") == enabled_tasks
+        invalid!("invalid_summary", "render summary enabled angle order is not canonical")
+      end
+      angles = canonical_angles(provenance.fetch("angles"), enabled_tasks)
       unless provenance.fetch("angles") == angles
         invalid!("invalid_summary", "render summary angle order is not canonical")
       end
+      recorded_angles = angles.map { |angle| angle.fetch("name") }
+      findings.each do |finding|
+        unknown = finding.fetch("source_angles") - recorded_angles
+        unless unknown.empty?
+          invalid!(
+            "invalid_summary", "render finding source angle is absent from run provenance",
+            {"id" => finding.fetch("id"), "unknown_angles" => unknown}
+          )
+        end
+      end
       capabilities = canonical_capabilities(
-        provenance.fetch("capabilities"), value.fetch("degraded_capabilities")
+        provenance.fetch("capabilities"),
+        requested_model: provenance.dig("model", "requested"),
+        requested_effort: provenance.dig("effort", "requested")
       )
       unless provenance.fetch("capabilities") == capabilities
         invalid!("invalid_summary", "render summary capability order is not canonical")
@@ -816,12 +857,7 @@ module AdversarialReview
       unless retries.is_a?(Integer) && retries == angles.sum { |angle| angle.fetch("retries") }
         invalid!("invalid_summary", "render summary retry total is invalid")
       end
-      expected_degraded = capabilities.reject { |record| record.fetch("status") == "enforced" }
-                                      .map { |record| record.fetch("name") }
-      unless value.fetch("degraded_capabilities") == expected_degraded
-        invalid!("invalid_summary", "render summary degraded capability order is invalid")
-      end
-      expected_verdict = if mode == "critique"
+      ordinary_verdict = if mode == "critique"
                            "REPORT ONLY - #{findings.length} #{findings.length == 1 ? "finding" : "findings"}"
                          else
                            open = findings.count do |finding|
@@ -835,6 +871,14 @@ module AdversarialReview
                              "PASSED WITH OPEN QUESTIONS"
                            end
                          end
+      gate = Capabilities.gate(
+        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
+      )
+      expected_degraded = gate.fetch("degraded_capabilities")
+      unless value.fetch("degraded_capabilities") == expected_degraded
+        invalid!("invalid_summary", "render summary degraded capability disclosure is invalid")
+      end
+      expected_verdict = gate.fetch("verdict") == "PASS" ? "PASSED" : gate.fetch("verdict")
       invalid!("invalid_summary", "render summary verdict is inconsistent") unless value["verdict"] == expected_verdict
       true
     rescue Error => error
