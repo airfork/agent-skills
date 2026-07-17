@@ -12,6 +12,456 @@ require "adversarial_review"
 class AdversarialReviewStateTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_ingest_validates_schema_before_mutating_state_or_results
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      payload = attack_payload(task)
+      payload.delete("checks_completed")
+      state_before = File.binread(File.join(run_dir, "state.json"))
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.ingest(task.fetch("task_id"), payload)
+      end
+
+      assert_equal 3, error.exit_status
+      assert_includes error.details.fetch("errors").map { |entry| entry.fetch("code") }, "required"
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+      assert_empty Dir.children(File.join(run_dir, "results"))
+    end
+  end
+
+  def test_ingest_attack_allocates_ids_and_collapses_exact_duplicates_with_sources
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      duplicate = result_finding("Missing rollback owner")
+      payload = attack_payload(task, [duplicate, duplicate.dup, result_finding("Missing timeout")])
+
+      summary = state.ingest(task.fetch("task_id"), payload)
+
+      assert_equal %w[C-tester-1-1 C-tester-1-2], summary.fetch("candidate_ids")
+      assert_equal 1, summary.fetch("duplicate_mappings").length
+      assert_equal "C-tester-1-1", summary.dig("duplicate_mappings", 0, "candidate_id")
+      assert_equal 2, state.candidates.length
+      assert_equal 2, state.to_h.dig("exact_duplicate_sources", "C-tester-1-1").length
+      assert_equal payload, JSON.parse(File.read(File.join(run_dir, "results", "#{task.fetch("task_id")}.json")))
+      assert_equal 0o600, File.stat(File.join(run_dir, "results", "#{task.fetch("task_id")}.json")).mode & 0o777
+    end
+  end
+
+  def test_ingest_dedupe_requires_exact_coverage_and_persists_group_traceability
+    candidate_findings = [result_finding("Missing rollback owner"), result_finding("Missing timeout")]
+    with_ingest_state(
+      stage: "deduplicating", schema: "dedupe", candidate_findings: candidate_findings
+    ) do |state, run_dir, task|
+      payload = base_result_payload(task).merge(
+        "groups" => [{
+          "group_id" => "G-recovery",
+          "candidate_ids" => %w[C-tester-1-1 C-tester-1-2],
+          "summary" => "Recovery controls are incomplete",
+          "location" => result_finding("x").fetch("location"),
+          "source_angles" => ["tester"]
+        }]
+      )
+
+      summary = state.ingest(task.fetch("task_id"), payload)
+
+      assert_equal ["G-recovery"], summary.fetch("group_ids")
+      assert_equal %w[C-tester-1-1 C-tester-1-2],
+                   state.to_h.dig("semantic_groups", "G-recovery", "candidate_ids")
+      assert_equal ["G-recovery"], state.candidates.map { |candidate| candidate.fetch("group_id") }.uniq
+      assert File.file?(File.join(run_dir, "results", "#{task.fetch("task_id")}.json"))
+    end
+  end
+
+  def test_ingest_judge_applies_confidence_floor_refute_and_unproven_distinctly
+    candidates = %w[promote refute unproven low-confidence].map { |name| result_finding(name) }
+    with_ingest_state(stage: "culling", schema: "judge", candidate_findings: candidates) do |state, _run_dir, task|
+      payload = base_result_payload(task).merge(
+        "verdicts" => [
+          judge_verdict("C-tester-1-1", "PROMOTE", 0.9),
+          judge_verdict("C-tester-1-2", "REFUTE", 0.9, evidence: "The owner is named on line 8."),
+          judge_verdict("C-tester-1-3", "UNPROVEN", 0.9),
+          judge_verdict("C-tester-1-4", "PROMOTE", 0.69)
+        ],
+        "metrics" => {}
+      )
+
+      summary = state.ingest(task.fetch("task_id"), payload)
+
+      assert_equal 1, summary.fetch("promoted_ids").length
+      assert_equal %w[promoted refuted unproven unproven],
+                   state.candidates.map { |candidate| candidate.fetch("state") }
+      assert_equal 2, state.to_h.fetch("evidence_gaps").length
+      assert_equal "Omission", state.findings.first.fetch("category")
+      assert_equal "HIGH", state.findings.first.fetch("severity")
+      assert_equal "Recovery can stall.", state.findings.first.fetch("consequence")
+    end
+  end
+
+  def test_ingest_author_actions_and_resolution_preserve_disposition_evidence
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "adversarial-review-actions")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      candidate = state.ingest_candidate("tester", 1, result_finding("Missing rollback owner"))
+      advance(state, %w[deduplicating culling])
+      state.promote([promotion_group("G-001", candidate.fetch("id"), "HIGH", 0.9, "docs/spec.md", 2)])
+      state.transition_to("awaiting-author")
+      finding_id = state.findings.first.fetch("id")
+      action_task = emit_result_task(state, "author-actions")
+      action_payload = base_result_payload(action_task).merge(
+        "actions" => [{
+          "finding_id" => finding_id,
+          "action" => "REJECTED",
+          "rationale" => "The owner is assigned by policy.",
+          "changed_paths" => ["docs/spec.md"]
+        }]
+      )
+
+      state.ingest(action_task.fetch("task_id"), action_payload)
+
+      assert_equal "rejected", state.to_h.dig("author_actions", finding_id, "status")
+      assert_equal "The owner is assigned by policy.",
+                   state.to_h.dig("author_actions", finding_id, "rationale")
+      assert_equal "pending", state.findings.first.fetch("state")
+
+      state.transition_to("resolving")
+      resolution_task = emit_result_task(state, "resolution")
+      resolution_payload = base_result_payload(resolution_task).merge(
+        "checks" => [{
+          "finding_id" => finding_id,
+          "status" => "RESOLVED",
+          "evidence" => "The policy reference is authoritative."
+        }],
+        "new_findings" => [],
+        "metrics" => {}
+      )
+
+      state.ingest(resolution_task.fetch("task_id"), resolution_payload)
+
+      assert_equal "rejected", state.findings.first.fetch("state")
+      assert_equal "rejected", state.to_h.dig("resolution_checks", finding_id)
+    end
+  end
+
+  def test_ultra_judge_waits_for_two_independent_promote_votes
+    with_ingest_state(
+      stage: "culling",
+      schema: "judge",
+      tier: "ultra",
+      candidate_findings: [result_finding("Missing rollback owner")],
+      task_overrides: {
+        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1", "expected_voters" => 2
+      }
+    ) do |state, _run_dir, first_task|
+      first_payload = base_result_payload(first_task).merge(
+        "verdicts" => [judge_verdict("C-tester-1-1", "PROMOTE", 0.9)],
+        "metrics" => {}
+      )
+
+      first_summary = state.ingest(first_task.fetch("task_id"), first_payload)
+
+      assert_empty first_summary.fetch("promoted_ids")
+      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
+
+      second_task = emit_result_task(
+        state,
+        "judge",
+        "task_id" => "judge-batch-r1-a2",
+        "vote_group_id" => "VG-cull-1",
+        "voter_id" => "voter-2",
+        "expected_voters" => 2
+      )
+      second_payload = base_result_payload(second_task).merge(
+        "verdicts" => [judge_verdict("C-tester-1-1", "PROMOTE", 0.95)],
+        "metrics" => {}
+      )
+
+      second_summary = state.ingest(second_task.fetch("task_id"), second_payload)
+
+      assert_equal 1, second_summary.fetch("promoted_ids").length
+      assert_equal "promoted", state.candidate("C-tester-1-1").fetch("state")
+      assert_equal 2, state.to_h.dig("judge_votes", "C-tester-1-1").length
+    end
+  end
+
+  def test_ultra_judge_refutes_only_after_two_independent_refute_votes
+    with_ultra_vote_pair("REFUTE", "REFUTE") do |state, summary|
+      assert_equal ["C-tester-1-1"], summary.fetch("refuted_candidate_ids")
+      assert_equal "refuted", state.candidate("C-tester-1-1").fetch("state")
+      assert_empty state.to_h.fetch("pending_arbiter_subjects")
+    end
+  end
+
+  def test_ultra_judge_promote_unproven_split_requires_arbitration
+    with_ultra_vote_pair("PROMOTE", "UNPROVEN") do |state, summary|
+      assert_empty summary.fetch("promoted_ids")
+      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
+      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
+    end
+  end
+
+  def test_ultra_judge_refute_unproven_split_requires_arbitration
+    with_ultra_vote_pair("REFUTE", "UNPROVEN") do |state, summary|
+      assert_empty summary.fetch("refuted_candidate_ids")
+      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
+      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
+    end
+  end
+
+  def test_ultra_judge_promote_refute_split_without_agreement_requires_arbitration
+    with_ultra_vote_pair("PROMOTE", "REFUTE") do |state, _summary|
+      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
+      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
+    end
+  end
+
+  def test_ultra_judge_rejects_a_duplicate_voter_without_mutation
+    with_ultra_vote_pair("PROMOTE", "PROMOTE", second_voter: "voter-1", expect_error: true) do |state, error, before|
+      assert_equal "duplicate_voter", error.code
+      assert_equal before, state.to_h
+      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
+    end
+  end
+
+  def test_ingest_arbiter_maps_author_resolution_decisions_deterministically
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "adversarial-review-arbiter")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      candidate = state.ingest_candidate("tester", 1, result_finding("Missing rollback owner"))
+      advance(state, %w[deduplicating culling])
+      state.promote([promotion_group("G-001", candidate.fetch("id"), "HIGH", 0.9, "docs/spec.md", 2)])
+      state.transition_to("awaiting-author")
+      finding_id = state.findings.first.fetch("id")
+      state.record_author_action(
+        finding_id,
+        {"status" => "rejected", "rationale" => "Policy covers this", "changed_paths" => []}
+      )
+      state.transition_to("resolving")
+      state.record_resolution(finding_id, "contested")
+      state.set_pending_arbiter_subjects([finding_id])
+      state.transition_to("arbitrating")
+      arbiter_task = emit_result_task(
+        state,
+        "arbiter",
+        "dispute_kind" => "author-resolution",
+        "subject_ids" => [finding_id],
+        "subject_mappings" => {finding_id => [candidate.fetch("id")]}
+      )
+      payload = base_result_payload(arbiter_task).merge(
+        "decisions" => [{
+          "subject_id" => finding_id,
+          "decision" => "RESOLVED",
+          "confidence" => 0.9,
+          "evidence" => "The policy controls the disputed requirement.",
+          "mapped_candidate_ids" => [candidate.fetch("id")]
+        }],
+        "metrics" => {}
+      )
+
+      state.ingest(arbiter_task.fetch("task_id"), payload)
+
+      assert_equal "rejected", state.findings.first.fetch("state")
+      assert_empty state.to_h.fetch("pending_arbiter_subjects")
+    end
+  end
+
+  def test_judge_conflict_inside_a_semantic_group_requires_arbitration
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "adversarial-review-group-conflict")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      2.times { |index| state.ingest_candidate("tester", 1, result_finding("candidate-#{index}")) }
+      state.transition_to("deduplicating")
+      dedupe_task = emit_result_task(state, "dedupe")
+      dedupe_payload = base_result_payload(dedupe_task).merge(
+        "groups" => [{
+          "group_id" => "G-shared",
+          "candidate_ids" => %w[C-tester-1-1 C-tester-1-2],
+          "summary" => "Shared concern",
+          "location" => result_finding("x").fetch("location"),
+          "source_angles" => ["tester"]
+        }]
+      )
+      state.ingest(dedupe_task.fetch("task_id"), dedupe_payload)
+      state.transition_to("culling")
+      judge_task = emit_result_task(state, "judge")
+      judge_payload = base_result_payload(judge_task).merge(
+        "verdicts" => [
+          judge_verdict("C-tester-1-1", "PROMOTE", 0.9),
+          judge_verdict("C-tester-1-2", "REFUTE", 0.9, evidence: "The owner is named on line 8.")
+        ],
+        "metrics" => {}
+      )
+
+      summary = state.ingest(judge_task.fetch("task_id"), judge_payload)
+
+      assert_empty summary.fetch("promoted_ids")
+      assert_equal ["G-shared"], state.to_h.fetch("pending_arbiter_subjects")
+      assert_equal %w[candidate candidate], state.candidates.map { |candidate| candidate.fetch("state") }
+    end
+  end
+
+  def test_judge_enforces_the_fifty_finding_cap_without_allocating_overflow_ids
+    candidates = 51.times.map { |index| result_finding("candidate-#{index}") }
+    with_ingest_state(stage: "culling", schema: "judge", candidate_findings: candidates) do |state, _run_dir, task|
+      payload = base_result_payload(task).merge(
+        "verdicts" => 51.times.map do |index|
+          judge_verdict("C-tester-1-#{index + 1}", "PROMOTE", 0.9)
+        end,
+        "metrics" => {}
+      )
+
+      summary = state.ingest(task.fetch("task_id"), payload)
+
+      assert_equal 50, summary.fetch("promoted_ids").length
+      assert_equal 50, state.findings.length
+      assert_equal 1, state.to_h.dig("overflow", "total")
+      assert_equal 1, state.to_h.dig("overflow", "by_category_severity", "Omission:HIGH")
+      assert_equal 50, state.findings.last.fetch("id").split("-").last.to_i
+    end
+  end
+
+  def test_ingest_adopts_exact_orphan_then_rejects_exactly_once_duplicate_without_mutation
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      payload = attack_payload(task, [result_finding("Missing rollback owner")])
+      result_path = File.join(run_dir, "results", "#{task.fetch("task_id")}.json")
+      File.binwrite(result_path, JSON.generate(payload) + "\n")
+      File.chmod(0o600, result_path)
+
+      state.ingest(task.fetch("task_id"), payload)
+      state_before = File.binread(File.join(run_dir, "state.json"))
+      result_before = File.binread(result_path)
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.ingest(task.fetch("task_id"), payload)
+      end
+
+      assert_equal "duplicate_result", error.code
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+      assert_equal result_before, File.binread(result_path)
+    end
+  end
+
+  def test_load_rejects_corrupted_ingestion_cross_references
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      state.ingest(task.fetch("task_id"), attack_payload(task, [result_finding("Missing owner")]))
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted.fetch("exact_duplicate_sources").values.first.first["task_id"] = "unknown-task"
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal 3, error.exit_status
+    end
+  end
+
+  def test_ingest_rejects_a_task_kind_schema_mismatch_without_mutation
+    with_ingest_state(stage: "attacking", task_overrides: {"kind" => "judge"}) do |state, run_dir, task|
+      state_before = File.binread(File.join(run_dir, "state.json"))
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.ingest(task.fetch("task_id"), attack_payload(task))
+      end
+
+      assert_equal "invalid_task_schema", error.code
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+      assert_empty Dir.children(File.join(run_dir, "results"))
+    end
+  end
+
+  def test_resolution_new_findings_require_a_fresh_sweep_and_block_completion_when_promoted_high
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "adversarial-review-resolution-new")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      original = state.ingest_candidate("tester", 1, result_finding("Original concern"))
+      advance(state, %w[deduplicating culling])
+      state.promote([promotion_group("G-original", original.fetch("id"), "HIGH", 0.9, "docs/spec.md", 2)])
+      state.transition_to("awaiting-author")
+      finding_id = state.findings.first.fetch("id")
+      state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
+      task = emit_result_task(state, "resolution", "allow_new_findings" => true)
+      payload = base_result_payload(task).merge(
+        "checks" => [{
+          "finding_id" => finding_id,
+          "status" => "RESOLVED",
+          "evidence" => "The original concern was fixed."
+        }],
+        "new_findings" => [result_finding("Regression introduced by the fix")],
+        "metrics" => {}
+      )
+
+      summary = state.ingest(task.fetch("task_id"), payload)
+
+      assert_equal ["C-resolution-1-1"], summary.fetch("candidate_ids")
+      assert_equal true, state.to_h.fetch("fresh_sweep_required")
+      assert_completion_blocked(state)
+
+      state.transition_to("fresh-sweep")
+      state.transition_to("culling-new-findings")
+      judge_task = emit_result_task(state, "judge")
+      judge_payload = base_result_payload(judge_task).merge(
+        "verdicts" => [judge_verdict("C-resolution-1-1", "PROMOTE", 0.95)],
+        "metrics" => {}
+      )
+      state.ingest(judge_task.fetch("task_id"), judge_payload)
+
+      assert_equal "HIGH", state.findings.last.fetch("severity")
+      assert_completion_blocked(state)
+    end
+  end
+
+  def test_candidate_arbiter_promote_refute_and_unproven_decisions_are_distinct
+    expected = {
+      "PROMOTE" => "promoted",
+      "REFUTE" => "refuted",
+      "UNPROVEN" => "unproven"
+    }
+    expected.each do |decision, candidate_state|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        built = build_ingest_manifest(repository)
+        run_dir = File.join(repository, ".git", "adversarial-review-candidate-#{decision.downcase}")
+        state = AdversarialReview::State.create(run_dir, built)
+        state.transition_to("attacking")
+        candidate = state.ingest_candidate("tester", 1, result_finding("Disputed candidate"))
+        advance(state, %w[deduplicating culling awaiting-author resolving])
+        state.set_pending_arbiter_subjects([candidate.fetch("id")])
+        state.transition_to("arbitrating")
+        task = emit_result_task(
+          state,
+          "arbiter",
+          "dispute_kind" => "candidate",
+          "subject_ids" => [candidate.fetch("id")],
+          "subject_mappings" => {candidate.fetch("id") => [candidate.fetch("id")]}
+        )
+        payload = base_result_payload(task).merge(
+          "decisions" => [{
+            "subject_id" => candidate.fetch("id"),
+            "decision" => decision,
+            "confidence" => 0.9,
+            "evidence" => "Independent arbiter evidence.",
+            "mapped_candidate_ids" => [candidate.fetch("id")]
+          }],
+          "metrics" => {}
+        )
+
+        state.ingest(task.fetch("task_id"), payload)
+
+        assert_equal candidate_state, state.candidate(candidate.fetch("id")).fetch("state"), decision
+        assert_equal decision, state.candidate(candidate.fetch("id")).fetch("arbiter_decision"), decision
+        assert_empty state.to_h.fetch("pending_arbiter_subjects"), decision
+      end
+    end
+  end
+
   def test_creates_a_prepared_state
     Dir.mktmpdir("adversarial-review-state") do |directory|
       run_dir = File.join(directory, "run")
@@ -1600,6 +2050,166 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   private
+
+  def with_ingest_state(stage:, tier: "high", schema: "attack", task_overrides: {},
+                        candidate_findings: [])
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository, tier: tier)
+      run_dir = File.join(repository, ".git", "adversarial-review-ingest")
+      state = AdversarialReview::State.create(run_dir, built)
+      path = transition_path_to(stage)
+      if candidate_findings.empty?
+        advance(state, path)
+      else
+        state.transition_to("attacking")
+        candidate_findings.each { |finding| state.ingest_candidate("tester", 1, finding) }
+        advance(state, path.drop(1))
+      end
+      task_id = "#{schema}-tester-r#{state.to_h.fetch("revise_round")}-a1"
+      task = {
+        "schema_version" => 1,
+        "run_id" => built.fetch("run_id"),
+        "task_id" => task_id,
+        "role" => schema == "attack" ? "attacker" : schema,
+        "kind" => schema,
+        "schema" => "assets/schemas/#{schema}.json",
+        "artifact_digests" => state.to_h.fetch("current_target_digests"),
+        "round" => state.to_h.fetch("revise_round"),
+        "attempt" => 1,
+        "angle" => "tester"
+      }.merge(task_overrides)
+      state.create_task_bundle(task_id) { task }
+      yield state, run_dir, task
+    end
+  end
+
+  def build_ingest_manifest(repository, tier: "high")
+    AdversarialReview::Manifest.build(
+      repository: repository,
+      spec: "docs/spec.md",
+      tier: tier,
+      mode: "revise",
+      output: "chat",
+      executor: "generic",
+      model: "reviewer-model",
+      effort: "high"
+    )
+  end
+
+  def emit_result_task(state, schema, overrides = {})
+    snapshot = state.to_h
+    task_id = overrides.fetch("task_id", "#{schema}-batch-r#{snapshot.fetch("revise_round")}-a1")
+    task = {
+      "schema_version" => 1,
+      "run_id" => snapshot.fetch("run_id"),
+      "task_id" => task_id,
+      "role" => schema,
+      "kind" => schema,
+      "schema_name" => schema,
+      "artifact_digests" => snapshot.fetch("current_target_digests"),
+      "round" => snapshot.fetch("revise_round"),
+      "attempt" => 1
+    }.merge(overrides)
+    state.create_task_bundle(task_id) { task }
+    task
+  end
+
+  def with_ultra_vote_pair(first_disposition, second_disposition, second_voter: "voter-2",
+                           expect_error: false)
+    with_ingest_state(
+      stage: "culling",
+      schema: "judge",
+      tier: "ultra",
+      candidate_findings: [result_finding("Missing rollback owner")],
+      task_overrides: {
+        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1", "expected_voters" => 2
+      }
+    ) do |state, _run_dir, first_task|
+      first_payload = base_result_payload(first_task).merge(
+        "verdicts" => [ultra_verdict("C-tester-1-1", first_disposition)],
+        "metrics" => {}
+      )
+      state.ingest(first_task.fetch("task_id"), first_payload)
+      second_task = emit_result_task(
+        state,
+        "judge",
+        "task_id" => "judge-batch-r1-a2",
+        "vote_group_id" => "VG-cull-1",
+        "voter_id" => second_voter,
+        "expected_voters" => 2
+      )
+      second_payload = base_result_payload(second_task).merge(
+        "verdicts" => [ultra_verdict("C-tester-1-1", second_disposition)],
+        "metrics" => {}
+      )
+      if expect_error
+        before = state.to_h
+        error = assert_raises(AdversarialReview::State::InvalidResult) do
+          state.ingest(second_task.fetch("task_id"), second_payload)
+        end
+        yield state, error, before
+      else
+        summary = state.ingest(second_task.fetch("task_id"), second_payload)
+        yield state, summary
+      end
+    end
+  end
+
+  def ultra_verdict(candidate_id, disposition)
+    evidence = disposition == "REFUTE" ? "The owner is named on line 8." : "Independent supporting evidence."
+    judge_verdict(candidate_id, disposition, 0.9, evidence: evidence)
+  end
+
+  def transition_path_to(stage)
+    stages = %w[attacking deduplicating culling awaiting-author resolving fresh-sweep culling-new-findings]
+    return [] if stage == "prepared"
+
+    stages.take(stages.index(stage) + 1)
+  end
+
+  def attack_payload(task, findings = [])
+    base_result_payload(task).merge(
+      "angle" => task.fetch("angle"),
+      "checks_completed" => ["assigned review checks"],
+      "findings" => findings,
+      "metrics" => {}
+    )
+  end
+
+  def base_result_payload(task)
+    {
+      "schema_version" => 1,
+      "run_id" => task.fetch("run_id"),
+      "task_id" => task.fetch("task_id"),
+      "artifact_digests" => task.fetch("artifact_digests"),
+      "notes" => []
+    }
+  end
+
+  def result_finding(summary)
+    {
+      "location" => {
+        "path" => "docs/spec.md", "line_start" => 2, "line_end" => 2,
+        "heading" => "Product spec"
+      },
+      "category" => "Omission",
+      "summary" => summary,
+      "evidence" => "The specification does not name one.",
+      "consequence" => "Recovery can stall."
+    }
+  end
+
+  def judge_verdict(candidate_id, disposition, confidence, evidence: "Independent supporting evidence.")
+    {
+      "candidate_id" => candidate_id,
+      "disposition" => disposition,
+      "confidence" => confidence,
+      "category" => "Omission",
+      "severity" => "HIGH",
+      "evidence" => evidence,
+      "consequence" => "Recovery can stall."
+    }
+  end
 
   def with_state(overrides = {})
     Dir.mktmpdir("adversarial-review-state") do |directory|

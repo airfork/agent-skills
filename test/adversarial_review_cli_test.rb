@@ -10,6 +10,32 @@ require_relative "support/adversarial_review_helper"
 class AdversarialReviewCliTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_judge_schema_rejects_duplicate_subjects_and_whitespace_refutation_evidence
+    verdict = {
+      "candidate_id" => "C-tester-1-1",
+      "disposition" => "REFUTE",
+      "confidence" => 0.9,
+      "category" => "Omission",
+      "severity" => "HIGH",
+      "evidence" => "   ",
+      "consequence" => "Recovery can stall."
+    }
+    payload = {
+      "schema_version" => 1,
+      "run_id" => "ar-20260717-example",
+      "task_id" => "judge-batch-1",
+      "artifact_digests" => {"docs/spec.md" => "a" * 64},
+      "verdicts" => [verdict, verdict.dup],
+      "metrics" => {},
+      "notes" => []
+    }
+
+    errors = AdversarialReview::Schema.validate("judge", payload)
+
+    assert_includes errors.map { |error| error.fetch("code") }, "subject_duplicate"
+    assert_includes errors.map { |error| error.fetch("code") }, "blank_evidence"
+  end
+
   def test_attack_task_carries_closed_identity_and_digest_fields
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md")

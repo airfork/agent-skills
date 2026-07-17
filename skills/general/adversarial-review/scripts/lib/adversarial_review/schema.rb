@@ -25,6 +25,7 @@ module AdversarialReview
       validate_artifact_digest_paths(value)
       validate_dedupe(value) if @name == "dedupe"
       validate_author_action_paths(value) if @name == "author-actions"
+      validate_intrinsic_records(value)
       @errors
     end
 
@@ -121,8 +122,16 @@ module AdversarialReview
       return unless value.is_a?(Hash) && value["groups"].is_a?(Array)
 
       seen = {}
+      group_ids = {}
       value.fetch("groups").each_with_index do |group, group_index|
         next unless group.is_a?(Hash) && group["candidate_ids"].is_a?(Array)
+
+        group_id = group["group_id"]
+        if group_ids.key?(group_id)
+          add_error("group_duplicate", pointer("groups", group_index, "group_id"), "group ID is duplicated")
+        else
+          group_ids[group_id] = true
+        end
 
         group.fetch("candidate_ids").each_with_index do |candidate_id, candidate_index|
           path = pointer("groups", group_index, "candidate_ids", candidate_index)
@@ -131,6 +140,99 @@ module AdversarialReview
           else
             seen[candidate_id] = "group #{group_index}"
           end
+        end
+      end
+    end
+
+    def validate_intrinsic_records(value)
+      return unless value.is_a?(Hash)
+
+      case @name
+      when "attack", "divergence"
+        validate_finding_text(value["findings"], "findings")
+      when "judge"
+        validate_unique_record_field(value["verdicts"], "candidate_id", "subject_duplicate", "verdicts")
+        validate_nonblank_fields(value["verdicts"], %w[evidence consequence], "verdicts")
+      when "author-actions"
+        validate_unique_record_field(value["actions"], "finding_id", "subject_duplicate", "actions")
+        validate_nonblank_fields(value["actions"], ["rationale"], "actions")
+      when "resolution"
+        validate_unique_record_field(value["checks"], "finding_id", "subject_duplicate", "checks")
+        validate_nonblank_fields(value["checks"], ["evidence"], "checks")
+        validate_finding_text(value["new_findings"], "new_findings")
+      when "arbiter"
+        validate_unique_record_field(value["decisions"], "subject_id", "subject_duplicate", "decisions")
+        validate_nonblank_fields(value["decisions"], ["evidence"], "decisions")
+        validate_nested_unique_ids(value["decisions"], "mapped_candidate_ids", "decisions")
+      end
+    end
+
+    def validate_unique_record_field(records, field, code, collection)
+      return unless records.is_a?(Array)
+
+      seen = {}
+      records.each_with_index do |record, index|
+        next unless record.is_a?(Hash) && record.key?(field)
+
+        identifier = record[field]
+        if seen.key?(identifier)
+          add_error(code, pointer(collection, index, field), "subject ID is duplicated")
+        else
+          seen[identifier] = true
+        end
+      end
+    end
+
+    def validate_nonblank_fields(records, fields, collection)
+      return unless records.is_a?(Array)
+
+      records.each_with_index do |record, index|
+        next unless record.is_a?(Hash)
+
+        fields.each do |field|
+          value = record[field]
+          next unless value.is_a?(String) && value.strip.empty?
+
+          add_error("blank_evidence", pointer(collection, index, field), "text must contain non-whitespace evidence")
+        end
+      end
+    end
+
+    def validate_nested_unique_ids(records, field, collection)
+      return unless records.is_a?(Array)
+
+      records.each_with_index do |record, index|
+        next unless record.is_a?(Hash) && record[field].is_a?(Array)
+
+        seen = {}
+        record.fetch(field).each_with_index do |identifier, nested_index|
+          if seen.key?(identifier)
+            add_error(
+              "candidate_duplicate", pointer(collection, index, field, nested_index),
+              "candidate ID is duplicated"
+            )
+          else
+            seen[identifier] = true
+          end
+        end
+      end
+    end
+
+    def validate_finding_text(findings, collection)
+      return unless findings.is_a?(Array)
+
+      validate_nonblank_fields(findings, %w[summary evidence consequence], collection)
+      findings.each_with_index do |finding, index|
+        next unless finding.is_a?(Hash) && finding["location"].is_a?(Hash)
+
+        %w[path heading].each do |field|
+          value = finding.fetch("location")[field]
+          next unless value.is_a?(String) && value.strip.empty?
+
+          add_error(
+            "blank_evidence", pointer(collection, index, "location", field),
+            "location text must not be whitespace"
+          )
         end
       end
     end

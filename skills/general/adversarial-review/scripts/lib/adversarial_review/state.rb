@@ -23,6 +23,12 @@ module AdversarialReview
       end
     end
 
+    class InvalidResult < Error
+      def initialize(code, message, details = {})
+        super(code, message, details, 3)
+      end
+    end
+
     RUN_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/.freeze
     TRANSITIONS = {
       "prepared" => %w[attacking].freeze,
@@ -53,6 +59,23 @@ module AdversarialReview
       "HIGH" => 1,
       "MEDIUM" => 2,
       "LOW" => 3
+    }.freeze
+    RESULT_SCHEMAS = %w[attack divergence dedupe judge author-actions resolution arbiter].freeze
+    RESULT_TASK_KEYS = %w[
+      schema_version run_id task_id role kind schema schema_name artifact_digests
+      round attempt angle vote_group_id voter_id expected_voters voter_ids
+      dispute_kind subject_ids subject_mappings mapped_candidate_ids allow_new_findings
+      targets inventory context_pointers applicable_guidance role_contract
+      capability_declaration_template mutation_restrictions tool_restrictions prompt
+    ].freeze
+    INGEST_STAGES = {
+      "attack" => %w[attacking fresh-sweep].freeze,
+      "divergence" => %w[attacking fresh-sweep].freeze,
+      "dedupe" => %w[deduplicating].freeze,
+      "judge" => %w[culling culling-new-findings].freeze,
+      "author-actions" => %w[awaiting-author].freeze,
+      "resolution" => %w[resolving].freeze,
+      "arbiter" => %w[arbitrating].freeze
     }.freeze
     TERMINAL_PAIRINGS = {
       "fixed" => "resolved",
@@ -107,6 +130,7 @@ module AdversarialReview
       created_run_dir = nil
       run_identity = nil
       tasks_identity = nil
+      results_identity = nil
       run_id = manifest.fetch("run_id")
       validate_run_id!(run_id)
       digests = target_digests(manifest)
@@ -117,6 +141,13 @@ module AdversarialReview
         "stage" => "prepared",
         "revise_round" => 1,
         "task_attempts" => {},
+        "ingested_results" => {},
+        "exact_duplicate_map" => {},
+        "exact_duplicate_sources" => {},
+        "semantic_groups" => {},
+        "judge_votes" => {},
+        "evidence_gaps" => [],
+        "overflow" => {"total" => 0, "by_category_severity" => {}},
         "candidates" => [],
         "findings" => [],
         "author_actions" => {},
@@ -159,10 +190,14 @@ module AdversarialReview
         Atomic.with_relative_directory(run_directory, "tasks") do |tasks_directory|
           tasks_identity = tasks_directory.stat
         end
+        Atomic.with_relative_directory(run_directory, "results") do |results_directory|
+          results_identity = results_directory.stat
+        end
       end
       new(
         canonical_run_dir, data, manifest,
-        run_identity: run_identity, tasks_identity: tasks_identity
+        run_identity: run_identity, tasks_identity: tasks_identity,
+        results_identity: results_identity
       )
     rescue KeyError => error
       cleanup_created_run(created_run_dir)
@@ -183,6 +218,7 @@ module AdversarialReview
       data = nil
       run_identity = nil
       tasks_identity = nil
+      results_identity = nil
       Atomic.open_lock(lock_path, exclusive: false) do |_lock, run_directory|
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
@@ -191,19 +227,24 @@ module AdversarialReview
         Atomic.with_relative_directory(run_directory, "tasks") do |tasks_directory|
           tasks_identity = tasks_directory.stat
         end
+        Atomic.with_relative_directory(run_directory, "results") do |results_directory|
+          results_identity = results_directory.stat
+        end
       end
       new(
         canonical_run_dir, data, manifest,
-        run_identity: run_identity, tasks_identity: tasks_identity
+        run_identity: run_identity, tasks_identity: tasks_identity,
+        results_identity: results_identity
       )
     end
 
-    def initialize(run_dir, data, manifest, run_identity:, tasks_identity:)
+    def initialize(run_dir, data, manifest, run_identity:, tasks_identity:, results_identity:)
       @run_dir = run_dir
       @data = data
       @manifest = manifest
       @run_identity = run_identity
       @tasks_identity = tasks_identity
+      @results_identity = results_identity
     end
 
     def to_h
@@ -290,6 +331,110 @@ module AdversarialReview
         end
       end
       result
+    end
+
+    def ingest(task_id, payload)
+      validate_task_id!(task_id)
+      summary = nil
+      Atomic.open_lock(
+        File.join(@run_dir, ".state.lock"),
+        exclusive: true,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
+        self.class.validate_snapshot!(manifest, data)
+        task = nil
+        task_bytes = nil
+        Atomic.with_relative_directory(
+          run_directory, "tasks",
+          code: "unsafe_task_path",
+          expected_identity: @tasks_identity
+        ) do |tasks_directory|
+          task, task_bytes = read_json_bytes_relative!(
+            tasks_directory, "#{task_id}.json", "invalid_task"
+          )
+        end
+        schema_name = result_schema_name!(task)
+        errors = Schema.validate(schema_name, payload)
+        unless errors.empty?
+          raise InvalidResult.new(
+            "invalid_result", "result payload does not match its schema",
+            {"schema" => schema_name, "errors" => errors}
+          )
+        end
+        validate_result_task!(task_id, task, schema_name, manifest, data, payload)
+        ensure_ingest_stage!(data, schema_name)
+        if data.fetch("ingested_results").key?(task_id)
+          invalid_result!(
+            "duplicate_result", "task result has already been ingested",
+            {"task_id" => task_id}
+          )
+        end
+        live_digests = live_target_digests!(manifest)
+        unless live_digests == data.fetch("current_target_digests")
+          invalid_result!(
+            "target_digest_mismatch", "live target bytes do not match authoritative state",
+            {"expected" => data.fetch("current_target_digests"), "current" => live_digests}
+          )
+        end
+
+        result_value = deep_copy(payload)
+        result_bytes = JSON.generate(result_value) + "\n"
+        result_sha = Digest::SHA256.hexdigest(result_bytes)
+        task_sha = Digest::SHA256.hexdigest(task_bytes)
+        summary = apply_result_to_data!(data, task, schema_name, result_value, manifest)
+        data.fetch("ingested_results")[task_id] = {
+          "sha256" => result_sha,
+          "task_sha256" => task_sha,
+          "schema" => schema_name,
+          "round" => task.fetch("round", data.fetch("revise_round"))
+        }
+        self.class.validate_snapshot!(manifest, data)
+
+        created_result = false
+        committed = false
+        begin
+          Atomic.with_relative_directory(
+            run_directory, "results",
+            code: "unsafe_result_path",
+            expected_identity: @results_identity
+          ) do |results_directory|
+            name = "#{task_id}.json"
+            if Atomic.reject_relative_nonregular(results_directory, name, "result_collision")
+              orphan, orphan_bytes = read_json_bytes_relative!(
+                results_directory, name, "invalid_result_file"
+              )
+              unless orphan == result_value && orphan_bytes == result_bytes
+                invalid_result!(
+                  "result_collision", "existing result bytes belong to a different payload",
+                  {"task_id" => task_id}
+                )
+              end
+            else
+              Atomic.write_new_json(results_directory, name, result_value)
+              created_result = true
+            end
+          end
+          Atomic.write_json_relative(run_directory, "state.json", data)
+          committed = true
+        ensure
+          if created_result && !committed
+            Atomic.with_relative_directory(
+              run_directory, "results",
+              code: "unsafe_result_path",
+              expected_identity: @results_identity
+            ) do |results_directory|
+              Atomic.unlink_relative(results_directory, "#{task_id}.json")
+              results_directory.fsync
+            end
+          end
+        end
+        @manifest = manifest
+        @data = data
+      end
+      deep_freeze(deep_copy(summary))
     end
 
     def transition_to(next_stage)
@@ -379,58 +524,7 @@ module AdversarialReview
       promoted = nil
       mutate! do |data|
         ensure_mutation_stage!(data, "promote")
-        validated_groups = groups.map { |group| validate_promotion_group!(group) }
-        group_ids = validated_groups.map { |group| group.fetch("group_id") }
-        duplicate_group_id = group_ids.group_by { |id| id }.find { |_id, ids| ids.length > 1 }
-        if duplicate_group_id
-          raise Error.new(
-            "invalid_promotion", "promotion group IDs must be unique",
-            {"group_id" => duplicate_group_id.first}, 3
-          )
-        end
-        ordered = validated_groups.sort_by do |group|
-          [
-            SEVERITY_RANK.fetch(group.fetch("severity")),
-            -Float(group.fetch("confidence")),
-            group.fetch("path", "").to_s,
-            Integer(group.fetch("line", 0)),
-            group.fetch("group_id")
-          ]
-        end
-        seen_candidate_ids = {}
-        first_number = data.fetch("findings").length + 1
-        fingerprint = Digest::SHA256.hexdigest(data.fetch("run_id"))[0, 8]
-        promoted = ordered.each_with_index.map do |group, index|
-          candidates = group.fetch("candidate_ids").map do |candidate_id|
-            if seen_candidate_ids[candidate_id]
-              raise Error.new("candidate_collision", "candidate belongs to multiple promotion groups", {"id" => candidate_id}, 3)
-            end
-            seen_candidate_ids[candidate_id] = true
-            candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
-            unless candidate && candidate.fetch("state") == "candidate"
-              raise Error.new("invalid_candidate", "candidate cannot be promoted", {"id" => candidate_id}, 3)
-            end
-            candidate
-          end
-          id = format("AR-%s-%03d", fingerprint, first_number + index)
-          if data.fetch("findings").any? { |finding| finding.fetch("id") == id }
-            raise Error.new("finding_collision", "promoted finding ID already exists", {"id" => id}, 3)
-          end
-          candidates.each { |candidate| candidate["state"] = "promoted" }
-          deep_copy(group).merge(
-            "id" => id,
-            "state" => "pending",
-            "round" => data.fetch("revise_round"),
-            "sources" => candidates.map do |candidate|
-              {
-                "candidate_id" => candidate.fetch("id"),
-                "angle" => candidate.fetch("angle"),
-                "attempt" => candidate.fetch("attempt")
-              }
-            end
-          )
-        end
-        data.fetch("findings").concat(promoted)
+        promoted = apply_promotions_to_data!(data, groups)
       end
       deep_freeze(deep_copy(promoted))
     end
@@ -506,7 +600,14 @@ module AdversarialReview
       end
       mutate! do |data|
         ensure_mutation_stage!(data, "set_pending_arbiter_subjects")
-        finding_ids.each { |id| find_finding!(data, id) }
+        finding_ids.each do |id|
+          known = data.fetch("findings").any? { |finding| finding.fetch("id") == id } ||
+            data.fetch("candidates").any? { |candidate| candidate.fetch("id") == id } ||
+            data.fetch("semantic_groups").key?(id)
+          unless known
+            raise Error.new("unknown_arbiter_subject", "arbiter subject does not exist", {"id" => id}, 3)
+          end
+        end
         data["pending_arbiter_subjects"] = finding_ids.uniq.sort
       end
       self
@@ -621,6 +722,8 @@ module AdversarialReview
       end
       required = %w[
         schema_version run_id mode stage revise_round task_attempts candidates findings
+        ingested_results exact_duplicate_map exact_duplicate_sources semantic_groups
+        judge_votes evidence_gaps overflow
         author_actions resolution_checks pending_arbiter_subjects target_digest_history
         current_target_digests fresh_sweep_required fresh_sweep_completed
         degraded_capabilities events next_action
@@ -660,6 +763,10 @@ module AdversarialReview
       end
       unless data["candidates"].is_a?(Array) && data["findings"].is_a?(Array) &&
              data["task_attempts"].is_a?(Hash) && data["author_actions"].is_a?(Hash) &&
+             data["ingested_results"].is_a?(Hash) && data["exact_duplicate_map"].is_a?(Hash) &&
+             data["exact_duplicate_sources"].is_a?(Hash) && data["semantic_groups"].is_a?(Hash) &&
+             data["judge_votes"].is_a?(Hash) && data["evidence_gaps"].is_a?(Array) &&
+             data["overflow"].is_a?(Hash) &&
              data["resolution_checks"].is_a?(Hash) && data["pending_arbiter_subjects"].is_a?(Array) &&
              data["degraded_capabilities"].is_a?(Array) && data["events"].is_a?(Array) &&
              [true, false].include?(data["fresh_sweep_required"]) &&
@@ -672,6 +779,9 @@ module AdversarialReview
       valid_events = data.fetch("events").all? { |event| valid_event_snapshot?(event) }
       unless valid_attempts && valid_events
         raise Error.new("invalid_state", "persisted attempts or events are invalid", {}, 3)
+      end
+      unless valid_ingestion_snapshot?(data)
+        raise Error.new("invalid_state", "persisted result-ingestion state is invalid", {}, 3)
       end
       unless data.fetch("candidates").all? { |candidate| valid_candidate_snapshot?(candidate) }
         raise Error.new("invalid_state", "persisted candidates are invalid", {}, 3)
@@ -730,8 +840,12 @@ module AdversarialReview
           (status != "stuck" || data.fetch("revise_round") == 2)
       end
       valid_arbiter_subjects = data.fetch("pending_arbiter_subjects").all? do |finding_id|
-        findings_by_id.key?(finding_id)
+        findings_by_id.key?(finding_id) || candidates_by_id.key?(finding_id) ||
+          data.fetch("semantic_groups").key?(finding_id)
       end
+      valid_arbiter_subjects &&=
+        data.fetch("pending_arbiter_subjects").uniq == data.fetch("pending_arbiter_subjects") &&
+        data.fetch("pending_arbiter_subjects").sort == data.fetch("pending_arbiter_subjects")
       valid_pairings = finding_ids.all? do |finding_id|
         terminal_pairing(
           data.fetch("author_actions")[finding_id],
@@ -769,7 +883,10 @@ module AdversarialReview
         attempt.is_a?(Integer) && attempt.positive? &&
         sequence.is_a?(Integer) && sequence.positive? &&
         [1, 2].include?(candidate["round"]) &&
-        %w[candidate promoted refuted unproven].include?(candidate["state"])
+        %w[candidate promoted refuted unproven].include?(candidate["state"]) &&
+        (!candidate.key?("arbiter_decision") ||
+         (%w[PROMOTE REFUTE UNPROVEN].include?(candidate["arbiter_decision"]) &&
+          candidate["arbiter_evidence"].is_a?(String) && !candidate["arbiter_evidence"].strip.empty?))
     end
 
     def self.valid_finding_snapshot?(finding, candidates_by_id)
@@ -799,8 +916,27 @@ module AdversarialReview
     end
 
     def self.valid_author_action_snapshot?(action)
-      status = action.is_a?(Hash) ? action["status"] : action
-      %w[fixed rejected].include?(status)
+      return %w[fixed rejected].include?(action) unless action.is_a?(Hash)
+      allowed = %w[status rationale changed_paths task_id]
+      return false unless (action.keys - allowed).empty? && %w[fixed rejected].include?(action["status"])
+      valid_rationale = !action.key?("rationale") ||
+        (action["rationale"].is_a?(String) && !action["rationale"].strip.empty?)
+      valid_paths = !action.key?("changed_paths") ||
+        (action["changed_paths"].is_a?(Array) &&
+         action["changed_paths"].all? { |path| safe_repository_relative_path?(path) })
+      valid_task = !action.key?("task_id") ||
+        (action["task_id"].is_a?(String) && RUN_ID.match?(action["task_id"]))
+      valid_rationale && valid_paths && valid_task
+    end
+
+    def self.safe_repository_relative_path?(path)
+      return false unless path.is_a?(String) && !path.empty?
+      return false if path.match?(/[\x00-\x1f\x7f]/) || path.start_with?("/", "\\")
+      return false if path.match?(/\A[A-Za-z]:/)
+
+      path.split(/[\x2f\x5c]/, -1).none? do |segment|
+        segment.empty? || segment == "." || segment == ".."
+      end
     end
 
     def self.valid_event_snapshot?(event)
@@ -810,6 +946,106 @@ module AdversarialReview
       from = event["from"]
       to = event["to"]
       from.is_a?(String) && to.is_a?(String) && TRANSITIONS.fetch(from, []).include?(to)
+    end
+
+    def self.valid_ingestion_snapshot?(data)
+      candidate_ids = data.fetch("candidates").each_with_object({}) do |candidate, indexed|
+        indexed[candidate["id"]] = true if candidate.is_a?(Hash) && candidate["id"].is_a?(String)
+      end
+      valid_results = data.fetch("ingested_results").all? do |task_id, record|
+        task_id.is_a?(String) && RUN_ID.match?(task_id) && record.is_a?(Hash) &&
+          record.keys.sort == %w[round schema sha256 task_sha256] &&
+          RESULT_SCHEMAS.include?(record["schema"]) && [1, 2].include?(record["round"]) &&
+          [record["sha256"], record["task_sha256"]].all? do |digest|
+            digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
+          end
+      end
+      valid_duplicate_map = data.fetch("exact_duplicate_map").all? do |fingerprint, candidate_id|
+        fingerprint.is_a?(String) && fingerprint.match?(/\A[0-9a-f]{64}\z/) &&
+          candidate_ids.key?(candidate_id)
+      end
+      valid_sources = data.fetch("exact_duplicate_sources").all? do |candidate_id, sources|
+        candidate_ids.key?(candidate_id) && sources.is_a?(Array) && !sources.empty? &&
+          sources.all? do |source|
+            source.is_a?(Hash) &&
+              source.keys.sort == %w[angle attempt finding_index round task_id] &&
+              source["task_id"].is_a?(String) && RUN_ID.match?(source["task_id"]) &&
+              data.fetch("ingested_results").key?(source["task_id"]) &&
+              source["angle"].is_a?(String) && !source["angle"].empty? &&
+              source["attempt"].is_a?(Integer) && source["attempt"].positive? &&
+              [1, 2].include?(source["round"]) &&
+              source["finding_index"].is_a?(Integer) && !source["finding_index"].negative?
+          end
+      end
+      valid_duplicate_links = data.fetch("exact_duplicate_map").values.uniq.length ==
+        data.fetch("exact_duplicate_map").values.length &&
+        data.fetch("exact_duplicate_map").values.sort == data.fetch("exact_duplicate_sources").keys.sort
+      valid_groups = data.fetch("semantic_groups").all? do |group_id, group|
+        required_group_keys = %w[candidate_ids group_id location round source_angles summary task_id]
+        allowed_group_keys = required_group_keys + %w[arbiter_decision arbiter_evidence]
+        group.is_a?(Hash) && group_id == group["group_id"] &&
+          (required_group_keys - group.keys).empty? && (group.keys - allowed_group_keys).empty? &&
+          group["candidate_ids"].is_a?(Array) && !group["candidate_ids"].empty? &&
+          group["candidate_ids"].uniq.length == group["candidate_ids"].length &&
+          group["candidate_ids"].all? { |candidate_id| candidate_ids.key?(candidate_id) } &&
+          [1, 2].include?(group["round"]) && group["task_id"].is_a?(String) &&
+          data.fetch("ingested_results").key?(group["task_id"]) &&
+          (!group.key?("arbiter_decision") ||
+           (%w[PROMOTE REFUTE UNPROVEN].include?(group["arbiter_decision"]) &&
+            group["arbiter_evidence"].is_a?(String) && !group["arbiter_evidence"].strip.empty?))
+      end
+      candidate_groups_valid = data.fetch("candidates").all? do |candidate|
+        next false unless candidate.is_a?(Hash)
+        next true unless candidate.key?("group_id")
+
+        group = data.fetch("semantic_groups")[candidate["group_id"]]
+        group && group.fetch("candidate_ids").include?(candidate["id"])
+      end
+      overflow = data.fetch("overflow")
+      valid_overflow = overflow.keys.sort == %w[by_category_severity total] &&
+        overflow["total"].is_a?(Integer) && !overflow["total"].negative? &&
+        overflow["by_category_severity"].is_a?(Hash) &&
+        overflow["by_category_severity"].all? do |key, count|
+          key.is_a?(String) && !key.empty? && count.is_a?(Integer) && count.positive?
+        end
+      valid_overflow &&= overflow["total"] == overflow["by_category_severity"].values.inject(0, :+)
+      valid_votes = data.fetch("judge_votes").all? do |subject_id, votes|
+        referenced = candidate_ids.key?(subject_id) || data.fetch("semantic_groups").key?(subject_id)
+        next false unless referenced && votes.is_a?(Array) && !votes.empty?
+
+        identities = {}
+        votes.all? do |vote|
+          valid = vote.is_a?(Hash) &&
+            vote.keys.sort == %w[
+              candidate_id category confidence consequence disposition effective_disposition
+              evidence round severity task_id vote_group_id voter_id
+            ] &&
+            candidate_ids.key?(vote["candidate_id"]) &&
+            %w[PROMOTE REFUTE UNPROVEN].include?(vote["disposition"]) &&
+            %w[PROMOTE REFUTE UNPROVEN].include?(vote["effective_disposition"]) &&
+            vote["confidence"].is_a?(Numeric) && vote["confidence"] >= 0 && vote["confidence"] <= 1 &&
+            SEVERITY_RANK.key?(vote["severity"]) && [1, 2].include?(vote["round"]) &&
+            vote["evidence"].is_a?(String) && !vote["evidence"].strip.empty? &&
+            vote["consequence"].is_a?(String) && !vote["consequence"].strip.empty? &&
+            data.fetch("ingested_results").key?(vote["task_id"])
+          identity = [vote["vote_group_id"], vote["voter_id"], vote["candidate_id"]]
+          valid && !identities[identity] && (identities[identity] = true)
+        end
+      end
+      valid_gaps = data.fetch("evidence_gaps").all? do |gap|
+        gap.is_a?(Hash) &&
+          gap.keys.sort == %w[candidate_ids evidence reason round subject_id task_id] &&
+          gap["candidate_ids"].is_a?(Array) && !gap["candidate_ids"].empty? &&
+          gap["candidate_ids"].uniq.length == gap["candidate_ids"].length &&
+          gap["candidate_ids"].all? { |candidate_id| candidate_ids.key?(candidate_id) } &&
+          gap["reason"].is_a?(String) && !gap["reason"].empty? &&
+          gap["evidence"].is_a?(String) && !gap["evidence"].strip.empty? &&
+          [1, 2].include?(gap["round"]) && data.fetch("ingested_results").key?(gap["task_id"])
+      end
+      valid_results && valid_duplicate_map && valid_sources && valid_duplicate_links && valid_groups &&
+        candidate_groups_valid && valid_votes && valid_gaps && valid_overflow
+    rescue KeyError, NoMethodError
+      false
     end
 
     def self.terminal_pairing(action, resolution)
@@ -1004,6 +1240,915 @@ module AdversarialReview
         raise Error.new("invalid_angle", "candidate angle cannot be sanitized", {"angle" => angle}, 3)
       end
       slug
+    end
+
+    def validate_task_id!(task_id)
+      return if task_id.is_a?(String) && RUN_ID.match?(task_id) && task_id != "." && task_id != ".."
+
+      raise InvalidResult.new(
+        "invalid_task_id", "task ID contains unsafe characters",
+        {"task_id" => task_id, "errors" => []}
+      )
+    end
+
+    def result_schema_name!(task)
+      unless task.is_a?(Hash)
+        raise InvalidResult.new("invalid_task", "emitted task is not an object", {"errors" => []})
+      end
+      declared = task["schema_name"] || task["schema"]
+      name = declared.to_s.sub(%r{\Aassets/schemas/}, "").sub(/\.json\z/, "")
+      unless RESULT_SCHEMAS.include?(name)
+        raise InvalidResult.new(
+          "invalid_task_schema", "emitted task has an unsupported result schema",
+          {"schema" => declared, "errors" => []}
+        )
+      end
+      name
+    end
+
+    def validate_result_task!(task_id, task, schema_name, manifest, data, payload)
+      unknown = task.keys - RESULT_TASK_KEYS
+      unless unknown.empty?
+        invalid_result!("invalid_task", "emitted task is not closed", {"unknown" => unknown.sort})
+      end
+      required = %w[schema_version run_id task_id artifact_digests]
+      missing = required.reject { |key| task.key?(key) }
+      unless missing.empty? || !(task.key?("schema") || task.key?("schema_name"))
+        invalid_result!("invalid_task", "emitted task metadata is incomplete", {"missing" => missing})
+      end
+      unless task.fetch("schema_version") == 1 && task.fetch("run_id") == manifest.fetch("run_id") &&
+             task.fetch("task_id") == task_id
+        invalid_result!("result_identity_mismatch", "emitted task identity is invalid")
+      end
+      unless task.key?("role") || task.key?("kind")
+        invalid_result!("invalid_task", "emitted task must declare its role or kind")
+      end
+      if task.key?("kind") && task.fetch("kind") != schema_name
+        invalid_result!("invalid_task_schema", "emitted task kind does not match its result schema")
+      end
+      role_names = {
+        "attack" => %w[attacker attack],
+        "divergence" => %w[attacker divergence],
+        "dedupe" => %w[dedupe deduplicator],
+        "judge" => %w[judge],
+        "author-actions" => %w[author author-actions],
+        "resolution" => %w[resolver resolution],
+        "arbiter" => %w[arbiter]
+      }
+      if task.key?("role") && !role_names.fetch(schema_name).include?(task.fetch("role"))
+        invalid_result!("invalid_task_schema", "emitted task role does not match its result schema")
+      end
+      if task.key?("schema") && task.fetch("schema") != "assets/schemas/#{schema_name}.json"
+        invalid_result!("invalid_task_schema", "emitted task schema path is not canonical")
+      end
+      if task.key?("schema_name") && task.fetch("schema_name") != schema_name
+        invalid_result!("invalid_task_schema", "emitted task schema name is not canonical")
+      end
+      if task.key?("schema") && task.key?("schema_name")
+        declared_name = task.fetch("schema").sub(%r{\Aassets/schemas/}, "").sub(/\.json\z/, "")
+        unless declared_name == task.fetch("schema_name")
+          invalid_result!("invalid_task_schema", "emitted schema declarations disagree")
+        end
+      end
+      expected_digests = data.fetch("current_target_digests")
+      unless task.fetch("artifact_digests") == expected_digests &&
+             payload["schema_version"] == 1 && payload["run_id"] == task.fetch("run_id") &&
+             payload["task_id"] == task_id && payload["artifact_digests"] == expected_digests
+        invalid_result!(
+          "result_identity_mismatch", "result identity or artifact digests do not match the emitted task",
+          {"task_id" => task_id}
+        )
+      end
+      if task.key?("round") && task.fetch("round") != data.fetch("revise_round")
+        invalid_result!(
+          "result_round_mismatch", "task round does not match authoritative state",
+          {"task_round" => task.fetch("round"), "state_round" => data.fetch("revise_round")}
+        )
+      end
+      if task.key?("attempt") &&
+         (!task.fetch("attempt").is_a?(Integer) || !task.fetch("attempt").positive?)
+        invalid_result!("invalid_task", "task attempt must be a positive integer")
+      end
+      if %w[attack divergence].include?(schema_name)
+        unless task["angle"].is_a?(String) && task["attempt"].is_a?(Integer) && task["attempt"].positive? &&
+               payload["angle"] == task["angle"]
+          invalid_result!("result_identity_mismatch", "attack result does not match task angle or attempt")
+        end
+        unless manifest.fetch("enabled_tasks").include?(task.fetch("angle"))
+          invalid_result!("invalid_task", "attack angle is not enabled by the manifest")
+        end
+      end
+      true
+    rescue KeyError => error
+      invalid_result!("invalid_task", "emitted task metadata is incomplete", {"missing" => [error.key]})
+    end
+
+    def ensure_ingest_stage!(data, schema_name)
+      stage = data.fetch("stage")
+      if %w[complete did-not-converge].include?(stage)
+        invalid_result!("terminal_state", "terminal review state cannot ingest results", {"stage" => stage})
+      end
+      allowed = INGEST_STAGES.fetch(schema_name)
+      return if allowed.include?(stage)
+
+      invalid_result!(
+        "invalid_stage", "result schema cannot be applied in the current stage",
+        {"stage" => stage, "schema" => schema_name, "allowed" => allowed}
+      )
+    end
+
+    def invalid_result!(code, message, details = {})
+      errors = details["errors"] || [
+        {"code" => code, "path" => "", "message" => message}
+      ]
+      raise InvalidResult.new(code, message, details.merge("errors" => errors))
+    end
+
+    def read_json_bytes_relative!(directory, name, code)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      file = Atomic.open_relative(directory, name, flags)
+      begin
+        Atomic.reject_nonregular_handle(file, name, code)
+        if file.stat.size > Atomic::MAX_JSON_BYTES
+          invalid_result!(code, "persisted JSON exceeds the size limit", {"path" => name})
+        end
+        bytes = file.read(Atomic::MAX_JSON_BYTES + 1)
+        if bytes.bytesize > Atomic::MAX_JSON_BYTES
+          invalid_result!(code, "persisted JSON exceeds the size limit", {"path" => name})
+        end
+        [JSON.parse(bytes), bytes]
+      ensure
+        file.close if file && !file.closed?
+      end
+    rescue JSON::ParserError => error
+      invalid_result!(code, "persisted JSON is invalid", {"path" => name, "cause" => error.message})
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      invalid_result!(code, "persisted JSON is unavailable", {"path" => name, "cause" => error.class.name})
+    end
+
+    def apply_result_to_data!(data, task, schema_name, payload, manifest)
+      case schema_name
+      when "attack", "divergence"
+        apply_attack_result!(data, task, payload)
+      when "dedupe"
+        apply_dedupe_result!(data, task, payload)
+      when "judge"
+        apply_judge_result!(data, task, payload, manifest)
+      when "author-actions"
+        apply_author_actions_result!(data, task, payload)
+      when "resolution"
+        apply_resolution_result!(data, task, payload, manifest)
+      when "arbiter"
+        apply_arbiter_result!(data, task, payload)
+      else
+        invalid_result!(
+          "unsupported_result", "result schema application is not implemented",
+          {"schema" => schema_name}
+        )
+      end
+    end
+
+    def apply_arbiter_result!(data, task, payload)
+      dispute_kind = task.fetch("dispute_kind")
+      unless %w[candidate candidate-judgment author-resolution].include?(dispute_kind)
+        invalid_result!("invalid_dispute_kind", "arbiter task has an invalid dispute kind")
+      end
+      decisions = payload.fetch("decisions")
+      expected_subjects = task.fetch("subject_ids", data.fetch("pending_arbiter_subjects"))
+      require_exact_subject_coverage!(
+        expected_subjects, decisions.map { |decision| decision.fetch("subject_id") }, "arbiter"
+      )
+      decisions.each do |decision|
+        subject_id = decision.fetch("subject_id")
+        expected_mapping = arbiter_subject_mapping(data, task, subject_id)
+        unless decision.fetch("mapped_candidate_ids").sort == expected_mapping.sort &&
+               decision.fetch("mapped_candidate_ids").uniq.length == decision.fetch("mapped_candidate_ids").length
+          invalid_result!(
+            "arbiter_mapping_mismatch", "arbiter candidate mapping does not match its task",
+            {"subject_id" => subject_id, "expected" => expected_mapping,
+             "supplied" => decision.fetch("mapped_candidate_ids")}
+          )
+        end
+        if dispute_kind == "author-resolution"
+          apply_author_arbiter_decision!(data, subject_id, decision.fetch("decision"))
+        else
+          apply_candidate_arbiter_decision!(data, task, subject_id, decision, expected_mapping)
+        end
+      end
+      {
+        "schema" => "arbiter",
+        "task_id" => task.fetch("task_id"),
+        "subject_ids" => expected_subjects.sort,
+        "pending_arbiter_subjects" => data.fetch("pending_arbiter_subjects").dup
+      }
+    end
+
+    def arbiter_subject_mapping(data, task, subject_id)
+      mappings = task["subject_mappings"]
+      mapped = mappings[subject_id] if mappings.is_a?(Hash)
+      mapped ||= task["mapped_candidate_ids"] if task["subject_ids"].to_a.length == 1
+      if mapped.nil?
+        finding = data.fetch("findings").find { |item| item.fetch("id") == subject_id }
+        group = data.fetch("semantic_groups")[subject_id]
+        mapped = if finding
+                   finding.fetch("candidate_ids")
+                 elsif group
+                   group.fetch("candidate_ids")
+                 elsif data.fetch("candidates").any? { |candidate| candidate.fetch("id") == subject_id }
+                   [subject_id]
+                 end
+      end
+      unless mapped.is_a?(Array) && !mapped.empty? && mapped.all? do |candidate_id|
+               data.fetch("candidates").any? { |candidate| candidate.fetch("id") == candidate_id }
+             end
+        invalid_result!("arbiter_mapping_mismatch", "arbiter task mapping is invalid", {"subject_id" => subject_id})
+      end
+      mapped
+    end
+
+    def apply_author_arbiter_decision!(data, finding_id, decision)
+      finding = data.fetch("findings").find { |item| item.fetch("id") == finding_id }
+      invalid_result!("unknown_finding", "arbiter finding does not exist", {"id" => finding_id}) unless finding
+      case decision
+      when "RESOLVED"
+        finding["state"] = "rejected"
+        data.fetch("resolution_checks")[finding_id] = "rejected"
+        data.fetch("pending_arbiter_subjects").delete(finding_id)
+      when "UNRESOLVED"
+        status = data.fetch("revise_round") >= 2 ? "stuck" : "contested"
+        finding["state"] = status
+        data.fetch("resolution_checks")[finding_id] = status
+        data.fetch("pending_arbiter_subjects").delete(finding_id)
+      when "UNPROVEN"
+        finding["state"] = "contested"
+        data.fetch("resolution_checks")[finding_id] = "contested"
+        data.fetch("pending_arbiter_subjects") << finding_id
+        data.fetch("pending_arbiter_subjects").uniq!
+        data.fetch("pending_arbiter_subjects").sort!
+      else
+        invalid_result!("invalid_arbiter_decision", "decision is invalid for an author dispute")
+      end
+    end
+
+    def apply_candidate_arbiter_decision!(data, task, subject_id, decision, candidate_ids)
+      candidate_ids.each do |candidate_id|
+        candidate = find_candidate_in_data!(data, candidate_id)
+        candidate["arbiter_decision"] = decision.fetch("decision")
+        candidate["arbiter_evidence"] = decision.fetch("evidence")
+      end
+      semantic_group = data.fetch("semantic_groups")[subject_id]
+      if semantic_group
+        semantic_group["arbiter_decision"] = decision.fetch("decision")
+        semantic_group["arbiter_evidence"] = decision.fetch("evidence")
+      end
+      case decision.fetch("decision")
+      when "PROMOTE"
+        votes = data.fetch("judge_votes").fetch(subject_id, []).select do |vote|
+          vote["effective_disposition"] == "PROMOTE"
+        end
+        group = if votes.empty?
+                  candidate = find_candidate_in_data!(data, candidate_ids.first)
+                  location = candidate.fetch("location")
+                  {
+                    "group_id" => subject_id,
+                    "candidate_ids" => candidate_ids.sort,
+                    "summary" => candidate.fetch("summary"),
+                    "category" => candidate.fetch("category"),
+                    "severity" => "HIGH",
+                    "confidence" => decision.fetch("confidence"),
+                    "evidence" => decision.fetch("evidence"),
+                    "consequence" => candidate.fetch("consequence"),
+                    "path" => location.fetch("path"),
+                    "line" => location.fetch("line_start"),
+                    "location" => deep_copy(location)
+                  }
+                else
+                  promotion_group_from_verdicts(data, subject_id, votes)
+                end
+        promote_with_cap!(data, [group])
+        data.fetch("pending_arbiter_subjects").delete(subject_id)
+      when "REFUTE"
+        candidate_ids.each { |candidate_id| find_candidate_in_data!(data, candidate_id)["state"] = "refuted" }
+        data.fetch("pending_arbiter_subjects").delete(subject_id)
+      when "UNPROVEN"
+        candidate_ids.each { |candidate_id| find_candidate_in_data!(data, candidate_id)["state"] = "unproven" }
+        data.fetch("pending_arbiter_subjects").delete(subject_id)
+        data.fetch("evidence_gaps") << {
+          "subject_id" => subject_id,
+          "candidate_ids" => candidate_ids.sort,
+          "task_id" => task.fetch("task_id"),
+          "round" => data.fetch("revise_round"),
+          "reason" => "arbiter-unproven",
+          "evidence" => decision.fetch("evidence")
+        }
+      else
+        invalid_result!("invalid_arbiter_decision", "decision is invalid for a candidate dispute")
+      end
+    end
+
+    def apply_author_actions_result!(data, task, payload)
+      pending_ids = data.fetch("findings").select do |finding|
+        finding.fetch("state") == "pending" && !data.fetch("author_actions").key?(finding.fetch("id"))
+      end.map { |finding| finding.fetch("id") }
+      actions = payload.fetch("actions")
+      require_exact_subject_coverage!(
+        pending_ids, actions.map { |action| action.fetch("finding_id") }, "author-actions"
+      )
+      actions.each do |action|
+        finding_id = action.fetch("finding_id")
+        data.fetch("author_actions")[finding_id] = {
+          "status" => action.fetch("action").downcase,
+          "rationale" => action.fetch("rationale"),
+          "changed_paths" => deep_copy(action.fetch("changed_paths", [])),
+          "task_id" => task.fetch("task_id")
+        }
+      end
+      {
+        "schema" => "author-actions",
+        "task_id" => task.fetch("task_id"),
+        "finding_ids" => pending_ids.sort
+      }
+    end
+
+    def apply_resolution_result!(data, task, payload, manifest)
+      relevant_ids = data.fetch("author_actions").keys.select do |finding_id|
+        finding = data.fetch("findings").find { |item| item.fetch("id") == finding_id }
+        finding && !%w[resolved rejected stuck].include?(finding.fetch("state"))
+      end
+      checks = payload.fetch("checks")
+      require_exact_subject_coverage!(
+        relevant_ids, checks.map { |check| check.fetch("finding_id") }, "resolution"
+      )
+      pending = []
+      checks.each do |check|
+        finding_id = check.fetch("finding_id")
+        finding = data.fetch("findings").find { |item| item.fetch("id") == finding_id }
+        action = data.fetch("author_actions").fetch(finding_id)
+        action_status = action.is_a?(Hash) ? action.fetch("status") : action
+        case check.fetch("status")
+        when "RESOLVED"
+          status = action_status == "fixed" ? "resolved" : "rejected"
+          data.fetch("resolution_checks")[finding_id] = status
+          finding["state"] = status
+          data.fetch("pending_arbiter_subjects").delete(finding_id)
+        when "UNRESOLVED", "REGRESSED"
+          data.fetch("resolution_checks")[finding_id] = "contested"
+          finding["state"] = "contested"
+          pending << finding_id
+        end
+      end
+      data.fetch("pending_arbiter_subjects").concat(pending)
+      data.fetch("pending_arbiter_subjects").uniq!
+      data.fetch("pending_arbiter_subjects").sort!
+      new_candidate_ids = apply_resolution_findings!(
+        data, task, payload.fetch("new_findings"), manifest
+      )
+      {
+        "schema" => "resolution",
+        "task_id" => task.fetch("task_id"),
+        "finding_ids" => relevant_ids.sort,
+        "pending_arbiter_subjects" => pending.sort,
+        "candidate_ids" => new_candidate_ids
+      }
+    end
+
+    def apply_resolution_findings!(data, task, findings, manifest)
+      return [] if findings.empty?
+      unless manifest.fetch("mode") == "revise" &&
+             task.fetch("round", data.fetch("revise_round")) == data.fetch("revise_round") &&
+             data.fetch("revise_round") < 2
+        invalid_result!("invalid_new_findings", "new resolution findings are not allowed for this round")
+      end
+      angle = task.fetch("angle", "resolution")
+      attempt = task.fetch("attempt", 1)
+      ids = []
+      findings.each_with_index do |finding, index|
+        fingerprint = finding_fingerprint(finding)
+        source = {
+          "task_id" => task.fetch("task_id"),
+          "angle" => angle,
+          "attempt" => attempt,
+          "round" => data.fetch("revise_round"),
+          "finding_index" => index
+        }
+        candidate_id = data.fetch("exact_duplicate_map")[fingerprint]
+        if candidate_id
+          data.fetch("exact_duplicate_sources").fetch(candidate_id) << source
+        else
+          candidate = add_candidate_to_data!(
+            data, angle, attempt, finding, round: data.fetch("revise_round") + 1
+          )
+          candidate_id = candidate.fetch("id")
+          data.fetch("exact_duplicate_map")[fingerprint] = candidate_id
+          data.fetch("exact_duplicate_sources")[candidate_id] = [source]
+        end
+        ids << candidate_id
+      end
+      data["fresh_sweep_required"] = true
+      data["fresh_sweep_completed"] = false
+      ids.uniq
+    end
+
+    def apply_dedupe_result!(data, task, payload)
+      applicable = data.fetch("candidates").select do |candidate|
+        candidate.fetch("state") == "candidate" && candidate.fetch("round") == data.fetch("revise_round")
+      end
+      expected_ids = applicable.map { |candidate| candidate.fetch("id") }.sort
+      groups = payload.fetch("groups")
+      group_ids = groups.map { |group| group.fetch("group_id") }
+      duplicate_group = group_ids.group_by { |id| id }.find { |_id, values| values.length > 1 }
+      if duplicate_group
+        invalid_result!(
+          "duplicate_group", "semantic group IDs must be unique",
+          {"group_id" => duplicate_group.first}
+        )
+      end
+      supplied_ids = groups.flat_map { |group| group.fetch("candidate_ids") }
+      unless supplied_ids.sort == expected_ids && supplied_ids.uniq.length == supplied_ids.length
+        invalid_result!(
+          "candidate_coverage", "dedupe groups must cover applicable candidates exactly once",
+          {
+            "expected" => expected_ids,
+            "supplied" => supplied_ids,
+            "missing" => expected_ids - supplied_ids,
+            "unknown" => supplied_ids - expected_ids
+          }
+        )
+      end
+      collisions = group_ids.select { |group_id| data.fetch("semantic_groups").key?(group_id) }
+      unless collisions.empty?
+        invalid_result!("duplicate_group", "semantic group ID already exists", {"group_ids" => collisions})
+      end
+      groups.each do |group|
+        expected_angles = group.fetch("candidate_ids").map do |candidate_id|
+          applicable.find { |item| item.fetch("id") == candidate_id }.fetch("angle")
+        end.uniq.sort
+        unless group.fetch("source_angles").uniq.sort == expected_angles
+          invalid_result!(
+            "source_angle_mismatch", "semantic group source angles do not match its candidates",
+            {"group_id" => group.fetch("group_id"), "expected" => expected_angles,
+             "supplied" => group.fetch("source_angles")}
+          )
+        end
+        record = deep_copy(group).merge(
+          "round" => data.fetch("revise_round"),
+          "task_id" => task.fetch("task_id")
+        )
+        data.fetch("semantic_groups")[group.fetch("group_id")] = record
+        group.fetch("candidate_ids").each do |candidate_id|
+          candidate = applicable.find { |item| item.fetch("id") == candidate_id }
+          candidate["group_id"] = group.fetch("group_id")
+        end
+      end
+      {
+        "schema" => "dedupe",
+        "task_id" => task.fetch("task_id"),
+        "group_ids" => group_ids.sort,
+        "candidate_ids" => supplied_ids.sort
+      }
+    end
+
+    def apply_judge_result!(data, task, payload, manifest)
+      return apply_ultra_judge_result!(data, task, payload) if manifest.fetch("tier", "default") == "ultra"
+
+      applicable = applicable_judge_candidates(data)
+      verdicts = payload.fetch("verdicts")
+      require_exact_subject_coverage!(
+        applicable.map { |candidate| candidate.fetch("id") },
+        verdicts.map { |verdict| verdict.fetch("candidate_id") },
+        "judge"
+      )
+      grouped = verdicts.group_by do |verdict|
+        candidate = applicable.find { |item| item.fetch("id") == verdict.fetch("candidate_id") }
+        candidate.fetch("group_id", candidate.fetch("id"))
+      end
+      promotion_groups = []
+      refuted_ids = []
+      unproven_ids = []
+      arbitration = []
+      grouped.keys.sort.each do |subject_id|
+        subject_verdicts = grouped.fetch(subject_id).map do |verdict|
+          validate_and_normalize_verdict!(data, task, subject_id, verdict)
+        end
+        data.fetch("judge_votes")[subject_id] ||= []
+        data.fetch("judge_votes")[subject_id].concat(subject_verdicts)
+        dispositions = subject_verdicts.map { |verdict| verdict.fetch("effective_disposition") }.uniq
+        candidate_ids = subject_verdicts.map { |verdict| verdict.fetch("candidate_id") }.sort
+        if dispositions.length > 1
+          arbitration << subject_id
+          next
+        end
+        case dispositions.first
+        when "PROMOTE"
+          promotion_groups << promotion_group_from_verdicts(data, subject_id, subject_verdicts)
+        when "REFUTE"
+          candidate_ids.each { |id| find_candidate_in_data!(data, id)["state"] = "refuted" }
+          refuted_ids.concat(candidate_ids)
+        when "UNPROVEN"
+          candidate_ids.each { |id| find_candidate_in_data!(data, id)["state"] = "unproven" }
+          unproven_ids.concat(candidate_ids)
+          add_evidence_gap!(data, task, subject_id, candidate_ids, subject_verdicts)
+        end
+      end
+      data.fetch("pending_arbiter_subjects").concat(arbitration)
+      data.fetch("pending_arbiter_subjects").uniq!
+      data.fetch("pending_arbiter_subjects").sort!
+      promoted, overflowed = promote_with_cap!(data, promotion_groups)
+      {
+        "schema" => "judge",
+        "task_id" => task.fetch("task_id"),
+        "promoted_ids" => promoted.map { |finding| finding.fetch("id") },
+        "refuted_candidate_ids" => refuted_ids.sort,
+        "unproven_candidate_ids" => unproven_ids.sort,
+        "pending_arbiter_subjects" => arbitration.sort,
+        "overflow_count" => overflowed.length
+      }
+    end
+
+    def apply_ultra_judge_result!(data, task, payload)
+      voter_id = task["voter_id"]
+      vote_group_id = task["vote_group_id"]
+      expected_voters = expected_voter_count(task)
+      unless voter_id.is_a?(String) && !voter_id.strip.empty? &&
+             vote_group_id.is_a?(String) && !vote_group_id.strip.empty?
+        invalid_result!("invalid_vote_identity", "ultra judge task requires voter and vote-group IDs")
+      end
+      applicable = applicable_judge_candidates(data)
+      verdicts = payload.fetch("verdicts")
+      require_exact_subject_coverage!(
+        applicable.map { |candidate| candidate.fetch("id") },
+        verdicts.map { |verdict| verdict.fetch("candidate_id") },
+        "ultra-judge"
+      )
+      normalized = verdicts.map do |verdict|
+        candidate = applicable.find { |item| item.fetch("id") == verdict.fetch("candidate_id") }
+        subject_id = candidate.fetch("group_id", candidate.fetch("id"))
+        existing = data.fetch("judge_votes").fetch(subject_id, [])
+        if existing.any? do |vote|
+             vote["vote_group_id"] == vote_group_id && vote["voter_id"] == voter_id
+           end
+          invalid_result!(
+            "duplicate_voter", "ultra judge voter has already voted in this group",
+            {"subject_id" => subject_id, "voter_id" => voter_id}
+          )
+        end
+        [subject_id, validate_and_normalize_verdict!(data, task, subject_id, verdict)]
+      end
+      normalized.each do |subject_id, verdict|
+        data.fetch("judge_votes")[subject_id] ||= []
+        data.fetch("judge_votes")[subject_id] << verdict
+      end
+
+      promotion_groups = []
+      refuted_ids = []
+      pending = []
+      normalized.map(&:first).uniq.sort.each do |subject_id|
+        votes = data.fetch("judge_votes").fetch(subject_id).select do |vote|
+          vote.fetch("vote_group_id") == vote_group_id
+        end
+        promote_votes = votes.select { |vote| vote.fetch("effective_disposition") == "PROMOTE" }
+        refute_votes = votes.select { |vote| vote.fetch("effective_disposition") == "REFUTE" }
+        conflicting_ballot = votes.group_by { |vote| vote.fetch("voter_id") }.any? do |_voter, ballot|
+          ballot.map { |vote| vote.fetch("effective_disposition") }.uniq.length > 1
+        end
+        if conflicting_ballot
+          pending << subject_id
+        elsif promote_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
+          promotion_groups << promotion_group_from_verdicts(data, subject_id, promote_votes)
+        elsif refute_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
+          ids = votes.map { |vote| vote.fetch("candidate_id") }.uniq.sort
+          ids.each { |id| find_candidate_in_data!(data, id)["state"] = "refuted" }
+          refuted_ids.concat(ids)
+        elsif votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= expected_voters
+          pending << subject_id
+          add_evidence_gap!(
+            data, task, subject_id,
+            votes.map { |vote| vote.fetch("candidate_id") }.uniq,
+            votes
+          ) if votes.any? { |vote| vote.fetch("effective_disposition") == "UNPROVEN" }
+        end
+      end
+      data.fetch("pending_arbiter_subjects").concat(pending)
+      data.fetch("pending_arbiter_subjects").uniq!
+      data.fetch("pending_arbiter_subjects").sort!
+      promoted, overflowed = promote_with_cap!(data, promotion_groups)
+      {
+        "schema" => "judge",
+        "task_id" => task.fetch("task_id"),
+        "promoted_ids" => promoted.map { |finding| finding.fetch("id") },
+        "refuted_candidate_ids" => refuted_ids.sort,
+        "unproven_candidate_ids" => [],
+        "pending_arbiter_subjects" => pending.sort,
+        "overflow_count" => overflowed.length,
+        "votes_recorded" => normalized.length
+      }
+    end
+
+    def expected_voter_count(task)
+      if task["voter_ids"].is_a?(Array)
+        voter_ids = task.fetch("voter_ids")
+        unless voter_ids.length == voter_ids.uniq.length &&
+               voter_ids.all? { |voter_id| voter_id.is_a?(String) && !voter_id.strip.empty? } &&
+               voter_ids.include?(task["voter_id"])
+          invalid_result!("invalid_vote_identity", "ultra voter list is invalid")
+        end
+        count = voter_ids.length
+        if task.key?("expected_voters") && task.fetch("expected_voters") != count
+          invalid_result!("invalid_vote_identity", "ultra voter count disagrees with voter list")
+        end
+      else
+        count = task.fetch("expected_voters", 3)
+      end
+      unless count.is_a?(Integer) && count >= 2
+        invalid_result!("invalid_vote_identity", "ultra expected voter count must be at least two")
+      end
+      count
+    end
+
+    def applicable_judge_candidates(data)
+      data.fetch("candidates").select do |candidate|
+        candidate.fetch("state") == "candidate" && candidate.fetch("round") == data.fetch("revise_round")
+      end
+    end
+
+    def require_exact_subject_coverage!(expected, supplied, operation)
+      if supplied.uniq.length != supplied.length || supplied.sort != expected.sort
+        invalid_result!(
+          "subject_coverage", "#{operation} result must cover applicable subjects exactly once",
+          {
+            "expected" => expected.sort,
+            "supplied" => supplied,
+            "missing" => expected - supplied,
+            "unknown" => supplied - expected
+          }
+        )
+      end
+    end
+
+    def validate_and_normalize_verdict!(data, task, subject_id, verdict)
+      candidate = find_candidate_in_data!(data, verdict.fetch("candidate_id"))
+      disposition = verdict.fetch("disposition")
+      evidence = verdict.fetch("evidence")
+      consequence = verdict.fetch("consequence")
+      if evidence.strip.empty? || consequence.strip.empty?
+        invalid_result!("invalid_verdict_evidence", "judge evidence and consequence must not be blank")
+      end
+      if disposition == "REFUTE" && !genuine_refuting_evidence?(candidate, evidence)
+        invalid_result!(
+          "invalid_refutation", "REFUTE requires evidence distinct from the candidate assertion",
+          {"candidate_id" => candidate.fetch("id")}
+        )
+      end
+      effective = if disposition == "PROMOTE" && verdict.fetch("confidence") < 0.7
+                    "UNPROVEN"
+                  else
+                    disposition
+                  end
+      deep_copy(verdict).merge(
+        "task_id" => task.fetch("task_id"),
+        "voter_id" => task.fetch("voter_id", task.fetch("task_id")),
+        "vote_group_id" => task.fetch("vote_group_id", subject_id),
+        "effective_disposition" => effective,
+        "round" => data.fetch("revise_round")
+      )
+    end
+
+    def genuine_refuting_evidence?(candidate, evidence)
+      normalized = normalize_assertion(evidence)
+      return false if normalized.empty?
+
+      assertions = %w[summary evidence consequence].map do |key|
+        normalize_assertion(candidate[key].to_s)
+      end.reject(&:empty?)
+      !assertions.include?(normalized)
+    end
+
+    def normalize_assertion(value)
+      value.to_s.strip.downcase.gsub(/\s+/, " ")
+    end
+
+    def promotion_group_from_verdicts(data, subject_id, verdicts)
+      candidates = verdicts.map do |verdict|
+        find_candidate_in_data!(data, verdict.fetch("candidate_id"))
+      end.uniq { |candidate| candidate.fetch("id") }
+      semantic = data.fetch("semantic_groups")[subject_id]
+      location = semantic ? semantic.fetch("location") : candidates.first.fetch("location")
+      representative = verdicts.sort_by { |verdict| verdict.fetch("candidate_id") }.first
+      {
+        "group_id" => subject_id,
+        "candidate_ids" => candidates.map { |candidate| candidate.fetch("id") }.sort,
+        "summary" => semantic ? semantic.fetch("summary") : candidates.first.fetch("summary"),
+        "category" => representative.fetch("category"),
+        "severity" => verdicts.map { |verdict| verdict.fetch("severity") }.min_by { |severity| SEVERITY_RANK.fetch(severity) },
+        "confidence" => verdicts.map { |verdict| verdict.fetch("confidence") }.min,
+        "evidence" => verdicts.map { |verdict| verdict.fetch("evidence") }.uniq.sort.join("\n"),
+        "consequence" => representative.fetch("consequence"),
+        "path" => location.fetch("path"),
+        "line" => location.fetch("line_start"),
+        "location" => deep_copy(location)
+      }
+    end
+
+    def add_evidence_gap!(data, task, subject_id, candidate_ids, verdicts)
+      data.fetch("evidence_gaps") << {
+        "subject_id" => subject_id,
+        "candidate_ids" => candidate_ids.sort,
+        "task_id" => task.fetch("task_id"),
+        "round" => data.fetch("revise_round"),
+        "reason" => verdicts.any? do |verdict|
+          verdict.fetch("disposition") == "PROMOTE" && verdict.fetch("confidence") < 0.7
+        end ? "confidence-below-floor" : "unproven",
+        "evidence" => verdicts.map { |verdict| verdict.fetch("evidence") }.uniq.sort.join("\n")
+      }
+    end
+
+    def promote_with_cap!(data, groups)
+      ordered = sort_promotion_groups(groups)
+      capacity = [50 - data.fetch("findings").length, 0].max
+      selected = ordered.take(capacity)
+      overflowed = ordered.drop(capacity)
+      overflowed.each do |group|
+        key = "#{group.fetch("category")}:#{group.fetch("severity")}"
+        data.fetch("overflow")["total"] += 1
+        counts = data.fetch("overflow").fetch("by_category_severity")
+        counts[key] = counts.fetch(key, 0) + 1
+      end
+      [apply_promotions_to_data!(data, selected), overflowed]
+    end
+
+    def sort_promotion_groups(groups)
+      groups.sort_by do |group|
+        [
+          SEVERITY_RANK.fetch(group.fetch("severity")),
+          -Float(group.fetch("confidence")),
+          group.fetch("path", "").to_s,
+          Integer(group.fetch("line", 0)),
+          group.fetch("group_id")
+        ]
+      end
+    end
+
+    def apply_promotions_to_data!(data, groups)
+      validated_groups = groups.map { |group| validate_promotion_group!(group) }
+      group_ids = validated_groups.map { |group| group.fetch("group_id") }
+      duplicate_group_id = group_ids.group_by { |id| id }.find { |_id, ids| ids.length > 1 }
+      if duplicate_group_id
+        raise Error.new(
+          "invalid_promotion", "promotion group IDs must be unique",
+          {"group_id" => duplicate_group_id.first}, 3
+        )
+      end
+      ordered = sort_promotion_groups(validated_groups)
+      seen_candidate_ids = {}
+      first_number = data.fetch("findings").length + 1
+      fingerprint = Digest::SHA256.hexdigest(data.fetch("run_id"))[0, 8]
+      promoted = ordered.each_with_index.map do |group, index|
+        candidates = group.fetch("candidate_ids").map do |candidate_id|
+          if seen_candidate_ids[candidate_id]
+            raise Error.new("candidate_collision", "candidate belongs to multiple promotion groups", {"id" => candidate_id}, 3)
+          end
+          seen_candidate_ids[candidate_id] = true
+          candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
+          unless candidate && candidate.fetch("state") == "candidate"
+            raise Error.new("invalid_candidate", "candidate cannot be promoted", {"id" => candidate_id}, 3)
+          end
+          candidate
+        end
+        id = format("AR-%s-%03d", fingerprint, first_number + index)
+        if data.fetch("findings").any? { |finding| finding.fetch("id") == id }
+          raise Error.new("finding_collision", "promoted finding ID already exists", {"id" => id}, 3)
+        end
+        candidates.each { |candidate| candidate["state"] = "promoted" }
+        deep_copy(group).merge(
+          "id" => id,
+          "state" => "pending",
+          "round" => data.fetch("revise_round"),
+          "sources" => candidates.map do |candidate|
+            {
+              "candidate_id" => candidate.fetch("id"),
+              "angle" => candidate.fetch("angle"),
+              "attempt" => candidate.fetch("attempt")
+            }
+          end
+        )
+      end
+      data.fetch("findings").concat(promoted)
+      promoted
+    end
+
+    def find_candidate_in_data!(data, candidate_id)
+      candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
+      invalid_result!("unknown_candidate", "candidate does not exist", {"id" => candidate_id}) unless candidate
+
+      candidate
+    end
+
+    def apply_attack_result!(data, task, payload)
+      candidate_ids = []
+      duplicate_mappings = []
+      payload.fetch("findings").each_with_index do |finding, index|
+        fingerprint = finding_fingerprint(finding)
+        source = {
+          "task_id" => task.fetch("task_id"),
+          "angle" => task.fetch("angle"),
+          "attempt" => task.fetch("attempt"),
+          "round" => task.fetch("round", data.fetch("revise_round")),
+          "finding_index" => index
+        }
+        retained_id = data.fetch("exact_duplicate_map")[fingerprint]
+        if retained_id
+          data.fetch("exact_duplicate_sources").fetch(retained_id) << source
+          duplicate_mappings << {
+            "finding_index" => index,
+            "candidate_id" => retained_id,
+            "fingerprint" => fingerprint
+          }
+          candidate_ids << retained_id
+          next
+        end
+        candidate = add_candidate_to_data!(
+          data, task.fetch("angle"), task.fetch("attempt"), finding
+        )
+        retained_id = candidate.fetch("id")
+        data.fetch("exact_duplicate_map")[fingerprint] = retained_id
+        data.fetch("exact_duplicate_sources")[retained_id] = [source]
+        candidate_ids << retained_id
+      end
+      {
+        "schema" => result_schema_name!(task),
+        "task_id" => task.fetch("task_id"),
+        "candidate_ids" => candidate_ids.uniq,
+        "duplicate_mappings" => duplicate_mappings
+      }
+    end
+
+    def finding_fingerprint(finding)
+      canonical = %w[location category summary evidence consequence].each_with_object({}) do |key, value|
+        value[key] = finding.fetch(key)
+      end
+      Digest::SHA256.hexdigest(JSON.generate(canonical))
+    end
+
+    def add_candidate_to_data!(data, angle, attempt, finding, round: data.fetch("revise_round"))
+      slug = sanitize_angle(angle)
+      sequence = data.fetch("candidates").count do |candidate|
+        candidate.fetch("angle") == slug && candidate.fetch("attempt") == attempt
+      end + 1
+      id = "C-#{slug}-#{attempt}-#{sequence}"
+      if data.fetch("candidates").any? { |candidate| candidate.fetch("id") == id }
+        invalid_result!("candidate_collision", "candidate ID already exists", {"id" => id})
+      end
+      created = deep_copy(finding).merge(
+        "id" => id,
+        "state" => "candidate",
+        "angle" => slug,
+        "attempt" => attempt,
+        "sequence" => sequence,
+        "round" => round
+      )
+      data.fetch("candidates") << created
+      created
+    end
+
+    def live_target_digests!(manifest)
+      root = manifest.fetch("repository").fetch("root")
+      canonical_root = File.realpath(root)
+      unless canonical_root == root && File.directory?(canonical_root)
+        invalid_result!("target_digest_mismatch", "authoritative repository root is invalid")
+      end
+      manifest.fetch("targets").each_with_object({}) do |target, digests|
+        path = target.fetch("path")
+        unless safe_relative_target_path?(path)
+          invalid_result!("target_digest_mismatch", "authoritative target path is invalid")
+        end
+        absolute = File.expand_path(path, canonical_root)
+        unless absolute.start_with?(canonical_root + File::SEPARATOR) && File.realpath(absolute) == absolute
+          invalid_result!("target_digest_mismatch", "authoritative target escapes repository")
+        end
+        expected = File.lstat(absolute)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(absolute, flags) do |file|
+          opened = file.stat
+          unless opened.file? && !expected.symlink? &&
+                 expected.dev == opened.dev && expected.ino == opened.ino
+            invalid_result!("target_digest_mismatch", "authoritative target identity changed")
+          end
+          digests[path] = Digest::SHA256.hexdigest(file.read)
+        end
+      end
+    rescue KeyError, Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP,
+           Errno::EACCES, Errno::EPERM => error
+      invalid_result!(
+        "target_digest_mismatch", "authoritative target is unavailable",
+        {"cause" => error.class.name}
+      )
+    end
+
+    def safe_relative_target_path?(path)
+      path.is_a?(String) && !path.empty? && !path.start_with?(File::SEPARATOR) &&
+        path.split(File::SEPARATOR).none? { |part| part.empty? || part == "." || part == ".." }
     end
 
     def validate_promotion_group!(group)
