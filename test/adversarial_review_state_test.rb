@@ -313,6 +313,93 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_completion_rejects_fixed_action_with_rejected_resolution
+    with_promoted_state("mode" => "critique") do |state, finding_id, run_dir|
+      state.record_author_action(finding_id, "fixed")
+      state.record_resolution(finding_id, "resolved")
+      persisted = state.to_h
+      persisted.fetch("resolution_checks")[finding_id] = "rejected"
+      persisted.fetch("findings").first["state"] = "rejected"
+
+      refute state.can_complete?(persisted, from_stage: "culling")
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.transition_to("complete")
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal "culling", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
+    end
+  end
+
+  def test_completion_rejects_rejected_action_with_resolved_resolution
+    with_promoted_state("mode" => "critique") do |state, finding_id, run_dir|
+      state.record_author_action(finding_id, "rejected")
+      state.record_resolution(finding_id, "rejected")
+      persisted = state.to_h
+      persisted.fetch("resolution_checks")[finding_id] = "resolved"
+      persisted.fetch("findings").first["state"] = "resolved"
+
+      refute state.can_complete?(persisted, from_stage: "culling")
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.transition_to("complete")
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal "culling", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
+    end
+  end
+
+  def test_record_resolution_rejects_incompatible_terminal_pairs_without_mutation
+    [["fixed", "rejected"], ["rejected", "resolved"]].each do |action, resolution|
+      with_promoted_state do |state, finding_id, _run_dir|
+        state.record_author_action(finding_id, action)
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          state.record_resolution(finding_id, resolution)
+        end
+
+        assert_equal "invalid_resolution", error.code
+        assert_empty state.to_h.fetch("resolution_checks")
+        assert_equal "pending", state.findings.first.fetch("state")
+      end
+    end
+  end
+
+  def test_record_author_action_rejects_an_incompatible_change_without_mutation
+    [
+      ["fixed", "resolved", "rejected"],
+      ["rejected", "rejected", "fixed"]
+    ].each do |initial_action, resolution, replacement_action|
+      with_promoted_state do |state, finding_id, _run_dir|
+        state.record_author_action(finding_id, initial_action)
+        state.record_resolution(finding_id, resolution)
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          state.record_author_action(finding_id, replacement_action)
+        end
+
+        assert_equal "invalid_author_action", error.code
+        assert_equal initial_action, state.to_h.fetch("author_actions").fetch(finding_id)
+        assert_equal resolution, state.to_h.fetch("resolution_checks").fetch(finding_id)
+      end
+    end
+  end
+
+  def test_valid_terminal_pairs_complete
+    [["fixed", "resolved"], ["rejected", "rejected"]].each do |action, resolution|
+      with_promoted_state("mode" => "critique") do |state, finding_id, _run_dir|
+        state.record_author_action(finding_id, action)
+        state.record_resolution(finding_id, resolution)
+
+        assert state.can_complete?
+        state.transition_to("complete")
+        assert_equal "complete", state.to_h.fetch("stage")
+      end
+    end
+  end
+
   def test_record_resolution_refuses_stuck_before_the_round_cap
     with_promoted_state do |state, finding_id, _run_dir|
       error = assert_raises(AdversarialReview::State::Error) do

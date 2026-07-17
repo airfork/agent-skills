@@ -55,6 +55,10 @@ module AdversarialReview
       "MEDIUM" => 2,
       "LOW" => 3
     }.freeze
+    TERMINAL_PAIRINGS = {
+      "fixed" => "resolved",
+      "rejected" => "rejected"
+    }.freeze
 
     def self.default_run_dir(repository:, run_id:)
       validate_run_id!(run_id)
@@ -338,6 +342,13 @@ module AdversarialReview
             {"id" => finding_id, "status" => status}, 3
           )
         end
+        resolution = data.fetch("resolution_checks")[finding_id]
+        if self.class.terminal_pairing(action, resolution) == :invalid
+          raise Error.new(
+            "invalid_author_action", "author action conflicts with the recorded resolution",
+            {"id" => finding_id, "status" => status, "resolution" => resolution}, 3
+          )
+        end
         data.fetch("author_actions")[finding_id] = deep_copy(action)
       end
       self
@@ -354,6 +365,13 @@ module AdversarialReview
           raise Error.new(
             "invalid_resolution", "a finding cannot be stuck before the revise-round cap",
             {"id" => finding_id, "revise_round" => data.fetch("revise_round")}, 3
+          )
+        end
+        action = data.fetch("author_actions")[finding_id]
+        if self.class.terminal_pairing(action, status) == :invalid
+          raise Error.new(
+            "invalid_resolution", "resolution conflicts with the recorded author action",
+            {"id" => finding_id, "status" => status}, 3
           )
         end
         data.fetch("resolution_checks")[finding_id] = status
@@ -565,7 +583,13 @@ module AdversarialReview
       valid_arbiter_subjects = data.fetch("pending_arbiter_subjects").all? do |finding_id|
         findings_by_id.key?(finding_id)
       end
-      unless valid_actions && valid_resolutions && valid_arbiter_subjects
+      valid_pairings = finding_ids.all? do |finding_id|
+        terminal_pairing(
+          data.fetch("author_actions")[finding_id],
+          data.fetch("resolution_checks")[finding_id]
+        ) != :invalid
+      end
+      unless valid_actions && valid_resolutions && valid_arbiter_subjects && valid_pairings
         raise Error.new("invalid_state", "persisted finding disposition maps are invalid", {}, 3)
       end
       true
@@ -617,6 +641,14 @@ module AdversarialReview
     def self.valid_author_action_snapshot?(action)
       status = action.is_a?(Hash) ? action["status"] : action
       %w[fixed rejected].include?(status)
+    end
+
+    def self.terminal_pairing(action, resolution)
+      status = action.is_a?(Hash) ? action["status"] : action
+      expected_resolution = TERMINAL_PAIRINGS[status]
+      return :incomplete unless expected_resolution && %w[resolved rejected].include?(resolution)
+
+      expected_resolution == resolution ? :complete : :invalid
     end
 
     def self.canonical_missing_path(path)
@@ -717,8 +749,13 @@ module AdversarialReview
       blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
       data.fetch("findings").each do |finding|
         finding_id = finding.fetch("id")
-        blockers << "author-action:#{finding_id}" unless terminal_author_action?(data["author_actions"][finding_id])
-        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(data["resolution_checks"][finding_id])
+        action = data["author_actions"][finding_id]
+        resolution = data["resolution_checks"][finding_id]
+        blockers << "author-action:#{finding_id}" unless terminal_author_action?(action)
+        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(resolution)
+        if self.class.terminal_pairing(action, resolution) == :invalid
+          blockers << "terminal-pair:#{finding_id}"
+        end
       end
       blockers
     end
