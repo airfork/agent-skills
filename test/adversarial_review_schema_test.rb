@@ -24,7 +24,7 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "minimum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.requirements_total"
+    assert_includes errors.map { |error| error.fetch("path") }, "/metrics/requirements_total"
   end
 
   def test_attack_schema_rejects_negative_role_percentage
@@ -32,7 +32,7 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "minimum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.coverage_percent"
+    assert_includes errors.map { |error| error.fetch("path") }, "/metrics/coverage_percent"
   end
 
   def test_attack_schema_rejects_role_percentage_above_hundred
@@ -40,7 +40,7 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "maximum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.testable_criteria_percent"
+    assert_includes errors.map { |error| error.fetch("path") }, "/metrics/testable_criteria_percent"
   end
 
   def test_divergence_schema_accepts_complete_probe
@@ -65,6 +65,50 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_empty AdversarialReview::Schema.validate("author-actions", valid_author_actions)
   end
 
+  def test_author_actions_schema_accepts_unambiguous_repo_relative_changed_paths
+    value = author_actions_with_paths("docs/spec.md", "nested/file.rb", "nested\\file.rb", "src/v1.2/file[old].rb")
+
+    assert_empty AdversarialReview::Schema.validate("author-actions", value)
+  end
+
+  def test_author_actions_schema_rejects_repository_escape_paths
+    invalid_paths = [
+      "../outside.md",
+      "..\\outside.md",
+      "/absolute",
+      "\\absolute/UNC",
+      "//server/share",
+      "\\\\server\\share",
+      "C:\\outside.md",
+      "C:/outside.md",
+      "C:foo",
+      ".",
+      "..",
+      "docs/../outside.md",
+      "docs\\..\\outside.md",
+      "docs/./spec.md",
+      "docs\\.\\spec.md",
+      "docs//spec.md",
+      "docs\\\\spec.md",
+      "docs/spec.md/",
+      "docs\\spec.md\\",
+      "docs/\noutside.md",
+      "docs/\routside.md",
+      "docs/\toutside.md",
+      "docs/\u0000outside.md",
+      "docs/\u007foutside.md",
+    ]
+
+    invalid_paths.each do |path|
+      errors = AdversarialReview::Schema.validate("author-actions", author_actions_with_paths(path))
+      assert_includes errors.map { |error| error.fetch("code") }, "invalid_path", path.inspect
+      assert_includes errors.map { |error| error.fetch("path") }, "/actions/0/changed_paths/0", path.inspect
+    end
+
+    empty_errors = AdversarialReview::Schema.validate("author-actions", author_actions_with_paths(""))
+    assert_includes empty_errors.map { |error| error.fetch("code") }, "min_length"
+  end
+
   def test_resolution_schema_accepts_complete_checks_and_new_findings
     assert_empty AdversarialReview::Schema.validate("resolution", valid_resolution)
   end
@@ -73,60 +117,72 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_empty AdversarialReview::Schema.validate("arbiter", valid_arbiter)
   end
 
+  def test_resolution_role_example_satisfies_its_schema
+    payload = role_example("Resolution Check")
+
+    assert_empty AdversarialReview::Schema.validate("resolution", payload)
+  end
+
+  def test_arbiter_role_example_satisfies_its_schema
+    payload = role_example("Arbiter")
+
+    assert_empty AdversarialReview::Schema.validate("arbiter", payload)
+  end
+
   def test_attack_schema_rejects_unknown_property
     errors = AdversarialReview::Schema.validate("attack", invalid_attack)
 
     assert_includes errors.map { |error| error.fetch("code") }, "additional_property"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.findings[0].location.surprise"
+    assert_includes errors.map { |error| error.fetch("path") }, "/findings/0/location/surprise"
   end
 
   def test_divergence_schema_rejects_missing_required_field
     errors = AdversarialReview::Schema.validate("divergence", invalid_divergence)
 
     assert_includes errors.map { |error| error.fetch("code") }, "required"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.hypothesis"
+    assert_includes errors.map { |error| error.fetch("path") }, "/hypothesis"
   end
 
   def test_dedupe_schema_rejects_invalid_constant
     errors = AdversarialReview::Schema.validate("dedupe", invalid_dedupe)
 
     assert_includes errors.map { |error| error.fetch("code") }, "const"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.schema_version"
+    assert_includes errors.map { |error| error.fetch("path") }, "/schema_version"
   end
 
   def test_author_actions_schema_rejects_invalid_enum
     errors = AdversarialReview::Schema.validate("author-actions", invalid_author_actions)
 
     assert_includes errors.map { |error| error.fetch("code") }, "enum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.actions[0].action"
+    assert_includes errors.map { |error| error.fetch("path") }, "/actions/0/action"
   end
 
   def test_judge_schema_rejects_wrong_type
     errors = AdversarialReview::Schema.validate("judge", invalid_judge)
 
     assert_includes errors.map { |error| error.fetch("code") }, "type"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.verdicts[0].confidence"
+    assert_includes errors.map { |error| error.fetch("path") }, "/verdicts/0/confidence"
   end
 
   def test_resolution_schema_rejects_value_below_minimum
     errors = AdversarialReview::Schema.validate("resolution", invalid_resolution)
 
     assert_includes errors.map { |error| error.fetch("code") }, "minimum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.duration_ms"
+    assert_includes errors.map { |error| error.fetch("path") }, "/metrics/duration_ms"
   end
 
   def test_arbiter_schema_rejects_value_above_maximum
     errors = AdversarialReview::Schema.validate("arbiter", invalid_arbiter)
 
     assert_includes errors.map { |error| error.fetch("code") }, "maximum"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.decisions[0].confidence"
+    assert_includes errors.map { |error| error.fetch("path") }, "/decisions/0/confidence"
   end
 
   def test_attack_schema_rejects_string_below_minimum_length
     errors = AdversarialReview::Schema.validate("attack", valid_attack.merge("run_id" => ""))
 
     assert_includes errors.map { |error| error.fetch("code") }, "min_length"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.run_id"
+    assert_includes errors.map { |error| error.fetch("path") }, "/run_id"
   end
 
   def test_judge_schema_rejects_candidate_id_that_misses_pattern
@@ -135,15 +191,22 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("judge", value.merge("verdicts" => [verdict]))
 
     assert_includes errors.map { |error| error.fetch("code") }, "pattern"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.verdicts[0].candidate_id"
+    assert_includes errors.map { |error| error.fetch("path") }, "/verdicts/0/candidate_id"
   end
 
   def test_attack_schema_validates_dynamic_artifact_digest_values
-    value = valid_attack.merge("artifact_digests" => {"docs/spec.md" => "A" * 64})
+    value = valid_attack.merge("artifact_digests" => {"docs/v1.2/spec[old].md" => "A" * 64})
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "pattern"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.artifact_digests.docs/spec.md"
+    assert_includes errors.map { |error| error.fetch("path") }, "/artifact_digests/docs~1v1.2~1spec[old].md"
+  end
+
+  def test_error_paths_escape_tilde_in_dynamic_keys
+    value = valid_attack.merge("artifact_digests" => {"docs/v1~2/spec.md" => "A" * 64})
+    errors = AdversarialReview::Schema.validate("attack", value)
+
+    assert_includes errors.map { |error| error.fetch("path") }, "/artifact_digests/docs~1v1~02~1spec.md"
   end
 
   def test_dedupe_schema_rejects_candidate_in_multiple_groups
@@ -157,7 +220,7 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("dedupe", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "candidate_duplicate"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.groups[1].candidate_ids[0]"
+    assert_includes errors.map { |error| error.fetch("path") }, "/groups/1/candidate_ids/0"
   end
 
   def test_attack_schema_rejects_empty_artifact_path
@@ -165,10 +228,21 @@ class AdversarialReviewSchemaTest < Minitest::Test
     errors = AdversarialReview::Schema.validate("attack", value)
 
     assert_includes errors.map { |error| error.fetch("code") }, "min_length"
-    assert_includes errors.map { |error| error.fetch("path") }, "$.artifact_digests"
+    assert_includes errors.map { |error| error.fetch("path") }, "/artifact_digests"
   end
 
   private
+
+  def role_example(heading)
+    text = File.read(File.join(SKILL, "judge-rubric.md"))
+    match = text.match(/^## #{Regexp.escape(heading)}\n(?<body>.*?)(?=^## |\z)/m)
+    raise "missing role section: #{heading}" unless match
+
+    json = match[:body][/```json\n(?<json>.*?)\n```/m, :json]
+    raise "missing JSON example: #{heading}" unless json
+
+    JSON.parse(json)
+  end
 
   def role_metrics
     {
@@ -178,6 +252,12 @@ class AdversarialReviewSchemaTest < Minitest::Test
       "coverage_percent" => 83.3,
       "unmapped_tasks" => 1,
     }
+  end
+
+  def author_actions_with_paths(*paths)
+    value = valid_author_actions
+    action = value.fetch("actions").first.merge("changed_paths" => paths)
+    value.merge("actions" => [action])
   end
 
   def valid_attack

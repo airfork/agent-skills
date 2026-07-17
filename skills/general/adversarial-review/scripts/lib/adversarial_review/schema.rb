@@ -21,9 +21,10 @@ module AdversarialReview
     end
 
     def validate(value)
-      visit(@schema, value, "$")
+      visit(@schema, value, "")
       validate_artifact_digest_paths(value)
       validate_dedupe(value) if @name == "dedupe"
+      validate_author_action_paths(value) if @name == "author-actions"
       @errors
     end
 
@@ -74,13 +75,18 @@ module AdversarialReview
         end
       elsif value.is_a?(Array) && schema.key?("items")
         value.each_with_index do |item, index|
-          visit(schema.fetch("items"), item, "#{path}[#{index}]")
+          visit(schema.fetch("items"), item, child_path(path, index))
         end
       end
     end
 
     def child_path(path, key)
-      "#{path}.#{key}"
+      segment = key.to_s.gsub("~", "~0").gsub("/", "~1")
+      "#{path}/#{segment}"
+    end
+
+    def pointer(*segments)
+      segments.reduce("") { |path, segment| child_path(path, segment) }
     end
 
     def matches_type?(type, value)
@@ -102,7 +108,7 @@ module AdversarialReview
         next unless group.is_a?(Hash) && group["candidate_ids"].is_a?(Array)
 
         group.fetch("candidate_ids").each_with_index do |candidate_id, candidate_index|
-          path = "$.groups[#{group_index}].candidate_ids[#{candidate_index}]"
+          path = pointer("groups", group_index, "candidate_ids", candidate_index)
           if seen.key?(candidate_id)
             add_error("candidate_duplicate", path, "candidate ID already belongs to #{seen.fetch(candidate_id)}")
           else
@@ -116,7 +122,33 @@ module AdversarialReview
       return unless value.is_a?(Hash) && value["artifact_digests"].is_a?(Hash)
 
       if value.fetch("artifact_digests").keys.any? { |path| !path.is_a?(String) || path.empty? }
-        add_error("min_length", "$.artifact_digests", "artifact paths must be non-empty strings")
+        add_error("min_length", pointer("artifact_digests"), "artifact paths must be non-empty strings")
+      end
+    end
+
+    def validate_author_action_paths(value)
+      return unless value.is_a?(Hash) && value["actions"].is_a?(Array)
+
+      value.fetch("actions").each_with_index do |action, action_index|
+        next unless action.is_a?(Hash) && action["changed_paths"].is_a?(Array)
+
+        action.fetch("changed_paths").each_with_index do |path, path_index|
+          next unless path.is_a?(String) && !path.empty?
+          next unless invalid_repository_relative_path?(path)
+
+          error_path = pointer("actions", action_index, "changed_paths", path_index)
+          add_error("invalid_path", error_path, "path must be an unambiguous repository-relative path")
+        end
+      end
+    end
+
+    def invalid_repository_relative_path?(path)
+      return true if path.match?(/[\x00-\x1f\x7f]/)
+      return true if path.start_with?("/", "\\")
+      return true if path.match?(/\A[A-Za-z]:/)
+
+      path.split(/[\x2f\x5c]/, -1).any? do |segment|
+        segment.empty? || segment == "." || segment == ".."
       end
     end
 

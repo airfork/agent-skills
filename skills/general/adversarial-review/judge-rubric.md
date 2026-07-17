@@ -86,14 +86,22 @@ Output JSON only:
 
 ```json
 {
+  "schema_version": 1,
+  "run_id": "ar-20260717-example",
+  "task_id": "resolution-1",
+  "artifact_digests": {
+    "docs/spec.md": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
   "checks": [
     {
       "finding_id": "AR-001",
-      "status": "RESOLVED|UNRESOLVED|REGRESSED",
-      "evidence": "quote the resolving edit, accepted rejection, or remaining problem"
+      "status": "RESOLVED",
+      "evidence": "The rollout section now assigns rollback to the release manager."
     }
   ],
-  "new_findings": []
+  "new_findings": [],
+  "metrics": {},
+  "notes": []
 }
 ```
 
@@ -115,11 +123,23 @@ Output JSON only. Candidate disputes use `PROMOTE|REFUTE|UNPROVEN`; author-resol
 
 ```json
 {
-  "subject_id": "AR-001",
-  "decision": "UNRESOLVED",
-  "confidence": 0.9,
-  "evidence": "quote the decisive evidence",
-  "mapped_candidate_ids": ["C-assumptions-checker-1-1"]
+  "schema_version": 1,
+  "run_id": "ar-20260717-example",
+  "task_id": "arbiter-1",
+  "artifact_digests": {
+    "docs/spec.md": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  },
+  "decisions": [
+    {
+      "subject_id": "AR-001",
+      "decision": "UNRESOLVED",
+      "confidence": 0.9,
+      "evidence": "The author's rejection does not identify a rollback owner.",
+      "mapped_candidate_ids": ["C-assumptions-checker-1-1"]
+    }
+  ],
+  "metrics": {},
+  "notes": []
 }
 ```
 
