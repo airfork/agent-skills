@@ -683,6 +683,59 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_atomic_lock_has_no_overlap_after_both_lock_names_are_replaced
+    skip "fork unavailable" unless Process.respond_to?(:fork)
+    with_state do |_state, run_dir|
+      lock_path = File.join(run_dir, ".state.lock")
+      anchor_path = File.join(run_dir, ".state.lock.anchor")
+      moved_lock_path = File.join(run_dir, ".state.lock.moved")
+      moved_anchor_path = File.join(run_dir, ".state.lock.anchor.moved")
+      result_reader, result_writer = IO.pipe
+      pid = nil
+
+      AdversarialReview::Atomic.open_lock(lock_path, exclusive: true) do
+        File.rename(lock_path, moved_lock_path)
+        File.rename(anchor_path, moved_anchor_path)
+        File.open(lock_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
+        File.chmod(0o600, lock_path)
+        File.link(lock_path, anchor_path)
+
+        pid = fork do
+          result_reader.close
+          result = begin
+            AdversarialReview::Atomic.open_lock(lock_path, exclusive: true) { "entered" }
+          rescue AdversarialReview::State::Error => error
+            error.code
+          end
+          result_writer.write(result)
+          result_writer.close
+          exit! 0
+        end
+        result_writer.close
+
+        assert_nil IO.select([result_reader], nil, nil, 0.25),
+                   "replacement lock domain overlapped the original critical section"
+      end
+
+      refute_nil IO.select([result_reader], nil, nil, 2),
+                 "second lock attempt did not finish after the original lock released"
+      assert_includes %w[entered unsafe_lock], result_reader.read
+      Process.wait(pid)
+      assert_predicate $?, :success?
+    ensure
+      [result_reader, result_writer].compact.each do |io|
+        io.close unless io.closed?
+      end
+      if pid
+        begin
+          Process.wait(pid) if Process.waitpid(pid, Process::WNOHANG).nil?
+        rescue Errno::ECHILD
+          nil
+        end
+      end
+    end
+  end
+
   def test_load_rejects_a_missing_lock_anchor
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
