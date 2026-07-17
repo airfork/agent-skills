@@ -29,7 +29,8 @@ module AdversarialReview
       schema_version run_id targets repository started_at ended_at tier mode output
       requested_executor selected_executor cli requested_model observed_model
       requested_effort observed_effort enabled_tasks angles capabilities degraded_capabilities usage
-      findings semantic_groups author_actions resolution_checks evidence_gaps metrics
+      findings semantic_groups author_actions resolution_checks evidence_gaps
+      overflow overflow_evidence_gaps metrics
     ].freeze
     USAGE_KEYS = %w[
       prompt_bytes input_tokens cached_input_tokens output_tokens reasoning_tokens total_tokens
@@ -73,11 +74,19 @@ module AdversarialReview
         requested_effort: source.fetch("requested_effort")
       )
       usage = canonical_usage(source.fetch("usage"))
-      findings = canonical_findings(source, run_id, angles.map { |angle| angle.fetch("name") })
-      actions = canonical_actions(source.fetch("author_actions"), findings)
-      resolution_checks = canonical_resolutions(source.fetch("resolution_checks"), findings)
+      all_findings = canonical_findings(source, run_id, angles.map { |angle| angle.fetch("name") })
+      findings = all_findings.select { |finding| finding.fetch("reported") }
+                             .map { |finding| finding.reject { |key, _value| key == "reported" } }
+      actions = canonical_actions(source.fetch("author_actions"), all_findings)
+      resolution_checks = canonical_resolutions(source.fetch("resolution_checks"), all_findings)
+      validate_dispositions!(mode, all_findings, actions, resolution_checks)
       evidence_gaps = canonical_evidence_gaps(source.fetch("evidence_gaps"))
-      ordinary_verdict = verdict_for(mode, findings, evidence_gaps)
+      overflow, overflow_evidence_gaps = canonical_overflow(
+        source.fetch("overflow"), source.fetch("overflow_evidence_gaps"), all_findings
+      )
+      ordinary_verdict = verdict_for(
+        mode, findings, evidence_gaps, overflow, overflow_evidence_gaps
+      )
       capability_gate = Capabilities.gate(
         capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
       )
@@ -101,10 +110,13 @@ module AdversarialReview
         "output" => output,
         "verdict" => verdict,
         "findings" => findings,
-        "metrics" => canonical_metrics(source.fetch("metrics"), findings),
+        "metrics" => canonical_metrics(source.fetch("metrics"), findings, overflow),
+        "author_actions" => actions,
         "changelog" => changelog(actions, findings),
         "rejected_findings" => rejected_findings(actions, findings),
         "open_questions" => open_questions(findings, actions, evidence_gaps),
+        "overflow" => overflow,
+        "overflow_evidence_gaps" => overflow_evidence_gaps,
         "degraded_capabilities" => degraded,
         "provenance" => {
           "schema_version" => 1,
@@ -149,9 +161,12 @@ module AdversarialReview
       lines << ""
       append_findings(lines, value)
       append_metrics(lines, value.fetch("metrics"))
+      append_overflow(lines, value.fetch("overflow"), value.fetch("overflow_evidence_gaps"))
       if value.fetch("mode") == "revise"
         append_item_section(lines, "Changelog", value.fetch("changelog"))
         append_item_section(lines, "Rejected Findings", value.fetch("rejected_findings"))
+        append_item_section(lines, "Open Questions", value.fetch("open_questions"))
+      elsif !value.fetch("open_questions").empty?
         append_item_section(lines, "Open Questions", value.fetch("open_questions"))
       end
       append_provenance(lines, value)
@@ -173,6 +188,9 @@ module AdversarialReview
         "verdict" => value.fetch("verdict"),
         "findings" => deep_copy(value.fetch("findings")),
         "metrics" => deep_copy(value.fetch("metrics")),
+        "open_questions" => deep_copy(value.fetch("open_questions")),
+        "overflow" => deep_copy(value.fetch("overflow")),
+        "overflow_evidence_gaps" => deep_copy(value.fetch("overflow_evidence_gaps")),
         "degraded_capabilities" => deep_copy(value.fetch("degraded_capabilities")),
         "provenance" => deep_copy(value.fetch("provenance")),
         "markdown" => markdown(value)
@@ -206,6 +224,12 @@ module AdversarialReview
         section = [marker, rendered.rstrip,
                    "<!-- /adversarial-review-run:#{value.fetch("run_id")} -->"].join("\n") + "\n"
         bytes = existing.empty? ? section : existing.rstrip + "\n\n" + section
+        if bytes.bytesize > report_byte_limit
+          invalid!(
+            "report_too_large", "prospective report exceeds the size limit",
+            {"path" => expanded, "bytes" => bytes.bytesize, "max_bytes" => report_byte_limit}
+          )
+        end
         write_report(directory, name, bytes)
       end
       expanded
@@ -252,9 +276,16 @@ module AdversarialReview
       unless status.is_a?(Array) && status.all? { |line| line.is_a?(String) && !line.include?("\0") }
         invalid!("invalid_repository", "repository status must be an array of strings")
       end
-      dirty_digest = repository["dirty_digest"] || Digest::SHA256.hexdigest(JSON.generate(status))
+      unless dirty == !status.empty?
+        invalid!("invalid_repository", "repository dirty flag does not match status entries")
+      end
+      expected_dirty_digest = Digest::SHA256.hexdigest(JSON.generate(status))
+      dirty_digest = repository["dirty_digest"] || expected_dirty_digest
       unless dirty_digest.is_a?(String) && dirty_digest.match?(/\A[0-9a-f]{64}\z/)
         invalid!("invalid_repository", "repository dirty-state digest is invalid")
+      end
+      unless dirty_digest == expected_dirty_digest
+        invalid!("invalid_repository", "repository dirty-state digest does not match status entries")
       end
       {"root" => root, "head" => head, "dirty" => dirty,
        "dirty_digest" => dirty_digest, "status" => status.dup}
@@ -370,22 +401,26 @@ module AdversarialReview
         invalid!("invalid_findings", "findings and semantic groups have invalid shapes")
       end
       fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
-      canonical = findings.each_with_index.map do |finding, index|
+      previous_suffix = 0
+      canonical = findings.map do |finding|
         require_hash!(finding, "finding")
-        expected_id = format("AR-%s-%03d", fingerprint, index + 1)
-        unless finding.fetch("id") == expected_id
+        finding_id = finding.fetch("id")
+        match = finding_id.match(/\AAR-#{Regexp.escape(fingerprint)}-(\d{3,})\z/) if finding_id.is_a?(String)
+        suffix = match && Integer(match[1], 10)
+        unless suffix && suffix.positive? && suffix > previous_suffix
           invalid!(
-            "invalid_findings", "finding ID is not deterministic for this run",
-            {"expected" => expected_id, "observed" => finding["id"]}
+            "invalid_findings", "finding IDs must have the run fingerprint and stable ascending suffixes",
+            {"observed" => finding_id, "previous_suffix" => previous_suffix}
           )
         end
+        previous_suffix = suffix
         reported = finding.fetch("reported")
         invalid!("invalid_findings", "finding reported flag must be boolean") unless [true, false].include?(reported)
 
         severity = validate_enum!("finding severity", finding.fetch("severity"), SEVERITIES)
         confidence = finding.fetch("confidence")
         unless confidence.is_a?(Numeric) && confidence >= 0 && confidence <= 1
-          invalid!("invalid_findings", "finding confidence is outside 0..1", {"id" => expected_id})
+          invalid!("invalid_findings", "finding confidence is outside 0..1", {"id" => finding_id})
         end
         path = nonempty_string!(finding.fetch("path"), "finding path")
         line = finding.fetch("line")
@@ -394,20 +429,24 @@ module AdversarialReview
         unless sources.is_a?(Array) && !sources.empty? && sources.all? do |item|
                  item.is_a?(Hash) && item["angle"].is_a?(String) && !item["angle"].strip.empty?
                end
-          invalid!("invalid_findings", "finding sources are incomplete", {"id" => expected_id})
+          invalid!("invalid_findings", "finding sources are incomplete", {"id" => finding_id})
         end
         source_angles = sources.map { |item| item.fetch("angle") }.uniq.sort
         unless (source_angles - recorded_angles).empty?
           invalid!(
             "invalid_findings", "finding source angle is absent from run provenance",
-            {"id" => expected_id, "unknown_angles" => source_angles - recorded_angles}
+            {"id" => finding_id, "unknown_angles" => source_angles - recorded_angles}
           )
         end
         group = groups.fetch(finding.fetch("group_id"))
         require_hash!(group, "semantic group")
         text = nonempty_string!(group.fetch("summary"), "finding summary")
+        round = finding.fetch("round")
+        unless [1, 2].include?(round)
+          invalid!("invalid_findings", "finding round must be one or two", {"id" => finding_id})
+        end
         canonical_finding = {
-          "id" => expected_id,
+          "id" => finding_id,
           "category" => nonempty_string!(finding.fetch("category"), "finding category"),
           "severity" => severity,
           "location" => "#{path}:#{line}",
@@ -417,23 +456,24 @@ module AdversarialReview
           "consequence" => nonempty_string!(finding.fetch("consequence"), "finding consequence"),
           "confidence" => confidence,
           "source_angles" => source_angles,
-          "round" => finding.fetch("round"),
+          "round" => round,
           "state" => validate_enum!(
             "finding state", finding.fetch("state"), %w[pending resolved rejected contested stuck]
           )
         }
-        reported ? canonical_finding : nil
+        canonical_finding.merge("reported" => reported)
       rescue KeyError => error
         invalid!("invalid_findings", "finding provenance is incomplete", {"field" => error.key})
-      end.compact
-      canonical.sort_by { |finding| finding.fetch("id") }
+      end
+      canonical
     end
 
     def canonical_actions(actions, findings)
       require_hash!(actions, "author actions")
       known = findings.map { |finding| finding.fetch("id") }
       actions.each_with_object({}) do |(finding_id, action), canonical|
-        invalid!("invalid_actions", "author action refers to an unknown reported finding") unless known.include?(finding_id)
+        invalid!("invalid_actions", "author action refers to an unknown finding") unless known.include?(finding_id)
+        action = {"status" => action} if action.is_a?(String)
         require_hash!(action, "author action")
         status = validate_enum!("author action", action.fetch("status"), %w[fixed rejected])
         canonical[finding_id] = {
@@ -450,11 +490,40 @@ module AdversarialReview
       require_hash!(resolutions, "resolution checks")
       known = findings.map { |finding| finding.fetch("id") }
       resolutions.each_with_object({}) do |(finding_id, status), canonical|
-        invalid!("invalid_resolutions", "resolution refers to an unknown reported finding") unless known.include?(finding_id)
+        invalid!("invalid_resolutions", "resolution refers to an unknown finding") unless known.include?(finding_id)
         canonical[finding_id] = validate_enum!(
           "resolution", status, %w[pending resolved rejected contested stuck]
         )
       end.sort.to_h
+    end
+
+    def validate_dispositions!(mode, findings, actions, resolutions)
+      findings.each do |finding|
+        finding_id = finding.fetch("id")
+        action = actions[finding_id]
+        resolution = resolutions[finding_id]
+        pairing = State.terminal_pairing(action, resolution)
+        if pairing == :invalid
+          invalid!(
+            "invalid_disposition", "author action conflicts with the finding resolution",
+            {"id" => finding_id, "state" => finding.fetch("state"), "resolution" => resolution}
+          )
+        end
+        if resolution && resolution != finding.fetch("state")
+          invalid!(
+            "invalid_disposition", "finding state does not match its resolution",
+            {"id" => finding_id, "state" => finding.fetch("state"), "resolution" => resolution}
+          )
+        end
+        next unless finding.fetch("reported") && %w[resolved rejected].include?(finding.fetch("state"))
+        next if pairing == :complete
+
+        invalid!(
+          "invalid_disposition", "terminal reported finding lacks a complete author disposition",
+          {"id" => finding_id, "mode" => mode}
+        )
+      end
+      true
     end
 
     def canonical_evidence_gaps(gaps)
@@ -471,12 +540,80 @@ module AdversarialReview
       end.sort_by { |gap| gap.fetch("subject_id") }
     end
 
-    def canonical_metrics(metrics, findings)
+    def canonical_overflow(overflow, gaps, findings)
+      require_hash!(overflow, "overflow")
+      unless overflow.keys.sort == %w[by_category_severity items total]
+        invalid!("invalid_overflow", "overflow has unexpected or missing fields")
+      end
+      total = overflow.fetch("total")
+      items = overflow.fetch("items")
+      counts = overflow.fetch("by_category_severity")
+      unless total.is_a?(Integer) && total >= 0 && items.is_a?(Array) &&
+             items.all? { |id| id.is_a?(String) } && items.uniq == items && counts.is_a?(Hash) &&
+             counts.all? { |key, count| key.is_a?(String) && !key.empty? && count.is_a?(Integer) && count.positive? }
+        invalid!("invalid_overflow", "overflow values have invalid shapes")
+      end
+      unreported = findings.reject { |finding| finding.fetch("reported") }
+      expected_ids = unreported.map { |finding| finding.fetch("id") }
+      expected_counts = Hash.new(0)
+      unreported.each do |finding|
+        expected_counts["#{finding.fetch("category")}:#{finding.fetch("severity")}"] += 1
+      end
+      expected_counts = expected_counts.sort.to_h
+      unless total == expected_ids.length && items.sort == expected_ids.sort &&
+             counts == expected_counts && total == counts.values.inject(0, :+)
+        invalid!(
+          "invalid_overflow", "overflow does not match unreported promoted findings",
+          {"expected_items" => expected_ids, "observed_items" => items}
+        )
+      end
+
+      require_hash!(gaps, "overflow evidence gaps")
+      canonical_gaps = gaps.keys.sort.each_with_object({}) do |finding_id, canonical|
+        finding = unreported.find { |entry| entry.fetch("id") == finding_id }
+        gap = gaps.fetch(finding_id)
+        unless finding && %w[MEDIUM LOW].include?(finding.fetch("severity")) && gap.is_a?(Hash) &&
+               gap.keys.sort == %w[rationale recorded_at_stage round]
+          invalid!("invalid_overflow", "overflow evidence gap has an invalid subject or shape", {"id" => finding_id})
+        end
+        rationale = nonempty_string!(gap.fetch("rationale"), "overflow evidence-gap rationale")
+        stage = gap.fetch("recorded_at_stage")
+        round = gap.fetch("round")
+        unless State::TRANSITIONS.key?(stage) && [1, 2].include?(round)
+          invalid!("invalid_overflow", "overflow evidence-gap stage or round is invalid", {"id" => finding_id})
+        end
+        canonical[finding_id] = {
+          "rationale" => rationale, "recorded_at_stage" => stage, "round" => round
+        }
+      end
+      details = unreported.map do |finding|
+        finding.reject { |key, _value| key == "reported" }
+      end
+      [
+        {
+          "total" => total,
+          "by_category_severity" => counts.keys.sort.each_with_object({}) { |key, result| result[key] = counts[key] },
+          "items" => expected_ids,
+          "findings" => details
+        },
+        canonical_gaps
+      ]
+    rescue KeyError => error
+      invalid!("invalid_overflow", "overflow provenance is incomplete", {"field" => error.key})
+    end
+
+    def canonical_metrics(metrics, findings, overflow)
       require_hash!(metrics, "metrics")
+      normalized_values = {}
       metrics.each do |key, value|
         unless key.is_a?(String) && (value.nil? || value.is_a?(Numeric) || value.is_a?(String) || [true, false].include?(value))
           invalid!("invalid_metrics", "metric values must be scalar", {"field" => key})
         end
+        normalized_key = normalize_metric_text(key)
+        if normalized_key.empty? || normalized_values.key?(normalized_key)
+          invalid!("invalid_metrics", "metric names collide or normalize to empty", {"field" => key})
+        end
+        normalized_values[normalized_key] = value.is_a?(String) ? normalize_metric_text(value) : value
       end
       by_severity = SEVERITIES.each_with_object({}) do |severity, counts|
         counts[severity] = findings.count { |finding| finding.fetch("severity") == severity }
@@ -484,14 +621,23 @@ module AdversarialReview
       {
         "reported_findings" => findings.length,
         "by_severity" => by_severity,
-        "values" => metrics.keys.sort.each_with_object({}) { |key, result| result[key] = metrics[key] }
+        "overflow_total" => overflow.fetch("total"),
+        "overflow_by_category_severity" => deep_copy(overflow.fetch("by_category_severity")),
+        "values" => normalized_values.keys.sort.each_with_object({}) do |key, result|
+          result[key] = normalized_values[key]
+        end
       }
     end
 
-    def verdict_for(mode, findings, evidence_gaps)
+    def verdict_for(mode, findings, evidence_gaps, overflow, overflow_gaps)
       return "REPORT ONLY - #{findings.length} #{findings.length == 1 ? "finding" : "findings"}" if mode == "critique"
 
       open = findings.count { |finding| %w[pending contested stuck].include?(finding.fetch("state")) }
+      overflow_blockers = overflow.fetch("findings").count do |finding|
+        %w[CRITICAL HIGH].include?(finding.fetch("severity")) ||
+          !overflow_gaps.key?(finding.fetch("id"))
+      end
+      open += overflow_blockers
       return "DID NOT CONVERGE - #{open} findings remain open" if open.positive?
       return "PASSED WITH OPEN QUESTIONS" unless evidence_gaps.empty?
 
@@ -500,7 +646,9 @@ module AdversarialReview
 
     def changelog(actions, findings)
       by_id = findings.each_with_object({}) { |finding, result| result[finding.fetch("id")] = finding }
-      actions.select { |_id, action| action.fetch("status") == "fixed" }.map do |finding_id, action|
+      actions.select do |finding_id, action|
+        by_id.key?(finding_id) && action.fetch("status") == "fixed"
+      end.map do |finding_id, action|
         {
           "id" => finding_id,
           "summary" => by_id.fetch(finding_id).fetch("summary"),
@@ -512,7 +660,9 @@ module AdversarialReview
 
     def rejected_findings(actions, findings)
       by_id = findings.each_with_object({}) { |finding, result| result[finding.fetch("id")] = finding }
-      actions.select { |_id, action| action.fetch("status") == "rejected" }.map do |finding_id, action|
+      actions.select do |finding_id, action|
+        by_id.key?(finding_id) && action.fetch("status") == "rejected"
+      end.map do |finding_id, action|
         {
           "id" => finding_id,
           "summary" => by_id.fetch(finding_id).fetch("summary"),
@@ -577,7 +727,35 @@ module AdversarialReview
       metrics.fetch("by_severity").each do |severity, count|
         lines << "- #{severity}: #{count}"
       end
-      metrics.fetch("values").each { |name, value| lines << "- #{name}: #{display(value)}" }
+      lines << "- Overflow total: #{metrics.fetch("overflow_total")}"
+      metrics.fetch("overflow_by_category_severity").each do |category_severity, count|
+        lines << "- Overflow #{category_severity}: #{count}"
+      end
+      metrics.fetch("values").each do |name, value|
+        lines << "- #{markdown_text(name)}: #{markdown_text(value)}"
+      end
+      lines << ""
+    end
+
+    def append_overflow(lines, overflow, gaps)
+      return if overflow.fetch("total").zero?
+
+      lines << "## Overflow"
+      lines << ""
+      overflow.fetch("by_category_severity").each do |category_severity, count|
+        lines << "- #{markdown_text(category_severity)}: #{count}"
+      end
+      lines << ""
+      lines << "| ID | Category | Severity | Location | Sources | Summary | Nonblocking rationale |"
+      lines << "|---|---|---|---|---|---|---|"
+      overflow.fetch("findings").each do |finding|
+        gap = gaps[finding.fetch("id")]
+        lines << table_row([
+          finding.fetch("id"), finding.fetch("category"), finding.fetch("severity"),
+          finding.fetch("location"), finding.fetch("source_angles").join(", "),
+          finding.fetch("summary"), gap && gap.fetch("rationale")
+        ])
+      end
       lines << ""
     end
 
@@ -702,14 +880,14 @@ module AdversarialReview
       file = Atomic.open_relative(directory, name, flags)
       begin
         Atomic.reject_nonregular_handle(file, name, "unsafe_report")
-        if file.stat.size > MAX_REPORT_BYTES
+        if file.stat.size > report_byte_limit
           raise State::Error.new(
             "report_too_large", "existing report exceeds the size limit",
-            {"path" => name, "max_bytes" => MAX_REPORT_BYTES}, 3
+            {"path" => name, "max_bytes" => report_byte_limit}, 3
           )
         end
-        bytes = file.read(MAX_REPORT_BYTES + 1)
-        if bytes.bytesize > MAX_REPORT_BYTES
+        bytes = file.read(report_byte_limit + 1)
+        if bytes.bytesize > report_byte_limit
           raise State::Error.new("report_too_large", "existing report exceeds the size limit", {"path" => name}, 3)
         end
         text = bytes.dup.force_encoding(Encoding::UTF_8)
@@ -775,7 +953,8 @@ module AdversarialReview
       require_hash!(value, "summary")
       required = %w[
         schema_version run_id mode tier output verdict findings metrics changelog
-        rejected_findings open_questions degraded_capabilities provenance resolution_checks
+        author_actions rejected_findings open_questions overflow overflow_evidence_gaps
+        degraded_capabilities provenance resolution_checks
       ]
       missing = required.reject { |key| value.key?(key) }
       invalid!("invalid_summary", "render summary is incomplete", {"missing" => missing}) unless missing.empty?
@@ -784,15 +963,39 @@ module AdversarialReview
       mode = validate_enum!("mode", value.fetch("mode"), %w[critique revise])
       validate_enum!("tier", value.fetch("tier"), %w[default high ultra])
       validate_enum!("output", value.fetch("output"), %w[chat file both])
-      findings = validate_render_findings!(value.fetch("findings"), run_id)
-      validate_render_metrics!(value.fetch("metrics"), findings)
+      findings = validate_render_findings!(value.fetch("findings"), run_id, "reported")
+      overflow = value.fetch("overflow")
+      require_hash!(overflow, "render overflow")
+      unless overflow.keys.sort == %w[by_category_severity findings items total]
+        invalid!("invalid_summary", "render overflow has unexpected or missing fields")
+      end
+      overflow_findings = validate_render_findings!(
+        overflow.fetch("findings"), run_id, "overflow"
+      )
+      all_findings = (findings.map { |finding| finding.merge("reported" => true) } +
+        overflow_findings.map { |finding| finding.merge("reported" => false) })
+        .sort_by { |finding| finding_id_suffix(finding.fetch("id"), run_id) }
+      ids = all_findings.map { |finding| finding.fetch("id") }
+      invalid!("invalid_summary", "render finding IDs must be unique") unless ids.uniq == ids
+      canonical_overflow_value, overflow_evidence_gaps = canonical_overflow(
+        overflow.reject { |key, _value| key == "findings" },
+        value.fetch("overflow_evidence_gaps"), all_findings
+      )
+      unless overflow == canonical_overflow_value &&
+             value.fetch("overflow_evidence_gaps") == overflow_evidence_gaps
+        invalid!("invalid_summary", "render overflow is not canonical")
+      end
+      actions = canonical_actions(value.fetch("author_actions"), all_findings)
+      resolutions = canonical_resolutions(value.fetch("resolution_checks"), all_findings)
+      unless value.fetch("author_actions") == actions && value.fetch("resolution_checks") == resolutions
+        invalid!("invalid_summary", "render dispositions are not canonical")
+      end
+      validate_dispositions!(mode, all_findings, actions, resolutions)
+      validate_render_metrics!(value.fetch("metrics"), findings, overflow)
       %w[changelog rejected_findings open_questions].each do |collection|
         unless value.fetch(collection).is_a?(Array) && value.fetch(collection).all? { |entry| entry.is_a?(Hash) }
           invalid!("invalid_summary", "render summary #{collection} must be an array of objects")
         end
-      end
-      unless value.fetch("resolution_checks").is_a?(Hash)
-        invalid!("invalid_summary", "render summary resolution checks must be an object")
       end
       provenance = value.fetch("provenance")
       require_hash!(provenance, "provenance")
@@ -835,7 +1038,7 @@ module AdversarialReview
         invalid!("invalid_summary", "render summary angle order is not canonical")
       end
       recorded_angles = angles.map { |angle| angle.fetch("name") }
-      findings.each do |finding|
+      (findings + overflow_findings).each do |finding|
         unknown = finding.fetch("source_angles") - recorded_angles
         unless unknown.empty?
           invalid!(
@@ -860,20 +1063,9 @@ module AdversarialReview
       unless retries.is_a?(Integer) && retries == angles.sum { |angle| angle.fetch("retries") }
         invalid!("invalid_summary", "render summary retry total is invalid")
       end
-      ordinary_verdict = if mode == "critique"
-                           "REPORT ONLY - #{findings.length} #{findings.length == 1 ? "finding" : "findings"}"
-                         else
-                           open = findings.count do |finding|
-                             %w[pending contested stuck].include?(finding.fetch("state"))
-                           end
-                           if open.positive?
-                             "DID NOT CONVERGE - #{open} findings remain open"
-                           elsif value.fetch("open_questions").empty?
-                             "PASSED"
-                           else
-                             "PASSED WITH OPEN QUESTIONS"
-                           end
-                         end
+      ordinary_verdict = verdict_for(
+        mode, findings, value.fetch("open_questions"), overflow, overflow_evidence_gaps
+      )
       gate = Capabilities.gate(
         capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
       )
@@ -895,13 +1087,16 @@ module AdversarialReview
       invalid!("invalid_summary", "render summary is structurally invalid", {"cause" => error.message})
     end
 
-    def validate_render_findings!(findings, run_id)
-      invalid!("invalid_summary", "render summary findings must be an array") unless findings.is_a?(Array)
-      fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
-      findings.each_with_index do |finding, index|
+    def validate_render_findings!(findings, run_id, collection)
+      invalid!("invalid_summary", "render #{collection} findings must be an array") unless findings.is_a?(Array)
+      previous_suffix = 0
+      findings.each do |finding|
         require_hash!(finding, "render finding")
-        expected_id = format("AR-%s-%03d", fingerprint, index + 1)
-        invalid!("invalid_summary", "render finding ID is invalid") unless finding.fetch("id") == expected_id
+        suffix = finding_id_suffix(finding.fetch("id"), run_id)
+        unless suffix > previous_suffix
+          invalid!("invalid_summary", "render finding IDs must have stable ascending suffixes")
+        end
+        previous_suffix = suffix
         %w[category location path summary consequence state].each do |field|
           nonempty_string!(finding.fetch(field), "render finding #{field}")
         end
@@ -927,25 +1122,22 @@ module AdversarialReview
       findings
     end
 
-    def validate_render_metrics!(metrics, findings)
+    def validate_render_metrics!(metrics, findings, overflow)
       require_hash!(metrics, "render metrics")
-      unless metrics.fetch("reported_findings") == findings.length
-        invalid!("invalid_summary", "render metric finding total is inconsistent")
-      end
-      by_severity = metrics.fetch("by_severity")
-      require_hash!(by_severity, "render severity metrics")
-      expected = SEVERITIES.each_with_object({}) do |severity, counts|
-        counts[severity] = findings.count { |finding| finding.fetch("severity") == severity }
-      end
-      invalid!("invalid_summary", "render severity metrics are inconsistent") unless by_severity == expected
       values = metrics.fetch("values")
-      require_hash!(values, "render metric values")
-      values.each do |key, value|
-        unless key.is_a?(String) && (value.nil? || value.is_a?(Numeric) || value.is_a?(String) || [true, false].include?(value))
-          invalid!("invalid_summary", "render metric value is invalid", {"field" => key})
-        end
-      end
+      expected = canonical_metrics(values, findings, overflow)
+      invalid!("invalid_summary", "render metrics are inconsistent or unsafe") unless metrics == expected
       true
+    end
+
+    def finding_id_suffix(finding_id, run_id)
+      fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
+      match = finding_id.match(/\AAR-#{Regexp.escape(fingerprint)}-(\d{3,})\z/) if finding_id.is_a?(String)
+      suffix = match && Integer(match[1], 10)
+      unless suffix&.positive?
+        invalid!("invalid_summary", "render finding ID is invalid", {"id" => finding_id})
+      end
+      suffix
     end
 
     def validate_run_id!(run_id)
@@ -1017,8 +1209,20 @@ module AdversarialReview
       display(value).gsub(/\r\n?|\n/, " ")
     end
 
+    def normalize_metric_text(value)
+      value.gsub(/[\x00-\x1f\x7f]+/, " ")
+           .gsub("<", "&lt;")
+           .gsub(">", "&gt;")
+           .gsub(/\s+/, " ")
+           .strip
+    end
+
     def display(value)
       value.nil? ? "unavailable" : value.to_s
+    end
+
+    def report_byte_limit
+      MAX_REPORT_BYTES
     end
 
     def deep_copy(value)

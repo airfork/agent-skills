@@ -180,6 +180,128 @@ class AdversarialReviewReportingTest < Minitest::Test
     assert_equal "invalid_findings", error.code
   end
 
+  def test_reported_stable_ids_may_have_gaps_after_task_five_reranking
+    source = summary_source
+    source.fetch("findings").first["reported"] = false
+    add_finding(source, 2, reported: true, severity: "CRITICAL")
+    source["overflow"] = {
+      "total" => 1,
+      "by_category_severity" => {"Omission:HIGH" => 1},
+      "items" => [expected_finding_id("run-report-1")]
+    }
+
+    summary = AdversarialReview::Reporting.summary(source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+
+    assert_equal [expected_finding_id("run-report-1", 2)],
+                 summary.fetch("findings").map { |finding| finding.fetch("id") }
+    assert_includes markdown, expected_finding_id("run-report-1", 2)
+  end
+
+  def test_revise_pass_requires_a_complete_consistent_terminal_disposition
+    valid = resolved_revise_source
+    finding_id = expected_finding_id("run-report-1")
+    valid["author_actions"] = {finding_id => "fixed"}
+    assert_equal "PASSED", AdversarialReview::Reporting.summary(valid).fetch("verdict")
+
+    contradictory = resolved_revise_source
+    contradictory["author_actions"] = {finding_id => "rejected"}
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(contradictory)
+    end
+    assert_equal "invalid_disposition", error.code
+
+    missing = resolved_revise_source
+    missing["author_actions"] = {}
+    missing["resolution_checks"] = {}
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(missing)
+    end
+    assert_equal "invalid_disposition", error.code
+  end
+
+  def test_finding_state_must_match_its_terminal_resolution
+    source = resolved_revise_source
+    finding_id = expected_finding_id("run-report-1")
+    source.fetch("findings").first["state"] = "rejected"
+    source["resolution_checks"] = {finding_id => "resolved"}
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_disposition", error.code
+  end
+
+  def test_critique_renders_unproven_evidence_gaps_in_markdown_and_chat
+    source = summary_source(
+      "evidence_gaps" => [{
+        "subject_id" => "G-unproven",
+        "reason" => "UNPROVEN rollback ownership",
+        "evidence" => "The reviewed section names no accountable owner."
+      }]
+    )
+
+    summary = AdversarialReview::Reporting.summary(source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+    chat = AdversarialReview::Reporting.chat_payload(summary)
+
+    assert_includes markdown, "## Open Questions"
+    assert_includes markdown, "UNPROVEN rollback ownership"
+    assert_includes markdown, "The reviewed section names no accountable owner."
+    assert_equal summary.fetch("open_questions"), chat.fetch("open_questions")
+  end
+
+  def test_overflow_and_nonblocking_rationales_survive_every_output
+    source = summary_source
+    overflow_id = add_finding(source, 2, reported: false, severity: "MEDIUM")
+    source["overflow"] = {
+      "total" => 1,
+      "by_category_severity" => {"Omission:MEDIUM" => 1},
+      "items" => [overflow_id]
+    }
+    source["overflow_evidence_gaps"] = {
+      overflow_id => {
+        "rationale" => "Reviewed and nonblocking at the report cap.",
+        "recorded_at_stage" => "resolving",
+        "round" => 1
+      }
+    }
+
+    summary = AdversarialReview::Reporting.summary(source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+    chat = AdversarialReview::Reporting.chat_payload(summary)
+
+    assert_equal 1, summary.dig("overflow", "total")
+    assert_equal({"Omission:MEDIUM" => 1}, summary.dig("overflow", "by_category_severity"))
+    assert_equal "Reviewed and nonblocking at the report cap.",
+                 summary.dig("overflow_evidence_gaps", overflow_id, "rationale")
+    assert_equal 1, summary.dig("metrics", "overflow_total")
+    assert_equal summary.fetch("overflow"), chat.fetch("overflow")
+    assert_equal summary.fetch("overflow_evidence_gaps"), chat.fetch("overflow_evidence_gaps")
+    assert_includes markdown, "## Overflow"
+    assert_includes markdown, "Omission:MEDIUM: 1"
+    assert_includes markdown, "Reviewed and nonblocking at the report cap."
+  end
+
+  def test_overflow_is_required_and_must_match_unreported_findings
+    missing = summary_source
+    missing.delete("overflow")
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(missing)
+    end
+    assert_equal "invalid_summary", error.code
+
+    mismatched = summary_source
+    mismatched["overflow"] = {
+      "total" => 1, "by_category_severity" => {"Omission:LOW" => 1}, "items" => ["AR-bad-001"]
+    }
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(mismatched)
+    end
+    assert_equal "invalid_overflow", error.code
+  end
+
   def test_normalizes_low_level_shape_errors_into_actionable_reporting_errors
     source = summary_source("repository" => {"root" => "bad\0root"})
 
@@ -189,6 +311,52 @@ class AdversarialReviewReportingTest < Minitest::Test
 
     assert_equal "invalid_summary", error.code
     assert_includes error.details.fetch("cause"), "null byte"
+  end
+
+  def test_rejects_an_invalid_finding_round_before_summary_returns
+    source = summary_source
+    source.fetch("findings").first["round"] = 3
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_findings", error.code
+  end
+
+  def test_repository_dirty_metadata_and_digest_must_agree
+    status = [" M docs/spec.md"]
+    cases = [
+      {"dirty" => false, "status" => status},
+      {"dirty" => true, "status" => []},
+      {"dirty" => true, "status" => status, "dirty_digest" => "0" * 64}
+    ]
+
+    cases.each do |repository_override|
+      source = summary_source("repository" => repository_override)
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.summary(source)
+      end
+      assert_equal "invalid_repository", error.code
+    end
+  end
+
+  def test_metric_names_and_strings_cannot_inject_markdown_or_run_markers
+    source = summary_source(
+      "metrics" => {
+        "safe\n## Injected" => "value\n<!-- adversarial-review-run:fake:v1 -->"
+      }
+    )
+
+    summary = AdversarialReview::Reporting.summary(source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+
+    refute summary.dig("metrics", "values").keys.any? { |key| key.include?("\n") || key.include?("<!--") }
+    refute summary.dig("metrics", "values").values.any? { |value|
+      value.is_a?(String) && (value.include?("\n") || value.include?("<!--"))
+    }
+    refute_includes markdown, "\n## Injected"
+    refute_includes markdown, "<!-- adversarial-review-run:fake:v1 -->"
   end
 
   def test_renders_critique_and_revise_sections_with_markdown_escaping
@@ -344,6 +512,29 @@ class AdversarialReviewReportingTest < Minitest::Test
 
       assert_equal before, File.binread(path)
       assert_empty Dir.children(directory).grep(/\.tmp-/)
+    end
+  end
+
+  def test_oversized_prospective_append_is_atomic_and_does_not_poison_the_lock
+    Dir.mktmpdir("adversarial-review-report") do |directory|
+      path = File.join(directory, "review.md")
+      first = AdversarialReview::Reporting.summary(summary_source)
+      second = AdversarialReview::Reporting.summary(summary_source("run_id" => "run-report-2"))
+      third = AdversarialReview::Reporting.summary(summary_source("run_id" => "run-report-3"))
+      AdversarialReview::Reporting.append(path, first)
+      before = File.binread(path)
+      constrained_limit = before.bytesize + 32
+
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.stub(:report_byte_limit, constrained_limit) do
+          AdversarialReview::Reporting.append(path, second)
+        end
+      end
+
+      assert_equal "report_too_large", error.code
+      assert_equal before, File.binread(path)
+      AdversarialReview::Reporting.append(path, third)
+      assert_includes File.binread(path), "adversarial-review-run:run-report-3:v1"
     end
   end
 
@@ -521,6 +712,8 @@ class AdversarialReviewReportingTest < Minitest::Test
       "author_actions" => {},
       "resolution_checks" => {},
       "evidence_gaps" => [],
+      "overflow" => {"total" => 0, "by_category_severity" => {}, "items" => []},
+      "overflow_evidence_gaps" => {},
       "metrics" => {"tbd_count" => 2, "coverage_percent" => 87.5, "document_lines" => 120}
     }
     deep_merge(source, overrides)
@@ -558,8 +751,26 @@ class AdversarialReviewReportingTest < Minitest::Test
     source
   end
 
-  def expected_finding_id(run_id)
-    "AR-#{Digest::SHA256.hexdigest(run_id)[0, 8]}-001"
+  def expected_finding_id(run_id, index = 1)
+    format("AR-%s-%03d", Digest::SHA256.hexdigest(run_id)[0, 8], index)
+  end
+
+  def add_finding(source, index, reported:, severity:)
+    finding = JSON.parse(JSON.generate(source.fetch("findings").first))
+    finding_id = expected_finding_id(source.fetch("run_id"), index)
+    finding["id"] = finding_id
+    finding["group_id"] = format("G-%03d", index)
+    finding["reported"] = reported
+    finding["severity"] = severity
+    finding["line"] = 10 + index
+    finding.fetch("sources").each do |item|
+      item["candidate_id"] = "#{item.fetch("candidate_id")}-#{index}"
+    end
+    source.fetch("findings") << finding
+    source.fetch("semantic_groups")[finding.fetch("group_id")] = {
+      "summary" => "Additional finding #{index}"
+    }
+    finding_id
   end
 
   def deep_merge(left, right)
