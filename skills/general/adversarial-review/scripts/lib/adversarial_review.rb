@@ -5,3 +5,4 @@ module AdversarialReview
 end
 
 require_relative "adversarial_review/schema"
+require_relative "adversarial_review/manifest"
