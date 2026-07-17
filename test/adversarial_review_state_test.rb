@@ -34,9 +34,11 @@ class AdversarialReviewStateTest < Minitest::Test
       %w[events results tasks].each do |entry|
         assert_equal 0o700, File.stat(File.join(run_dir, entry)).mode & 0o777
       end
-      %w[manifest.json state.json .state.lock].each do |entry|
+      %w[manifest.json state.json .state.lock .state.lock.anchor].each do |entry|
         assert_equal 0o600, File.stat(File.join(run_dir, entry)).mode & 0o777
       end
+      assert_equal File.stat(File.join(run_dir, ".state.lock")).ino,
+                   File.stat(File.join(run_dir, ".state.lock.anchor")).ino
     end
   end
 
@@ -140,6 +142,64 @@ class AdversarialReviewStateTest < Minitest::Test
 
       state = AdversarialReview::State.create(run_dir, manifest)
       assert_equal "prepared", state.to_h.fetch("stage")
+    end
+  end
+
+  def test_bootstrap_rollback_does_not_delete_a_substituted_run_directory
+    Dir.mktmpdir("adversarial-review-state") do |directory|
+      run_dir = File.join(directory, "run")
+      moved_run_dir = File.join(directory, "run-created-and-moved")
+      replacement_file = File.join(run_dir, "unrelated.txt")
+      original_write_json = AdversarialReview::Atomic.method(:write_json)
+      writes = 0
+      writer = lambda do |path, value|
+        writes += 1
+        if writes == 2
+          File.rename(run_dir, moved_run_dir)
+          Dir.mkdir(run_dir, 0o700)
+          File.binwrite(replacement_file, "unrelated replacement bytes")
+          raise IOError, "injected failure after run substitution"
+        end
+
+        original_write_json.call(path, value)
+      end
+
+      error = AdversarialReview::Atomic.stub(:write_json, writer) do
+        assert_raises(IOError) { AdversarialReview::State.create(run_dir, manifest) }
+      end
+
+      assert_equal "injected failure after run substitution", error.message
+      assert File.directory?(run_dir), "rollback deleted the substituted directory"
+      assert_equal "unrelated replacement bytes", File.binread(replacement_file)
+      assert File.directory?(moved_run_dir), "rollback chased the moved created directory"
+      assert File.exist?(File.join(moved_run_dir, "manifest.json"))
+      assert File.exist?(File.join(moved_run_dir, ".state.lock.anchor"))
+    end
+  end
+
+  def test_anchor_creation_failure_rolls_back_only_the_exact_created_run
+    Dir.mktmpdir("adversarial-review-state") do |directory|
+      run_dir = File.join(directory, "run")
+      moved_run_dir = File.join(directory, "run-created-and-moved")
+      replacement_file = File.join(run_dir, "unrelated.txt")
+      original_create_lock = AdversarialReview::Atomic.method(:create_anchored_lock)
+      creator = lambda do |path|
+        original_create_lock.call(path)
+        File.rename(run_dir, moved_run_dir)
+        Dir.mkdir(run_dir, 0o700)
+        File.binwrite(replacement_file, "replacement during anchor failure")
+        raise IOError, "injected anchor publication failure"
+      end
+
+      error = AdversarialReview::Atomic.stub(:create_anchored_lock, creator) do
+        assert_raises(IOError) { AdversarialReview::State.create(run_dir, manifest) }
+      end
+
+      assert_equal "injected anchor publication failure", error.message
+      assert_equal "replacement during anchor failure", File.binread(replacement_file)
+      assert File.directory?(moved_run_dir)
+      assert_equal File.stat(File.join(moved_run_dir, ".state.lock")).ino,
+                   File.stat(File.join(moved_run_dir, ".state.lock.anchor")).ino
     end
   end
 
@@ -589,6 +649,75 @@ class AdversarialReviewStateTest < Minitest::Test
       File.write(outside, "")
       File.unlink(File.join(run_dir, ".state.lock"))
       File.symlink(outside, File.join(run_dir, ".state.lock"))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "unsafe_lock", error.code
+    end
+  end
+
+  def test_atomic_lock_rejects_replacement_while_original_inode_is_locked
+    with_state do |_state, run_dir|
+      lock_path = File.join(run_dir, ".state.lock")
+      anchor_path = File.join(run_dir, ".state.lock.anchor")
+      moved_lock_path = File.join(run_dir, ".state.lock.moved")
+
+      File.open(lock_path, File::RDWR) do |original_lock|
+        original_lock.flock(File::LOCK_EX)
+        File.rename(lock_path, moved_lock_path)
+        File.open(lock_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
+        File.chmod(0o600, lock_path)
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::Atomic.open_lock(lock_path, exclusive: true) do
+            flunk "replacement lock created a second lock domain"
+          end
+        end
+
+        assert_equal "unsafe_lock", error.code
+      ensure
+        original_lock.flock(File::LOCK_UN)
+      end
+    end
+  end
+
+  def test_load_rejects_a_missing_lock_anchor
+    with_state do |_state, run_dir|
+      lock_path = File.join(run_dir, ".state.lock")
+      anchor_path = File.join(run_dir, ".state.lock.anchor")
+      File.unlink(anchor_path)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "unsafe_lock", error.code
+    end
+  end
+
+  def test_load_rejects_a_replaced_lock_anchor
+    with_state do |_state, run_dir|
+      lock_path = File.join(run_dir, ".state.lock")
+      anchor_path = File.join(run_dir, ".state.lock.anchor")
+      File.unlink(anchor_path)
+      File.open(anchor_path, File::WRONLY | File::CREAT | File::EXCL, 0o600) {}
+      File.chmod(0o600, anchor_path)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "unsafe_lock", error.code
+    end
+  end
+
+  def test_load_rejects_a_lock_with_nonprivate_mode
+    with_state do |_state, run_dir|
+      lock_path = File.join(run_dir, ".state.lock")
+      anchor_path = File.join(run_dir, ".state.lock.anchor")
+      File.chmod(0o640, anchor_path)
 
       error = assert_raises(AdversarialReview::State::Error) do
         AdversarialReview::State.load(run_dir)

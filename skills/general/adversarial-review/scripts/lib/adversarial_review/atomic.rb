@@ -5,12 +5,15 @@ require "fcntl"
 
 module AdversarialReview
   module Atomic
+    AT_REMOVEDIR = RUBY_PLATFORM.include?("darwin") ? 0x0080 : 0x0200
+
     module Native
       extend Fiddle::Importer
 
       begin
         dlload Fiddle.dlopen(nil)
         extern "int openat(int, const char*, int, int)"
+        extern "int linkat(int, const char*, int, const char*, int)"
         extern "int renameat(int, const char*, int, const char*)"
         extern "int unlinkat(int, const char*, int)"
         AVAILABLE = true
@@ -133,9 +136,18 @@ module AdversarialReview
       true
     end
 
-    def unlink_relative(directory, name)
+    def link_relative(directory, source, destination)
+      validate_relative_name!(source)
+      validate_relative_name!(destination)
+      result = Native.linkat(directory.fileno, source, directory.fileno, destination, 0)
+      raise_native_error("linkat", "#{source} -> #{destination}") if result.negative?
+
+      true
+    end
+
+    def unlink_relative(directory, name, flags = 0)
       validate_relative_name!(name)
-      result = Native.unlinkat(directory.fileno, name, 0)
+      result = Native.unlinkat(directory.fileno, name, flags)
       raise_native_error("unlinkat", name) if result.negative? && Fiddle.last_error != Errno::ENOENT::Errno
 
       true
@@ -154,26 +166,87 @@ module AdversarialReview
 
     def open_lock(path, exclusive:)
       name = File.basename(path)
+      anchor_name = "#{name}.anchor"
       with_bound_directory(File.dirname(path), code: "unsafe_lock") do |parent, directory|
         flags = File::RDWR
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        file = open_relative(directory, name, flags)
+        file = nil
+        anchor = nil
         begin
-          reject_nonregular_handle(file, File.join(parent, name))
+          file = open_relative(directory, name, flags)
+          anchor = open_relative(directory, anchor_name, flags)
+          reject_lock_handle(file, File.join(parent, name))
+          reject_lock_handle(anchor, File.join(parent, anchor_name))
+          verify_lock_identity!(file, anchor, path)
           verify_directory_identity!(parent, directory, code: "unsafe_lock")
           acquired = file.flock(exclusive ? File::LOCK_EX : File::LOCK_SH)
           unless acquired
             raise_state_error("unsafe_lock", "state lock could not be acquired", {"path" => path})
           end
+          verify_lock_identity!(file, anchor, path)
           verify_directory_identity!(parent, directory, code: "unsafe_lock")
           yield file
         ensure
           file.flock(File::LOCK_UN) if file && !file.closed?
           file.close if file && !file.closed?
+          anchor.close if anchor && !anchor.closed?
         end
       end
     rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
       raise_state_error("unsafe_lock", "state lock is unsafe", {"path" => path, "cause" => error.class.name})
+    end
+
+    def create_anchored_lock(path)
+      name = File.basename(path)
+      anchor_name = "#{name}.anchor"
+      with_bound_directory(File.dirname(path), code: "unsafe_lock") do |parent, directory|
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        created_lock = false
+        created_anchor = false
+        published = false
+        begin
+          file = open_relative(directory, name, flags, 0o600)
+          created_lock = true
+          begin
+            file.chmod(0o600)
+            file.flush
+            file.fsync
+          ensure
+            file.close unless file.closed?
+          end
+          verify_directory_identity!(parent, directory, code: "unsafe_lock")
+          link_relative(directory, name, anchor_name)
+          created_anchor = true
+          directory.fsync
+          verify_directory_identity!(parent, directory, code: "unsafe_lock")
+          published = true
+        ensure
+          if !published && created_anchor
+            unlink_relative(directory, anchor_name)
+          end
+          if !published && created_lock
+            unlink_relative(directory, name)
+          end
+        end
+      end
+      path
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EEXIST,
+           Errno::EACCES, Errno::EPERM => error
+      raise_state_error("unsafe_lock", "state lock could not be created safely", {"path" => path, "cause" => error.class.name})
+    end
+
+    def verify_lock_identity!(file, anchor, path)
+      return true if same_identity?(file.stat, anchor.stat)
+
+      raise_state_error("unsafe_lock", "state lock identity does not match its anchor", {"path" => path})
+    end
+
+    def reject_lock_handle(file, path)
+      stat = file.stat
+      return true if stat.file? && (stat.mode & 0o777) == 0o600
+
+      raise_state_error("unsafe_lock", "state lock must be a private regular file", {"path" => path})
     end
 
     def read_json(path)

@@ -1,6 +1,5 @@
 require "open3"
 require "digest"
-require "fileutils"
 
 module AdversarialReview
   class State
@@ -138,7 +137,7 @@ module AdversarialReview
       canonical_run_dir = File.join(parent, File.basename(run_dir))
       begin
         Dir.mkdir(canonical_run_dir, 0o700)
-        created_run_dir = canonical_run_dir
+        created_run_dir = capture_created_run(canonical_run_dir)
       rescue Errno::EEXIST
         raise Error.new("run_exists", "review run already exists", {"run_dir" => canonical_run_dir})
       end
@@ -162,6 +161,10 @@ module AdversarialReview
     rescue StandardError
       cleanup_created_run(created_run_dir)
       raise
+    ensure
+      if created_run_dir && created_run_dir[:directory] && !created_run_dir[:directory].closed?
+        created_run_dir[:directory].close
+      end
     end
 
     def self.load(run_dir)
@@ -754,30 +757,57 @@ module AdversarialReview
     end
 
     def self.create_lock(path)
-      flags = File::WRONLY | File::CREAT | File::EXCL
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      File.open(path, flags, 0o600) do |file|
-        file.flush
-        file.fsync
-      end
-      File.chmod(0o600, path)
-      Atomic.fsync_directory(File.dirname(path))
+      Atomic.create_anchored_lock(path)
     end
 
-    def self.cleanup_created_run(path)
-      return unless path
+    def self.capture_created_run(path)
+      expected = File.lstat(path)
+      unless expected.directory? && !expected.symlink?
+        raise Error.new("unsafe_run_dir", "created review run is not a real directory", {"run_dir" => path})
+      end
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      directory = File.open(path, flags)
+      unless directory.stat.directory? && Atomic.same_identity?(expected, directory.stat)
+        directory.close
+        raise Error.new("unsafe_run_dir", "created review run changed while it was opened", {"run_dir" => path})
+      end
+      {path: path, dev: expected.dev, ino: expected.ino, directory: directory}
+    end
 
-      stat = File.lstat(path)
-      return unless stat.directory? && !stat.symlink?
+    def self.cleanup_created_run(created)
+      return unless created && created_run_at_original_path?(created)
 
-      FileUtils.remove_entry_secure(path)
+      directory = created.fetch(:directory)
+      %w[state.json manifest.json .state.lock.anchor .state.lock].each do |entry|
+        return unless created_run_at_original_path?(created)
+
+        Atomic.unlink_relative(directory, entry)
+      end
+      %w[tasks results events].each do |entry|
+        return unless created_run_at_original_path?(created)
+
+        Atomic.unlink_relative(directory, entry, Atomic::AT_REMOVEDIR)
+      end
+      directory.fsync
+      return unless created_run_at_original_path?(created)
+
+      Dir.rmdir(created.fetch(:path))
     rescue Errno::ENOENT
       nil
     rescue SystemCallError => error
       raise Error.new(
         "cleanup_failed", "failed review creation could not remove its new run directory",
-        {"run_dir" => path, "cause" => error.class.name}
+        {"run_dir" => created && created[:path], "cause" => error.class.name}
       )
+    end
+
+    def self.created_run_at_original_path?(created)
+      current = File.lstat(created.fetch(:path))
+      current.directory? && !current.symlink? &&
+        current.dev == created.fetch(:dev) && current.ino == created.fetch(:ino)
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP
+      false
     end
 
     def self.target_digests(manifest)
