@@ -1,5 +1,6 @@
 require "open3"
 require "digest"
+require "fileutils"
 
 module AdversarialReview
   class State
@@ -88,28 +89,10 @@ module AdversarialReview
     end
 
     def self.create(run_dir, manifest)
+      created_run_dir = nil
       run_id = manifest.fetch("run_id")
       validate_run_id!(run_id)
       digests = target_digests(manifest)
-      expanded_run_dir = Atomic.normalize_root_alias(File.expand_path(run_dir))
-      if File.symlink?(expanded_run_dir)
-        raise Error.new("unsafe_run_dir", "review run path must not be a symlink", {"run_dir" => expanded_run_dir})
-      end
-      parent = Atomic.secure_directory(File.dirname(expanded_run_dir))
-      canonical_run_dir = File.join(parent, File.basename(run_dir))
-      begin
-        Dir.mkdir(canonical_run_dir, 0o700)
-      rescue Errno::EEXIST
-        raise Error.new("run_exists", "review run already exists", {"run_dir" => canonical_run_dir})
-      end
-      File.chmod(0o700, canonical_run_dir)
-      %w[tasks results events].each do |entry|
-        path = File.join(canonical_run_dir, entry)
-        Dir.mkdir(path, 0o700)
-        File.chmod(0o700, path)
-      end
-      lock_path = File.join(canonical_run_dir, ".state.lock")
-      create_lock(lock_path)
       data = {
         "schema_version" => 1,
         "run_id" => run_id,
@@ -130,6 +113,27 @@ module AdversarialReview
         "events" => [],
         "next_action" => "attack"
       }
+      validate_snapshot!(manifest, data)
+      expanded_run_dir = Atomic.normalize_root_alias(File.expand_path(run_dir))
+      if File.symlink?(expanded_run_dir)
+        raise Error.new("unsafe_run_dir", "review run path must not be a symlink", {"run_dir" => expanded_run_dir})
+      end
+      parent = Atomic.secure_directory(File.dirname(expanded_run_dir))
+      canonical_run_dir = File.join(parent, File.basename(run_dir))
+      begin
+        Dir.mkdir(canonical_run_dir, 0o700)
+        created_run_dir = canonical_run_dir
+      rescue Errno::EEXIST
+        raise Error.new("run_exists", "review run already exists", {"run_dir" => canonical_run_dir})
+      end
+      File.chmod(0o700, canonical_run_dir)
+      %w[tasks results events].each do |entry|
+        path = File.join(canonical_run_dir, entry)
+        Dir.mkdir(path, 0o700)
+        File.chmod(0o700, path)
+      end
+      lock_path = File.join(canonical_run_dir, ".state.lock")
+      create_lock(lock_path)
       Atomic.open_lock(lock_path, exclusive: true) do
         validate_snapshot!(manifest, data)
         Atomic.write_json(File.join(canonical_run_dir, "manifest.json"), manifest)
@@ -137,7 +141,11 @@ module AdversarialReview
       end
       new(canonical_run_dir, data, manifest)
     rescue KeyError => error
+      cleanup_created_run(created_run_dir)
       raise Error.new("invalid_manifest", "manifest is missing required state fields", {"field" => error.key}, 3)
+    rescue StandardError
+      cleanup_created_run(created_run_dir)
+      raise
     end
 
     def self.load(run_dir)
@@ -324,8 +332,11 @@ module AdversarialReview
       mutate! do |data|
         find_finding!(data, finding_id)
         status = action.is_a?(Hash) ? action["status"] : action
-        unless status.is_a?(String) && !status.empty?
-          raise Error.new("invalid_author_action", "author action must have a status", {"id" => finding_id}, 3)
+        unless %w[fixed rejected].include?(status)
+          raise Error.new(
+            "invalid_author_action", "author action status must be fixed or rejected",
+            {"id" => finding_id, "status" => status}, 3
+          )
         end
         data.fetch("author_actions")[finding_id] = deep_copy(action)
       end
@@ -339,6 +350,12 @@ module AdversarialReview
       end
       mutate! do |data|
         finding = find_finding!(data, finding_id)
+        if status == "stuck" && data.fetch("revise_round") < 2
+          raise Error.new(
+            "invalid_resolution", "a finding cannot be stuck before the revise-round cap",
+            {"id" => finding_id, "revise_round" => data.fetch("revise_round")}, 3
+          )
+        end
         data.fetch("resolution_checks")[finding_id] = status
         finding["state"] = status
       end
@@ -523,6 +540,34 @@ module AdversarialReview
       if finding_ids.any?(&:nil?) || finding_ids.uniq.length != finding_ids.length
         raise Error.new("finding_collision", "persisted finding IDs are invalid or non-unique", {}, 3)
       end
+      fingerprint = Digest::SHA256.hexdigest(data.fetch("run_id"))[0, 8]
+      expected_finding_ids = finding_ids.each_index.map do |index|
+        format("AR-%s-%03d", fingerprint, index + 1)
+      end
+      unless finding_ids == expected_finding_ids
+        raise Error.new(
+          "finding_collision", "persisted finding IDs do not match deterministic run order",
+          {"expected" => expected_finding_ids, "current" => finding_ids}, 3
+        )
+      end
+      findings_by_id = data.fetch("findings").each_with_object({}) do |finding, indexed|
+        indexed[finding.fetch("id")] = finding
+      end
+      valid_actions = data.fetch("author_actions").all? do |finding_id, action|
+        findings_by_id.key?(finding_id) && valid_author_action_snapshot?(action)
+      end
+      valid_resolutions = data.fetch("resolution_checks").all? do |finding_id, status|
+        finding = findings_by_id[finding_id]
+        finding && %w[pending resolved rejected contested stuck].include?(status) &&
+          finding.fetch("state") == status &&
+          (status != "stuck" || data.fetch("revise_round") == 2)
+      end
+      valid_arbiter_subjects = data.fetch("pending_arbiter_subjects").all? do |finding_id|
+        findings_by_id.key?(finding_id)
+      end
+      unless valid_actions && valid_resolutions && valid_arbiter_subjects
+        raise Error.new("invalid_state", "persisted finding disposition maps are invalid", {}, 3)
+      end
       true
     rescue KeyError, TypeError => error
       raise Error.new("invalid_state", "persisted state structure is invalid", {"cause" => error.message}, 3)
@@ -569,6 +614,11 @@ module AdversarialReview
         %w[pending resolved rejected contested stuck].include?(finding["state"])
     end
 
+    def self.valid_author_action_snapshot?(action)
+      status = action.is_a?(Hash) ? action["status"] : action
+      %w[fixed rejected].include?(status)
+    end
+
     def self.canonical_missing_path(path)
       missing = []
       cursor = path
@@ -593,6 +643,22 @@ module AdversarialReview
       end
       File.chmod(0o600, path)
       Atomic.fsync_directory(File.dirname(path))
+    end
+
+    def self.cleanup_created_run(path)
+      return unless path
+
+      stat = File.lstat(path)
+      return unless stat.directory? && !stat.symlink?
+
+      FileUtils.remove_entry_secure(path)
+    rescue Errno::ENOENT
+      nil
+    rescue SystemCallError => error
+      raise Error.new(
+        "cleanup_failed", "failed review creation could not remove its new run directory",
+        {"run_dir" => path, "cause" => error.class.name}
+      )
     end
 
     def self.target_digests(manifest)
@@ -652,14 +718,13 @@ module AdversarialReview
       data.fetch("findings").each do |finding|
         finding_id = finding.fetch("id")
         blockers << "author-action:#{finding_id}" unless terminal_author_action?(data["author_actions"][finding_id])
-        blockers << "resolution:#{finding_id}" unless %w[resolved rejected stuck].include?(data["resolution_checks"][finding_id])
+        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(data["resolution_checks"][finding_id])
       end
       blockers
     end
 
     def terminal_author_action?(action)
-      status = action.is_a?(Hash) ? action["status"] : action
-      status.is_a?(String) && !status.empty? && status != "pending"
+      self.class.valid_author_action_snapshot?(action)
     end
 
     def target_digests_match?(data)

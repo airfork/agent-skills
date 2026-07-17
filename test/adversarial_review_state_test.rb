@@ -102,6 +102,47 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_invalid_manifest_creation_leaves_no_final_run_and_can_retry
+    Dir.mktmpdir("adversarial-review-state") do |directory|
+      run_dir = File.join(directory, "run")
+      invalid = manifest("mode" => "unsupported", "schema_version" => 99)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.create(run_dir, invalid)
+      end
+
+      assert_equal "invalid_state", error.code
+      refute File.exist?(run_dir), "failed creation left the final run directory behind"
+
+      state = AdversarialReview::State.create(run_dir, manifest)
+      assert_equal "prepared", state.to_h.fetch("stage")
+    end
+  end
+
+  def test_bootstrap_write_failure_removes_the_new_run_and_can_retry
+    Dir.mktmpdir("adversarial-review-state") do |directory|
+      run_dir = File.join(directory, "run")
+      original_write_json = AdversarialReview::Atomic.method(:write_json)
+      writes = 0
+      writer = lambda do |path, value|
+        writes += 1
+        raise IOError, "injected state bootstrap failure" if writes == 2
+
+        original_write_json.call(path, value)
+      end
+
+      error = AdversarialReview::Atomic.stub(:write_json, writer) do
+        assert_raises(IOError) { AdversarialReview::State.create(run_dir, manifest) }
+      end
+
+      assert_equal "injected state bootstrap failure", error.message
+      refute File.exist?(run_dir), "bootstrap failure left the final run directory behind"
+
+      state = AdversarialReview::State.create(run_dir, manifest)
+      assert_equal "prepared", state.to_h.fetch("stage")
+    end
+  end
+
   def test_load_resumes_the_last_complete_state
     with_state do |state, run_dir|
       loaded = AdversarialReview::State.load(run_dir)
@@ -251,6 +292,17 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_record_author_action_rejects_an_unknown_terminal_status
+    with_promoted_state("mode" => "critique") do |state, finding_id, _run_dir|
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.record_author_action(finding_id, "waived")
+      end
+
+      assert_equal "invalid_author_action", error.code
+      assert_empty state.to_h.fetch("author_actions")
+    end
+  end
+
   def test_completion_requires_a_terminal_resolution
     with_promoted_state({}, stage: "culling-new-findings") do |state, finding_id, _run_dir|
       state.record_author_action(finding_id, "fixed")
@@ -258,6 +310,32 @@ class AdversarialReviewStateTest < Minitest::Test
       error = assert_completion_blocked(state)
 
       assert_includes error.details.fetch("blockers"), "resolution:#{finding_id}"
+    end
+  end
+
+  def test_record_resolution_refuses_stuck_before_the_round_cap
+    with_promoted_state do |state, finding_id, _run_dir|
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.record_resolution(finding_id, "stuck")
+      end
+
+      assert_equal "invalid_resolution", error.code
+      assert_empty state.to_h.fetch("resolution_checks")
+      assert_equal "pending", state.findings.first.fetch("state")
+    end
+  end
+
+  def test_stuck_at_the_round_cap_blocks_ordinary_completion
+    with_promoted_state do |state, finding_id, _run_dir|
+      state.record_author_action(finding_id, "fixed")
+      advance(state, %w[awaiting-author resolving fresh-sweep culling-new-findings])
+      state.apply_arbiter(finding_id, "judge-is-right")
+      state.transition_to("arbitrating")
+
+      error = assert_completion_blocked(state)
+
+      assert_includes error.details.fetch("blockers"), "resolution:#{finding_id}"
+      assert_equal "arbitrating", state.to_h.fetch("stage")
     end
   end
 
@@ -705,6 +783,77 @@ class AdversarialReviewStateTest < Minitest::Test
     with_state do |_state, run_dir|
       persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
       persisted["findings"] = [{"id" => "AR-deadbeef-001"}]
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal 3, error.exit_status
+    end
+  end
+
+  def test_load_rejects_wrong_fingerprint_or_ordinal_in_promoted_ids
+    fingerprint = Digest::SHA256.hexdigest(manifest.fetch("run_id"))[0, 8]
+    wrong_fingerprint = fingerprint == "00000000" ? "11111111" : "00000000"
+    invalid_ids = ["AR-#{wrong_fingerprint}-001", "AR-#{fingerprint}-002"]
+
+    invalid_ids.each do |invalid_id|
+      with_promoted_state do |_state, _finding_id, run_dir|
+        persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+        persisted.fetch("findings").first["id"] = invalid_id
+        File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::State.load(run_dir)
+        end
+
+        assert_equal "finding_collision", error.code
+        assert_equal 3, error.exit_status
+      end
+    end
+  end
+
+  def test_load_rejects_an_invalid_persisted_author_action
+    with_promoted_state do |state, finding_id, run_dir|
+      state.record_author_action(finding_id, "fixed")
+      state.record_resolution(finding_id, "resolved")
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted["author_actions"][finding_id] = "waived"
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal 3, error.exit_status
+    end
+  end
+
+  def test_load_rejects_disposition_maps_for_unknown_findings
+    with_promoted_state do |state, finding_id, run_dir|
+      state.record_author_action(finding_id, "fixed")
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted["resolution_checks"]["AR-deadbeef-999"] = "resolved"
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal 3, error.exit_status
+    end
+  end
+
+  def test_load_rejects_an_invalid_persisted_resolution_status
+    with_promoted_state do |state, finding_id, run_dir|
+      state.record_author_action(finding_id, "fixed")
+      state.record_resolution(finding_id, "resolved")
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted["resolution_checks"][finding_id] = "passed"
       File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
 
       error = assert_raises(AdversarialReview::State::Error) do
