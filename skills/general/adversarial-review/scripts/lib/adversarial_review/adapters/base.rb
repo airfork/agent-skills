@@ -12,23 +12,33 @@ module AdversarialReview
         keyword_init: true
       )
 
-      DIRECT_CONTRACTS = {
+      DIRECT_SUPPORT = {
         "codex" => %w[default high],
         "claude" => %w[default high ultra],
         "cursor" => %w[default high],
         "gemini" => %w[default high]
       }.freeze
+      TIERS = %w[default high ultra].freeze
 
       class << self
         def direct_contracts
-          DIRECT_CONTRACTS.flat_map do |adapter, tiers|
-            tiers.map { |tier| {"adapter" => adapter, "tier" => tier} }
+          DIRECT_SUPPORT.keys.sort.flat_map do |adapter|
+            TIERS.map do |tier|
+              {
+                "adapter" => adapter,
+                "tier" => tier,
+                "direct_supported" => DIRECT_SUPPORT.fetch(adapter).include?(tier)
+              }
+            end
           end.freeze
         end
 
         def runtime_decision(adapter:, tier:, requested_model:, requested_effort:,
                              observed_model:, observed_effort:)
-          unless DIRECT_CONTRACTS.fetch(adapter, []).include?(tier)
+          contract = direct_contracts.find do |entry|
+            entry.fetch("adapter") == adapter && entry.fetch("tier") == tier
+          end
+          unless contract && contract.fetch("direct_supported")
             return generic_decision("direct adapter does not support the requested tier")
           end
           unless nonempty_string?(requested_model) && nonempty_string?(requested_effort)
@@ -118,7 +128,11 @@ module AdversarialReview
           if runner_result.stdout_truncated || runner_result.stderr_truncated
             return failed_execution("process_output_truncated", attempts, results, usage)
           end
-          unless envelope.is_a?(Hash) && envelope["terminal"].is_a?(Hash) &&
+          unless envelope.is_a?(Hash)
+            return failed_execution("runtime_attestation_missing", attempts, results, usage)
+          end
+          merge_usage!(usage, envelope["usage"])
+          unless envelope["terminal"].is_a?(Hash) &&
                  envelope.dig("terminal", "terminal") == true
             return failed_execution("runtime_attestation_missing", attempts, results, usage)
           end
@@ -152,7 +166,6 @@ module AdversarialReview
             )
           end
 
-          merge_usage!(usage, envelope["usage"])
           payload = envelope["payload"]
           checks_present = required_checks.is_a?(Array) &&
                            required_checks.all? do |check|
@@ -184,7 +197,7 @@ module AdversarialReview
 
       def adapter_name
         name = self.class.name.to_s.split("::").last.to_s.downcase
-        DIRECT_CONTRACTS.key?(name) ? name : "unknown"
+        DIRECT_SUPPORT.key?(name) ? name : "unknown"
       end
 
       def tier

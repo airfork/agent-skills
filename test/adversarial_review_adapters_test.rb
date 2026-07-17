@@ -105,9 +105,9 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     refute_empty contracts
     assert_equal [
       ["claude", "default"], ["claude", "high"], ["claude", "ultra"],
-      ["codex", "default"], ["codex", "high"],
-      ["cursor", "default"], ["cursor", "high"],
-      ["gemini", "default"], ["gemini", "high"]
+      ["codex", "default"], ["codex", "high"], ["codex", "ultra"],
+      ["cursor", "default"], ["cursor", "high"], ["cursor", "ultra"],
+      ["gemini", "default"], ["gemini", "high"], ["gemini", "ultra"]
     ], contracts.map { |entry| [entry.fetch("adapter"), entry.fetch("tier")] }.sort
 
     contracts.each do |contract|
@@ -116,8 +116,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         requested_model: "model-x", requested_effort: "high",
         observed_model: "model-x", observed_effort: "high"
       )
-      assert_equal "direct", exact.status, contract.inspect
-      assert_equal true, exact.execution_allowed, contract.inspect
+      expected_status = contract.fetch("direct_supported") ? "direct" : "generic"
+      assert_equal expected_status, exact.status, contract.inspect
+      assert_equal contract.fetch("direct_supported"), exact.execution_allowed, contract.inspect
+      assert_equal contract.fetch("direct_supported"), exact.ordinary_result, contract.inspect
 
       [[nil, "high"], ["model-x", nil], ["different", "high"],
        ["model-x", "medium"]].each do |observed_model, observed_effort|
@@ -129,6 +131,32 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal "generic", degraded.status, contract.inspect
         assert_equal false, degraded.execution_allowed, contract.inspect
         assert_equal false, degraded.ordinary_result, contract.inspect
+      end
+    end
+  end
+
+  def test_ultra_direct_support_is_claude_only_and_still_requires_attestation
+    %w[codex claude cursor gemini].each do |adapter|
+      exact = AdversarialReview::Adapters::Base.runtime_decision(
+        adapter: adapter, tier: "ultra",
+        requested_model: "model-x", requested_effort: "high",
+        observed_model: "model-x", observed_effort: "high"
+      )
+      if adapter == "claude"
+        assert_equal "direct", exact.status
+        assert_equal true, exact.execution_allowed
+        missing = AdversarialReview::Adapters::Base.runtime_decision(
+          adapter: adapter, tier: "ultra",
+          requested_model: "model-x", requested_effort: "high",
+          observed_model: nil, observed_effort: nil
+        )
+        assert_equal "generic", missing.status
+        assert_equal false, missing.execution_allowed
+        assert_equal false, missing.ordinary_result
+      else
+        assert_equal "generic", exact.status, adapter
+        assert_equal false, exact.execution_allowed, adapter
+        assert_equal false, exact.ordinary_result, adapter
       end
     end
   end
@@ -279,7 +307,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
 
   def test_missing_terminal_event_falls_back_without_repair
     adapter = harness_adapter([
-      {"payload" => valid_payload, "terminal" => nil, "usage" => {}}
+      {"payload" => valid_payload, "terminal" => nil,
+       "usage" => {"total_tokens" => 11}}
     ])
 
     result = adapter.execute_with_one_repair(
@@ -291,11 +320,13 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     assert_equal "runtime_attestation_missing", result.error_code
     assert_equal 1, result.attempts
     assert_equal false, result.ordinary_result
+    assert_equal 11, result.usage.fetch("total_tokens")
   end
 
   def test_missing_capability_attestation_falls_back_without_repair
     adapter = harness_adapter([
-      {"payload" => valid_payload, "terminal" => runtime_event, "usage" => {},
+      {"payload" => valid_payload, "terminal" => runtime_event,
+       "usage" => {"total_tokens" => 13},
        "capabilities" => {}}
     ], add_capabilities: false)
 
@@ -308,6 +339,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     assert_equal "capabilities_degraded", result.error_code
     assert_equal 1, result.attempts
     assert_equal false, result.ordinary_result
+    assert_equal 13, result.usage.fetch("total_tokens")
   end
 
   def test_runtime_model_or_effort_mismatch_falls_back_without_repair
@@ -315,7 +347,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       adapter = harness_adapter([
         {"payload" => valid_payload,
          "terminal" => runtime_event.merge("model" => model, "effort" => effort),
-         "usage" => {}}
+         "usage" => {"total_tokens" => 17}}
       ])
 
       result = adapter.execute_with_one_repair(
@@ -326,6 +358,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       assert_equal "generic", result.status
       assert_equal "runtime_selection_mismatch", result.error_code
       assert_equal 1, result.attempts
+      assert_equal 17, result.usage.fetch("total_tokens")
     end
   end
 
@@ -353,7 +386,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     )
     adapter = harness_adapter([], runner_results: [[truncated, {
       "payload" => valid_payload, "terminal" => runtime_event,
-      "usage" => {}, "capabilities" => enforced_capabilities
+      "usage" => {"total_tokens" => 999}, "capabilities" => enforced_capabilities
     }]])
 
     result = adapter.execute_with_one_repair(
@@ -363,6 +396,19 @@ class AdversarialReviewAdaptersTest < Minitest::Test
 
     assert_equal "generic", result.status
     assert_equal "process_output_truncated", result.error_code
+    assert_equal 1, result.attempts
+    assert_equal({}, result.usage)
+  end
+
+  def test_malformed_envelope_cannot_inject_usage
+    adapter = harness_adapter(["not-a-parsed-envelope"])
+
+    result = adapter.execute_with_one_repair(
+      requested_model: "model-x", requested_effort: "high", required_checks: []
+    )
+
+    assert_equal "runtime_attestation_missing", result.error_code
+    assert_equal({}, result.usage)
     assert_equal 1, result.attempts
   end
 
