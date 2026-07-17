@@ -998,7 +998,7 @@ module AdversarialReview
           location.is_a?(Hash) && location.keys.sort == %w[heading line_end line_start path] &&
           location["path"].is_a?(String) && !location["path"].strip.empty? &&
           location["heading"].is_a?(String) && !location["heading"].strip.empty? &&
-          location["line_start"].is_a?(Integer) && !location["line_start"].negative? &&
+          location["line_start"].is_a?(Integer) && location["line_start"] >= 1 &&
           location["line_end"].is_a?(Integer) && location["line_end"] >= location["line_start"] &&
           source_angles.is_a?(Array) && !source_angles.empty? &&
           source_angles.uniq.length == source_angles.length &&

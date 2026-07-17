@@ -473,6 +473,10 @@ class AdversarialReviewStateTest < Minitest::Test
         state.dig("semantic_groups", "G-shared", "location")["line_start"] = 9
         state.dig("semantic_groups", "G-shared", "location")["line_end"] = 2
       end,
+      "zero location lines" => lambda do |state|
+        state.dig("semantic_groups", "G-shared", "location")["line_start"] = 0
+        state.dig("semantic_groups", "G-shared", "location")["line_end"] = 0
+      end,
       "duplicate source angles" => lambda do |state|
         state.dig("semantic_groups", "G-shared")["source_angles"] = %w[tester tester]
       end,
