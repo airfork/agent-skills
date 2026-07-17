@@ -113,6 +113,24 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_empty AdversarialReview::Schema.validate("resolution", valid_resolution)
   end
 
+  def test_finding_locations_reject_reversed_line_ranges
+    [
+      ["attack", valid_attack, "findings"],
+      ["divergence", valid_divergence, "findings"],
+      ["resolution", valid_resolution, "new_findings"]
+    ].each do |schema, payload, collection|
+      finding = payload.fetch(collection).first
+      location = finding.fetch("location").merge("line_start" => 9, "line_end" => 2)
+      value = payload.merge(collection => [finding.merge("location" => location)])
+
+      errors = AdversarialReview::Schema.validate(schema, value)
+
+      assert_includes errors.map { |error| error.fetch("code") }, "line_order", schema
+      assert_includes errors.map { |error| error.fetch("path") },
+                      "/#{collection}/0/location/line_end", schema
+    end
+  end
+
   def test_arbiter_schema_accepts_complete_decisions
     assert_empty AdversarialReview::Schema.validate("arbiter", valid_arbiter)
   end

@@ -225,13 +225,22 @@ module AdversarialReview
       findings.each_with_index do |finding, index|
         next unless finding.is_a?(Hash) && finding["location"].is_a?(Hash)
 
+        location = finding.fetch("location")
         %w[path heading].each do |field|
-          value = finding.fetch("location")[field]
+          value = location[field]
           next unless value.is_a?(String) && value.strip.empty?
 
           add_error(
             "blank_evidence", pointer(collection, index, "location", field),
             "location text must not be whitespace"
+          )
+        end
+        line_start = location["line_start"]
+        line_end = location["line_end"]
+        if line_start.is_a?(Integer) && line_end.is_a?(Integer) && line_end < line_start
+          add_error(
+            "line_order", pointer(collection, index, "location", "line_end"),
+            "location line_end must be greater than or equal to line_start"
           )
         end
       end

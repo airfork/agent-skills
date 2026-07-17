@@ -376,6 +376,58 @@ class AdversarialReviewStateTest < Minitest::Test
       blocker = assert_completion_blocked(state)
       overflow_id = state.to_h.dig("overflow", "items").first
       assert_includes blocker.details.fetch("blockers"), "overflow-blocker:#{overflow_id}"
+      gap_error = assert_raises(AdversarialReview::State::Error) do
+        state.record_nonblocking_evidence_gap(overflow_id, "Reviewed but omitted from the report cap.")
+      end
+      assert_equal "invalid_overflow_evidence_gap", gap_error.code
+    end
+  end
+
+  def test_medium_or_low_overflow_requires_a_recorded_nonblocking_evidence_gap
+    with_state do |state, run_dir|
+      state.transition_to("attacking")
+      51.times { |index| state.ingest_candidate("tester", 1, finding("low-#{index}")) }
+      advance(state, %w[deduplicating culling])
+      groups = 51.times.map do |index|
+        promotion_group(
+          format("G-low-%02d", index), "C-tester-1-#{index + 1}",
+          "LOW", 0.8, "docs/spec.md", index + 1
+        )
+      end
+      state.promote(groups)
+      snapshot = state.to_h
+      overflow_id = snapshot.dig("overflow", "items").first
+      reported_id = snapshot.fetch("findings").find { |finding| finding.fetch("reported") }.fetch("id")
+      before_invalid = File.binread(File.join(run_dir, "state.json"))
+
+      [
+        ["AR-deadbeef-999", "Known rationale"],
+        [reported_id, "Known rationale"],
+        [overflow_id, "  "]
+      ].each do |finding_id, rationale|
+        assert_raises(AdversarialReview::State::Error) do
+          state.record_nonblocking_evidence_gap(finding_id, rationale)
+        end
+        assert_equal before_invalid, File.binread(File.join(run_dir, "state.json"))
+      end
+
+      state.transition_to("awaiting-author")
+      state.findings.select { |finding| finding.fetch("reported") }.each do |finding|
+        state.record_author_action(finding.fetch("id"), "fixed")
+      end
+      state.transition_to("resolving")
+      state.findings.select { |finding| finding.fetch("reported") }.each do |finding|
+        state.record_resolution(finding.fetch("id"), "resolved")
+      end
+      blocked = assert_completion_blocked(state)
+      assert_includes blocked.details.fetch("blockers"), "overflow-evidence-gap:#{overflow_id}"
+
+      state.record_nonblocking_evidence_gap(overflow_id, "Reviewed and nonblocking at the report cap.")
+      state.transition_to("complete")
+
+      assert_equal "complete", state.to_h.fetch("stage")
+      assert_equal "Reviewed and nonblocking at the report cap.",
+                   state.to_h.dig("overflow_evidence_gaps", overflow_id, "rationale")
     end
   end
 
@@ -450,6 +502,79 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_post_rename_state_fsync_failure_preserves_consistent_state_and_result
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      payload = attack_payload(task, [result_finding("Missing rollback owner")])
+      original = AdversarialReview::Atomic.method(:write_json_relative)
+      writer = lambda do |directory, name, value, **options, &operation|
+        result = original.call(directory, name, value, **options, &operation)
+        if name == "state.json" && value.fetch("ingested_results", {}).key?(task.fetch("task_id"))
+          raise IOError, "injected directory fsync failure after state rename"
+        end
+        result
+      end
+
+      error = AdversarialReview::Atomic.stub(:write_json_relative, writer) do
+        assert_raises(AdversarialReview::State::Error) do
+          state.ingest(task.fetch("task_id"), payload)
+        end
+      end
+
+      assert_equal "durability_uncertain", error.code
+      assert File.file?(File.join(run_dir, "results", "#{task.fetch("task_id")}.json"))
+      loaded = AdversarialReview::State.load(run_dir)
+      assert loaded.to_h.fetch("ingested_results").key?(task.fetch("task_id"))
+      duplicate = assert_raises(AdversarialReview::State::InvalidResult) do
+        loaded.ingest(task.fetch("task_id"), payload)
+      end
+      assert_equal "duplicate_result", duplicate.code
+    end
+  end
+
+  def test_load_rejects_changed_ingested_result_bytes
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      state.ingest(task.fetch("task_id"), attack_payload(task))
+      result_path = File.join(run_dir, "results", "#{task.fetch("task_id")}.json")
+      File.binwrite(result_path, "{}\n")
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_refresh_rejects_changed_ingested_task_bytes
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      state.ingest(task.fetch("task_id"), attack_payload(task))
+      task_path = File.join(run_dir, "tasks", "#{task.fetch("task_id")}.json")
+      File.binwrite(task_path, JSON.generate(task.merge("attempt" => 2)) + "\n")
+
+      error = assert_raises(AdversarialReview::State::Error) { state.to_h }
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_mutation_rejects_changed_ingested_task_authentication
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      state.ingest(task.fetch("task_id"), attack_payload(task))
+      auth_path = File.join(run_dir, "tasks", "#{task.fetch("task_id")}.auth.json")
+      auth = JSON.parse(File.read(auth_path))
+      auth["sha256"] = "0" * 64
+      File.binwrite(auth_path, JSON.generate(auth) + "\n")
+      state_before = File.binread(File.join(run_dir, "state.json"))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.transition_to("deduplicating")
+      end
+
+      assert_equal "invalid_state", error.code
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+    end
+  end
+
   def test_load_rejects_corrupted_ingestion_cross_references
     with_ingest_state(stage: "attacking") do |state, run_dir, task|
       state.ingest(task.fetch("task_id"), attack_payload(task, [result_finding("Missing owner")]))
@@ -514,6 +639,31 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal "invalid_task_schema", error.code
       assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
       assert_empty Dir.children(File.join(run_dir, "results"))
+    end
+  end
+
+  def test_ingest_authenticates_exact_emitted_task_bytes_before_validation
+    corruptions = {
+      "attempt" => ->(task) { task["attempt"] = 99 },
+      "kind" => ->(task) { task["kind"] = "judge" },
+      "metadata" => ->(task) { task["surprise"] = true }
+    }
+    corruptions.each do |name, corrupt|
+      with_ingest_state(stage: "attacking") do |state, run_dir, task|
+        task_path = File.join(run_dir, "tasks", "#{task.fetch("task_id")}.json")
+        changed = JSON.parse(File.read(task_path))
+        corrupt.call(changed)
+        File.write(task_path, JSON.generate(changed) + "\n")
+        state_before = File.binread(File.join(run_dir, "state.json"))
+
+        error = assert_raises(AdversarialReview::State::InvalidResult, name) do
+          state.ingest(task.fetch("task_id"), attack_payload(task))
+        end
+
+        assert_equal "invalid_task", error.code, name
+        assert_equal state_before, File.binread(File.join(run_dir, "state.json")), name
+        assert_empty Dir.children(File.join(run_dir, "results")), name
+      end
     end
   end
 
@@ -841,7 +991,65 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal File.join(File.realpath(run_dir), "tasks", "attack-test-r1-a1.json"), task_path
       assert_equal JSON.generate(task) + "\n", File.binread(task_path)
       assert_equal 0o600, File.stat(task_path).mode & 0o777
+      auth_path = File.join(File.dirname(task_path), "attack-test-r1-a1.auth.json")
+      auth = JSON.parse(File.read(auth_path))
+      assert_equal 1, auth.fetch("schema_version")
+      assert_equal task.fetch("task_id"), auth.fetch("task_id")
+      assert_equal Digest::SHA256.hexdigest(File.binread(task_path)), auth.fetch("sha256")
+      assert_equal 0o600, File.stat(auth_path).mode & 0o777
       assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+    end
+  end
+
+  def test_create_task_bundle_adopts_an_exact_preexisting_authenticated_pair
+    with_state do |state, _run_dir|
+      task = {"task_id" => "attack-test-r1-a1", "payload" => "canonical"}
+      first_path = state.create_task_bundle(task.fetch("task_id")) { task }
+      first_task_bytes = File.binread(first_path)
+      auth_path = File.join(File.dirname(first_path), "attack-test-r1-a1.auth.json")
+      first_auth_bytes = File.binread(auth_path)
+
+      adopted_path = state.create_task_bundle(task.fetch("task_id")) { task }
+
+      assert_equal first_path, adopted_path
+      assert_equal first_task_bytes, File.binread(first_path)
+      assert_equal first_auth_bytes, File.binread(auth_path)
+    end
+  end
+
+  def test_create_task_bundle_rejects_a_mismatched_preexisting_authenticated_pair
+    with_state do |state, _run_dir|
+      task = {"task_id" => "attack-test-r1-a1", "payload" => "canonical"}
+      task_path = state.create_task_bundle(task.fetch("task_id")) { task }
+      File.binwrite(task_path, JSON.generate(task.merge("payload" => "substituted")) + "\n")
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.create_task_bundle(task.fetch("task_id")) { task }
+      end
+
+      assert_equal "task_collision", error.code
+    end
+  end
+
+  def test_create_task_bundle_rolls_back_a_new_task_when_authentication_publish_fails
+    with_state do |state, run_dir|
+      task = {"task_id" => "attack-test-r1-a1", "payload" => "canonical"}
+      original_writer = AdversarialReview::Atomic.method(:write_new_json)
+      writer = lambda do |directory, name, value|
+        result = original_writer.call(directory, name, value)
+        raise IOError, "auth write failed after publish" if name.end_with?(".auth.json")
+
+        result
+      end
+
+      error = assert_raises(IOError) do
+        AdversarialReview::Atomic.stub(:write_new_json, writer) do
+          state.create_task_bundle(task.fetch("task_id")) { task }
+        end
+      end
+
+      assert_equal "auth write failed after publish", error.message
+      assert_empty Dir.children(File.join(run_dir, "tasks"))
     end
   end
 
@@ -1228,6 +1436,25 @@ class AdversarialReviewStateTest < Minitest::Test
 
       assert_equal "target_digest_mismatch", error.code
       assert_equal "prepared", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
+    end
+  end
+
+  def test_completion_rehashes_live_target_bytes_under_the_state_lock
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository, tier: "high")
+      built["mode"] = "critique"
+      run_dir = File.join(repository, ".git", "adversarial-review-live-completion")
+      state = AdversarialReview::State.create(run_dir, built)
+      advance(state, %w[attacking deduplicating culling])
+      state_before = File.binread(File.join(run_dir, "state.json"))
+      File.binwrite(File.join(repository, "docs/spec.md"), "# Changed after review\n")
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.transition_to("complete")
+      end
+
+      assert_equal "target_digest_mismatch", error.code
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
     end
   end
 

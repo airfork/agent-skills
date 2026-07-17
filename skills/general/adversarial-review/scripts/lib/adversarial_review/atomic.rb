@@ -49,7 +49,8 @@ module AdversarialReview
       raise_state_error("unsafe_path", "atomic write path is unsafe", {"path" => path, "cause" => error.class.name})
     end
 
-    def write_json_relative(directory, destination_name, value, temporary_name: nil)
+    def write_json_relative(directory, destination_name, value, temporary_name: nil,
+                            on_publish: nil)
       validate_relative_name!(destination_name)
       temporary_name ||= ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
       validate_relative_name!(temporary_name)
@@ -73,6 +74,7 @@ module AdversarialReview
         reject_relative_nonregular(directory, destination_name)
         rename_relative(directory, temporary_name, destination_name)
         created = false
+        on_publish.call if on_publish
         directory.fsync
       rescue Errno::EEXIST
         raise_state_error(

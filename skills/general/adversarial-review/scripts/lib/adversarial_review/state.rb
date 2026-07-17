@@ -86,6 +86,7 @@ module AdversarialReview
       "promote" => %w[culling culling-new-findings].freeze,
       "record_author_action" => %w[awaiting-author].freeze,
       "record_resolution" => %w[resolving].freeze,
+      "record_nonblocking_evidence_gap" => TRANSITIONS.keys.freeze,
       "set_pending_arbiter_subjects" => %w[resolving culling-new-findings].freeze,
       "require_fresh_sweep" => %w[resolving culling-new-findings].freeze,
       "mark_fresh_sweep_completed" => %w[fresh-sweep].freeze,
@@ -148,6 +149,7 @@ module AdversarialReview
         "judge_votes" => {},
         "evidence_gaps" => [],
         "overflow" => {"total" => 0, "by_category_severity" => {}, "items" => []},
+        "overflow_evidence_gaps" => {},
         "candidates" => [],
         "findings" => [],
         "author_actions" => {},
@@ -230,11 +232,96 @@ module AdversarialReview
         Atomic.with_relative_directory(run_directory, "results") do |results_directory|
           results_identity = results_directory.stat
         end
+        verify_ingested_files!(
+          run_directory, data,
+          tasks_identity: tasks_identity, results_identity: results_identity
+        )
       end
       new(
         canonical_run_dir, data, manifest,
         run_identity: run_identity, tasks_identity: tasks_identity,
         results_identity: results_identity
+      )
+    end
+
+    def self.verify_ingested_files!(run_directory, data, tasks_identity:, results_identity:)
+      return true if data.fetch("ingested_results").empty?
+
+      tasks = nil
+      results = nil
+      Atomic.with_relative_directory(
+        run_directory, "tasks", code: "invalid_state", expected_identity: tasks_identity
+      ) do |tasks_directory|
+        tasks = tasks_directory
+        Atomic.with_relative_directory(
+          run_directory, "results", code: "invalid_state", expected_identity: results_identity
+        ) do |results_directory|
+          results = results_directory
+          data.fetch("ingested_results").each do |task_id, record|
+            task_bytes = read_integrity_bytes!(tasks, "#{task_id}.json")
+            auth, auth_bytes = read_integrity_json_bytes!(tasks, "#{task_id}.auth.json")
+            expected_auth = {
+              "schema_version" => 1,
+              "task_id" => task_id,
+              "sha256" => Digest::SHA256.hexdigest(task_bytes)
+            }
+            unless auth.is_a?(Hash) && auth.keys.sort == expected_auth.keys.sort && auth == expected_auth &&
+                   auth_bytes == JSON.generate(expected_auth) + "\n" &&
+                   expected_auth.fetch("sha256") == record.fetch("task_sha256")
+              raise Error.new(
+                "invalid_state", "ingested task authentication does not match committed state",
+                {"task_id" => task_id}, 3
+              )
+            end
+
+            result_bytes = read_integrity_bytes!(results, "#{task_id}.json")
+            unless Digest::SHA256.hexdigest(result_bytes) == record.fetch("sha256")
+              raise Error.new(
+                "invalid_state", "ingested result bytes do not match committed state",
+                {"task_id" => task_id}, 3
+              )
+            end
+          end
+        end
+      end
+      true
+    end
+
+    def self.read_integrity_json_bytes!(directory, name)
+      bytes = read_integrity_bytes!(directory, name)
+      [JSON.parse(bytes), bytes]
+    rescue JSON::ParserError => error
+      raise Error.new(
+        "invalid_state", "committed JSON is invalid",
+        {"path" => name, "cause" => error.message}, 3
+      )
+    end
+
+    def self.read_integrity_bytes!(directory, name)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      file = Atomic.open_relative(directory, name, flags)
+      begin
+        unless file.stat.file?
+          raise Error.new("invalid_state", "committed path must be a regular file", {"path" => name}, 3)
+        end
+        if file.stat.size > Atomic::MAX_JSON_BYTES
+          raise Error.new("invalid_state", "committed file exceeds the size limit", {"path" => name}, 3)
+        end
+        bytes = file.read(Atomic::MAX_JSON_BYTES + 1)
+        if bytes.bytesize > Atomic::MAX_JSON_BYTES
+          raise Error.new("invalid_state", "committed file exceeds the size limit", {"path" => name}, 3)
+        end
+        bytes
+      ensure
+        file.close if file && !file.closed?
+      end
+    rescue Error
+      raise
+    rescue SystemCallError => error
+      raise Error.new(
+        "invalid_state", "committed file is unavailable",
+        {"path" => name, "cause" => error.class.name}, 3
       )
     end
 
@@ -263,6 +350,7 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         @manifest = manifest
         @data = data
         snapshot = deep_freeze(deep_copy(manifest))
@@ -284,6 +372,7 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         value = yield(
           deep_freeze(deep_copy(manifest)),
           deep_freeze(deep_copy(data))
@@ -293,7 +382,7 @@ module AdversarialReview
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
         ) do |tasks_directory|
-          Atomic.write_new_json(tasks_directory, File.basename(task_path), value)
+          publish_authenticated_task!(tasks_directory, task_id, value)
         end
       end
       task_path
@@ -314,15 +403,13 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         Atomic.with_relative_directory(
           run_directory, "tasks",
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
         ) do |tasks_directory|
-          emitted = Atomic.read_json_relative(
-            tasks_directory, File.basename(task_path),
-            code: "invalid_task", unsafe_code: "invalid_task", unsafe_exit_status: 3
-          )
+          emitted, _emitted_bytes = read_authenticated_task!(tasks_directory, task_id)
           result = yield(
             deep_freeze(deep_copy(manifest)),
             deep_freeze(deep_copy(data)),
@@ -345,6 +432,7 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         task = nil
         task_bytes = nil
         Atomic.with_relative_directory(
@@ -352,9 +440,7 @@ module AdversarialReview
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
         ) do |tasks_directory|
-          task, task_bytes = read_json_bytes_relative!(
-            tasks_directory, "#{task_id}.json", "invalid_task"
-          )
+          task, task_bytes = read_authenticated_task!(tasks_directory, task_id)
         end
         schema_name = result_schema_name!(task)
         errors = Schema.validate(schema_name, payload)
@@ -394,7 +480,7 @@ module AdversarialReview
         self.class.validate_snapshot!(manifest, data)
 
         created_result = false
-        committed = false
+        state_published = false
         begin
           Atomic.with_relative_directory(
             run_directory, "results",
@@ -417,10 +503,23 @@ module AdversarialReview
               created_result = true
             end
           end
-          Atomic.write_json_relative(run_directory, "state.json", data)
-          committed = true
+          Atomic.write_json_relative(
+            run_directory, "state.json", data,
+            on_publish: -> { state_published = true }
+          )
+        rescue StandardError => error
+          if state_published
+            @manifest = manifest
+            @data = data
+            raise Error.new(
+              "durability_uncertain",
+              "state and result are visible but directory durability could not be confirmed",
+              {"task_id" => task_id, "cause" => error.class.name, "message" => error.message}, 3
+            )
+          end
+          raise
         ensure
-          if created_result && !committed
+          if created_result && !state_published
             Atomic.with_relative_directory(
               run_directory, "results",
               code: "unsafe_result_path",
@@ -438,7 +537,7 @@ module AdversarialReview
     end
 
     def transition_to(next_stage)
-      mutate! do |data|
+      mutate! do |data, manifest|
         current = data.fetch("stage")
         unless TRANSITIONS.fetch(current, []).include?(next_stage)
           raise Error.new(
@@ -460,6 +559,15 @@ module AdversarialReview
           data["fresh_sweep_completed"] = true
         end
         if next_stage == "complete"
+          if manifest.key?("repository")
+            live_digests = live_target_digests!(manifest)
+            unless live_digests == data.fetch("current_target_digests")
+              invalid_result!(
+                "target_digest_mismatch", "live target bytes do not match authoritative state",
+                {"expected" => data.fetch("current_target_digests"), "current" => live_digests}
+              )
+            end
+          end
           blockers = completion_blockers(data, from_stage: current)
           unless can_complete?(data, from_stage: current)
             raise Error.new(
@@ -595,6 +703,35 @@ module AdversarialReview
       self
     end
 
+    def record_nonblocking_evidence_gap(finding_id, rationale)
+      unless rationale.is_a?(String) && !rationale.strip.empty?
+        raise Error.new(
+          "invalid_overflow_evidence_gap", "overflow evidence-gap rationale must be nonempty",
+          {"id" => finding_id}, 3
+        )
+      end
+      mutate! do |data|
+        ensure_mutation_stage!(data, "record_nonblocking_evidence_gap")
+        finding = find_finding!(data, finding_id)
+        unless finding.fetch("reported") == false &&
+               %w[MEDIUM LOW].include?(finding.fetch("severity")) &&
+               data.fetch("overflow").fetch("items").include?(finding_id)
+          raise Error.new(
+            "invalid_overflow_evidence_gap",
+            "only unreported MEDIUM or LOW overflow findings may be marked nonblocking",
+            {"id" => finding_id, "severity" => finding.fetch("severity"),
+             "reported" => finding.fetch("reported")}, 3
+          )
+        end
+        data.fetch("overflow_evidence_gaps")[finding_id] = {
+          "rationale" => rationale.strip,
+          "recorded_at_stage" => data.fetch("stage"),
+          "round" => data.fetch("revise_round")
+        }
+      end
+      self
+    end
+
     def set_pending_arbiter_subjects(finding_ids)
       unless finding_ids.is_a?(Array) && finding_ids.all? { |id| id.is_a?(String) }
         raise Error.new("invalid_arbiter_subjects", "arbiter subjects must be finding IDs", {}, 3)
@@ -724,7 +861,7 @@ module AdversarialReview
       required = %w[
         schema_version run_id mode stage revise_round task_attempts candidates findings
         ingested_results exact_duplicate_map exact_duplicate_sources semantic_groups
-        judge_votes evidence_gaps overflow
+        judge_votes evidence_gaps overflow overflow_evidence_gaps
         author_actions resolution_checks pending_arbiter_subjects target_digest_history
         current_target_digests fresh_sweep_required fresh_sweep_completed
         degraded_capabilities events next_action
@@ -767,7 +904,7 @@ module AdversarialReview
              data["ingested_results"].is_a?(Hash) && data["exact_duplicate_map"].is_a?(Hash) &&
              data["exact_duplicate_sources"].is_a?(Hash) && data["semantic_groups"].is_a?(Hash) &&
              data["judge_votes"].is_a?(Hash) && data["evidence_gaps"].is_a?(Array) &&
-             data["overflow"].is_a?(Hash) &&
+             data["overflow"].is_a?(Hash) && data["overflow_evidence_gaps"].is_a?(Hash) &&
              data["resolution_checks"].is_a?(Hash) && data["pending_arbiter_subjects"].is_a?(Array) &&
              data["degraded_capabilities"].is_a?(Array) && data["events"].is_a?(Array) &&
              [true, false].include?(data["fresh_sweep_required"]) &&
@@ -952,6 +1089,9 @@ module AdversarialReview
 
     def self.valid_ingestion_snapshot?(data)
       candidate_records = {}
+      findings_by_id = data.fetch("findings").each_with_object({}) do |finding, indexed|
+        indexed[finding["id"]] = finding if finding.is_a?(Hash) && finding["id"].is_a?(String)
+      end
       candidate_ids = data.fetch("candidates").each_with_object({}) do |candidate, indexed|
         if candidate.is_a?(Hash) && candidate["id"].is_a?(String)
           indexed[candidate["id"]] = true
@@ -1051,6 +1191,17 @@ module AdversarialReview
         expected_overflow_counts["#{category}:#{finding["severity"]}"] += 1
       end
       valid_overflow &&= overflow["by_category_severity"] == expected_overflow_counts.sort.to_h
+      overflow_item_lookup = overflow["items"].each_with_object({}) do |finding_id, indexed|
+        indexed[finding_id] = true
+      end
+      valid_overflow_gaps = data.fetch("overflow_evidence_gaps").all? do |finding_id, gap|
+        finding = findings_by_id[finding_id]
+        finding && finding["reported"] == false && overflow_item_lookup.key?(finding_id) &&
+          %w[MEDIUM LOW].include?(finding["severity"]) && gap.is_a?(Hash) &&
+          gap.keys.sort == %w[rationale recorded_at_stage round] &&
+          gap["rationale"].is_a?(String) && !gap["rationale"].strip.empty? &&
+          TRANSITIONS.key?(gap["recorded_at_stage"]) && [1, 2].include?(gap["round"])
+      end
       valid_votes = data.fetch("judge_votes").all? do |subject_id, votes|
         referenced = candidate_ids.key?(subject_id) || data.fetch("semantic_groups").key?(subject_id)
         next false unless referenced && votes.is_a?(Array) && !votes.empty?
@@ -1085,7 +1236,7 @@ module AdversarialReview
           [1, 2].include?(gap["round"]) && data.fetch("ingested_results").key?(gap["task_id"])
       end
       valid_results && valid_duplicate_map && valid_sources && valid_duplicate_links && valid_groups &&
-        candidate_groups_valid && valid_votes && valid_gaps && valid_overflow
+        candidate_groups_valid && valid_votes && valid_gaps && valid_overflow && valid_overflow_gaps
     rescue KeyError, NoMethodError
       false
     end
@@ -1112,9 +1263,10 @@ module AdversarialReview
       data.fetch("findings").each do |finding|
         finding_id = finding.fetch("id")
         unless finding.fetch("reported")
-          if %w[CRITICAL HIGH].include?(finding.fetch("severity")) &&
-             !%w[resolved rejected].include?(finding.fetch("state"))
+          if %w[CRITICAL HIGH].include?(finding.fetch("severity"))
             blockers << "overflow-blocker:#{finding_id}"
+          elsif !data.fetch("overflow_evidence_gaps").key?(finding_id)
+            blockers << "overflow-evidence-gap:#{finding_id}"
           end
           next
         end
@@ -1237,8 +1389,9 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         verify_target_digests!(data)
-        yield data
+        yield data, manifest
         self.class.validate_snapshot!(manifest, data)
         Atomic.write_json_relative(run_directory, "state.json", data)
         @manifest = manifest
@@ -1434,6 +1587,74 @@ module AdversarialReview
       invalid_result!(code, "persisted JSON is invalid", {"path" => name, "cause" => error.message})
     rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
       invalid_result!(code, "persisted JSON is unavailable", {"path" => name, "cause" => error.class.name})
+    end
+
+    def publish_authenticated_task!(directory, task_id, value)
+      task_name = "#{task_id}.json"
+      auth_name = "#{task_id}.auth.json"
+      task_bytes = JSON.generate(value) + "\n"
+      auth = task_authentication(task_id, task_bytes)
+      auth_bytes = JSON.generate(auth) + "\n"
+      task_exists = Atomic.reject_relative_nonregular(directory, task_name, "task_collision")
+      auth_exists = Atomic.reject_relative_nonregular(directory, auth_name, "task_collision")
+
+      if task_exists
+        _task, existing_task_bytes = read_json_bytes_relative!(directory, task_name, "task_collision")
+        unless existing_task_bytes == task_bytes
+          invalid_result!(
+            "task_collision", "existing task bytes belong to a different bundle",
+            {"task_id" => task_id}
+          )
+        end
+      end
+      if auth_exists
+        _auth, existing_auth_bytes = read_json_bytes_relative!(directory, auth_name, "task_collision")
+        unless existing_auth_bytes == auth_bytes
+          invalid_result!(
+            "task_collision", "existing task authentication belongs to a different bundle",
+            {"task_id" => task_id}
+          )
+        end
+      end
+
+      begin
+        unless task_exists
+          Atomic.write_new_json(directory, task_name, value)
+        end
+        unless auth_exists
+          Atomic.write_new_json(directory, auth_name, auth)
+        end
+      rescue StandardError
+        Atomic.unlink_relative(directory, auth_name) unless auth_exists
+        Atomic.unlink_relative(directory, task_name) unless task_exists
+        directory.fsync unless task_exists && auth_exists
+        raise
+      end
+      true
+    end
+
+    def read_authenticated_task!(directory, task_id)
+      task_name = "#{task_id}.json"
+      auth_name = "#{task_id}.auth.json"
+      task, task_bytes = read_json_bytes_relative!(directory, task_name, "invalid_task")
+      auth, auth_bytes = read_json_bytes_relative!(directory, auth_name, "invalid_task")
+      expected = task_authentication(task_id, task_bytes)
+      unless auth.is_a?(Hash) && auth.keys.sort == expected.keys.sort && auth == expected &&
+             auth_bytes == JSON.generate(expected) + "\n"
+        invalid_result!(
+          "invalid_task", "task authentication does not match the emitted task bytes",
+          {"task_id" => task_id}
+        )
+      end
+      [task, task_bytes]
+    end
+
+    def task_authentication(task_id, task_bytes)
+      {
+        "schema_version" => 1,
+        "task_id" => task_id,
+        "sha256" => Digest::SHA256.hexdigest(task_bytes)
+      }
     end
 
     def apply_result_to_data!(data, task, schema_name, payload, manifest)
@@ -1705,6 +1926,7 @@ module AdversarialReview
       applicable = data.fetch("candidates").select do |candidate|
         candidate.fetch("state") == "candidate" && candidate.fetch("round") == data.fetch("revise_round")
       end
+      applicable_by_id = records_by_id(applicable)
       expected_ids = applicable.map { |candidate| candidate.fetch("id") }.sort
       groups = payload.fetch("groups")
       group_ids = groups.map { |group| group.fetch("group_id") }
@@ -1733,7 +1955,7 @@ module AdversarialReview
       end
       groups.each do |group|
         expected_angles = group.fetch("candidate_ids").map do |candidate_id|
-          applicable.find { |item| item.fetch("id") == candidate_id }.fetch("angle")
+          applicable_by_id.fetch(candidate_id).fetch("angle")
         end.uniq.sort
         unless group.fetch("source_angles").uniq.sort == expected_angles
           invalid_result!(
@@ -1748,7 +1970,7 @@ module AdversarialReview
         )
         data.fetch("semantic_groups")[group.fetch("group_id")] = record
         group.fetch("candidate_ids").each do |candidate_id|
-          candidate = applicable.find { |item| item.fetch("id") == candidate_id }
+          candidate = applicable_by_id.fetch(candidate_id)
           candidate["group_id"] = group.fetch("group_id")
         end
       end
@@ -1764,6 +1986,7 @@ module AdversarialReview
       return apply_ultra_judge_result!(data, task, payload) if manifest.fetch("tier", "default") == "ultra"
 
       applicable = applicable_judge_candidates(data)
+      applicable_by_id = records_by_id(applicable)
       verdicts = payload.fetch("verdicts")
       require_exact_subject_coverage!(
         applicable.map { |candidate| candidate.fetch("id") },
@@ -1771,7 +1994,7 @@ module AdversarialReview
         "judge"
       )
       grouped = verdicts.group_by do |verdict|
-        candidate = applicable.find { |item| item.fetch("id") == verdict.fetch("candidate_id") }
+        candidate = applicable_by_id.fetch(verdict.fetch("candidate_id"))
         candidate.fetch("group_id", candidate.fetch("id"))
       end
       promotion_groups = []
@@ -1780,7 +2003,7 @@ module AdversarialReview
       arbitration = []
       grouped.keys.sort.each do |subject_id|
         subject_verdicts = grouped.fetch(subject_id).map do |verdict|
-          validate_and_normalize_verdict!(data, task, subject_id, verdict)
+          validate_and_normalize_verdict!(data, task, subject_id, verdict, applicable_by_id)
         end
         data.fetch("judge_votes")[subject_id] ||= []
         data.fetch("judge_votes")[subject_id].concat(subject_verdicts)
@@ -1792,12 +2015,14 @@ module AdversarialReview
         end
         case dispositions.first
         when "PROMOTE"
-          promotion_groups << promotion_group_from_verdicts(data, subject_id, subject_verdicts)
+          promotion_groups << promotion_group_from_verdicts(
+            data, subject_id, subject_verdicts, applicable_by_id
+          )
         when "REFUTE"
-          candidate_ids.each { |id| find_candidate_in_data!(data, id)["state"] = "refuted" }
+          candidate_ids.each { |id| applicable_by_id.fetch(id)["state"] = "refuted" }
           refuted_ids.concat(candidate_ids)
         when "UNPROVEN"
-          candidate_ids.each { |id| find_candidate_in_data!(data, id)["state"] = "unproven" }
+          candidate_ids.each { |id| applicable_by_id.fetch(id)["state"] = "unproven" }
           unproven_ids.concat(candidate_ids)
           add_evidence_gap!(data, task, subject_id, candidate_ids, subject_verdicts)
         end
@@ -1828,6 +2053,7 @@ module AdversarialReview
         invalid_result!("invalid_vote_identity", "ultra judge task requires voter and vote-group IDs")
       end
       applicable = applicable_judge_candidates(data)
+      applicable_by_id = records_by_id(applicable)
       verdicts = payload.fetch("verdicts")
       require_exact_subject_coverage!(
         applicable.map { |candidate| candidate.fetch("id") },
@@ -1835,7 +2061,7 @@ module AdversarialReview
         "ultra-judge"
       )
       normalized = verdicts.map do |verdict|
-        candidate = applicable.find { |item| item.fetch("id") == verdict.fetch("candidate_id") }
+        candidate = applicable_by_id.fetch(verdict.fetch("candidate_id"))
         subject_id = candidate.fetch("group_id", candidate.fetch("id"))
         existing = data.fetch("judge_votes").fetch(subject_id, [])
         if existing.any? do |vote|
@@ -1846,7 +2072,9 @@ module AdversarialReview
             {"subject_id" => subject_id, "voter_id" => voter_id}
           )
         end
-        [subject_id, validate_and_normalize_verdict!(data, task, subject_id, verdict)]
+        [subject_id, validate_and_normalize_verdict!(
+          data, task, subject_id, verdict, applicable_by_id
+        )]
       end
       normalized.each do |subject_id, verdict|
         data.fetch("judge_votes")[subject_id] ||= []
@@ -1871,10 +2099,12 @@ module AdversarialReview
         if has_unproven || conflicting_ballot
           pending << subject_id
         elsif promote_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
-          promotion_groups << promotion_group_from_verdicts(data, subject_id, promote_votes)
+          promotion_groups << promotion_group_from_verdicts(
+            data, subject_id, promote_votes, applicable_by_id
+          )
         elsif refute_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
           ids = votes.map { |vote| vote.fetch("candidate_id") }.uniq.sort
-          ids.each { |id| find_candidate_in_data!(data, id)["state"] = "refuted" }
+          ids.each { |id| applicable_by_id.fetch(id)["state"] = "refuted" }
           refuted_ids.concat(ids)
         elsif votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= expected_voters
           pending << subject_id
@@ -1944,8 +2174,8 @@ module AdversarialReview
       end
     end
 
-    def validate_and_normalize_verdict!(data, task, subject_id, verdict)
-      candidate = find_candidate_in_data!(data, verdict.fetch("candidate_id"))
+    def validate_and_normalize_verdict!(data, task, subject_id, verdict, candidates_by_id = nil)
+      candidate = find_candidate_in_data!(data, verdict.fetch("candidate_id"), candidates_by_id)
       disposition = verdict.fetch("disposition")
       evidence = verdict.fetch("evidence")
       consequence = verdict.fetch("consequence")
@@ -1986,9 +2216,10 @@ module AdversarialReview
       value.to_s.strip.downcase.gsub(/\s+/, " ")
     end
 
-    def promotion_group_from_verdicts(data, subject_id, verdicts)
+    def promotion_group_from_verdicts(data, subject_id, verdicts, candidates_by_id = nil)
+      candidates_by_id ||= records_by_id(data.fetch("candidates"))
       candidates = verdicts.map do |verdict|
-        find_candidate_in_data!(data, verdict.fetch("candidate_id"))
+        find_candidate_in_data!(data, verdict.fetch("candidate_id"), candidates_by_id)
       end.uniq { |candidate| candidate.fetch("id") }
       semantic = data.fetch("semantic_groups")[subject_id]
       location = semantic ? semantic.fetch("location") : candidates.first.fetch("location")
@@ -2048,8 +2279,9 @@ module AdversarialReview
         ]
       end
       reported_ids = ordered.take(50).map { |finding| finding.fetch("id") }
+      reported_lookup = reported_ids.each_with_object({}) { |id, indexed| indexed[id] = true }
       data.fetch("findings").each do |finding|
-        finding["reported"] = reported_ids.include?(finding.fetch("id"))
+        finding["reported"] = reported_lookup.key?(finding.fetch("id"))
       end
       overflow_findings = ordered.drop(50)
       counts = Hash.new(0)
@@ -2062,6 +2294,12 @@ module AdversarialReview
         "by_category_severity" => counts.sort.to_h,
         "items" => overflow_findings.map { |finding| finding.fetch("id") }
       }
+      overflow_lookup = data.fetch("overflow").fetch("items").each_with_object({}) do |finding_id, indexed|
+        indexed[finding_id] = true
+      end
+      data.fetch("overflow_evidence_gaps").select! do |finding_id, _gap|
+        overflow_lookup.key?(finding_id)
+      end
     end
 
     def sort_promotion_groups(groups)
@@ -2087,6 +2325,10 @@ module AdversarialReview
         )
       end
       ordered = sort_promotion_groups(validated_groups)
+      candidates_by_id = records_by_id(data.fetch("candidates"))
+      finding_ids = data.fetch("findings").each_with_object({}) do |finding, indexed|
+        indexed[finding.fetch("id")] = true
+      end
       seen_candidate_ids = {}
       first_number = data.fetch("findings").length + 1
       fingerprint = Digest::SHA256.hexdigest(data.fetch("run_id"))[0, 8]
@@ -2096,14 +2338,14 @@ module AdversarialReview
             raise Error.new("candidate_collision", "candidate belongs to multiple promotion groups", {"id" => candidate_id}, 3)
           end
           seen_candidate_ids[candidate_id] = true
-          candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
+          candidate = candidates_by_id[candidate_id]
           unless candidate && candidate.fetch("state") == "candidate"
             raise Error.new("invalid_candidate", "candidate cannot be promoted", {"id" => candidate_id}, 3)
           end
           candidate
         end
         id = format("AR-%s-%03d", fingerprint, first_number + index)
-        if data.fetch("findings").any? { |finding| finding.fetch("id") == id }
+        if finding_ids.key?(id)
           raise Error.new("finding_collision", "promoted finding ID already exists", {"id" => id}, 3)
         end
         candidates.each { |candidate| candidate["state"] = "promoted" }
@@ -2125,11 +2367,16 @@ module AdversarialReview
       promoted
     end
 
-    def find_candidate_in_data!(data, candidate_id)
-      candidate = data.fetch("candidates").find { |item| item.fetch("id") == candidate_id }
+    def find_candidate_in_data!(data, candidate_id, candidates_by_id = nil)
+      candidates_by_id ||= records_by_id(data.fetch("candidates"))
+      candidate = candidates_by_id[candidate_id]
       invalid_result!("unknown_candidate", "candidate does not exist", {"id" => candidate_id}) unless candidate
 
       candidate
+    end
+
+    def records_by_id(records)
+      records.each_with_object({}) { |record, indexed| indexed[record.fetch("id")] = record }
     end
 
     def apply_attack_result!(data, task, payload)
@@ -2285,9 +2532,17 @@ module AdversarialReview
         manifest = Atomic.read_json_relative(run_directory, "manifest.json")
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
+        verify_ingested_files!(run_directory, data)
         @manifest = manifest
         @data = data
       end
+    end
+
+    def verify_ingested_files!(run_directory, data)
+      self.class.verify_ingested_files!(
+        run_directory, data,
+        tasks_identity: @tasks_identity, results_identity: @results_identity
+      )
     end
   end
 end
