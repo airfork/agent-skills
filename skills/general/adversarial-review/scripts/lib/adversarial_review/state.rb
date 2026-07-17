@@ -151,12 +151,14 @@ module AdversarialReview
       end
       lock_path = File.join(canonical_run_dir, ".state.lock")
       create_lock(lock_path)
-      Atomic.open_lock(lock_path, exclusive: true) do
+      Atomic.open_lock(lock_path, exclusive: true) do |_lock, run_directory|
         validate_snapshot!(manifest, data)
-        Atomic.write_json(File.join(canonical_run_dir, "manifest.json"), manifest)
-        Atomic.write_json(File.join(canonical_run_dir, "state.json"), data)
-        run_identity = File.lstat(canonical_run_dir)
-        tasks_identity = File.lstat(File.join(canonical_run_dir, "tasks"))
+        Atomic.write_json_relative(run_directory, "manifest.json", manifest)
+        Atomic.write_json_relative(run_directory, "state.json", data)
+        run_identity = run_directory.stat
+        Atomic.with_relative_directory(run_directory, "tasks") do |tasks_directory|
+          tasks_identity = tasks_directory.stat
+        end
       end
       new(
         canonical_run_dir, data, manifest,
@@ -181,12 +183,14 @@ module AdversarialReview
       data = nil
       run_identity = nil
       tasks_identity = nil
-      Atomic.open_lock(lock_path, exclusive: false) do
-        manifest = Atomic.read_json(File.join(canonical_run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(canonical_run_dir, "state.json"))
+      Atomic.open_lock(lock_path, exclusive: false) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         validate_snapshot!(manifest, data)
-        run_identity = File.lstat(canonical_run_dir)
-        tasks_identity = File.lstat(File.join(canonical_run_dir, "tasks"))
+        run_identity = run_directory.stat
+        Atomic.with_relative_directory(run_directory, "tasks") do |tasks_directory|
+          tasks_identity = tasks_directory.stat
+        end
       end
       new(
         canonical_run_dir, data, manifest,
@@ -214,9 +218,9 @@ module AdversarialReview
         exclusive: false,
         expected_directory_identity: @run_identity,
         identity_code: "unsafe_run_dir"
-      ) do
-        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         @manifest = manifest
         @data = data
@@ -235,19 +239,19 @@ module AdversarialReview
         exclusive: true,
         expected_directory_identity: @run_identity,
         identity_code: "unsafe_run_dir"
-      ) do
-        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         value = yield(
           deep_freeze(deep_copy(manifest)),
           deep_freeze(deep_copy(data))
         )
-        Atomic.with_bound_directory(
-          File.dirname(task_path),
+        Atomic.with_relative_directory(
+          run_directory, "tasks",
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
-        ) do |_parent, tasks_directory|
+        ) do |tasks_directory|
           Atomic.write_new_json(tasks_directory, File.basename(task_path), value)
         end
       end
@@ -265,17 +269,18 @@ module AdversarialReview
         exclusive: false,
         expected_directory_identity: @run_identity,
         identity_code: "unsafe_run_dir"
-      ) do
-        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
-        Atomic.with_bound_directory(
-          File.dirname(task_path),
+        Atomic.with_relative_directory(
+          run_directory, "tasks",
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
-        ) do |_parent, tasks_directory|
+        ) do |tasks_directory|
           emitted = Atomic.read_json_relative(
-            tasks_directory, File.basename(task_path), code: "invalid_task"
+            tasks_directory, File.basename(task_path),
+            code: "invalid_task", unsafe_code: "invalid_task", unsafe_exit_status: 3
           )
           result = yield(
             deep_freeze(deep_copy(manifest)),
@@ -938,14 +943,19 @@ module AdversarialReview
 
     def mutate!
       lock_path = File.join(@run_dir, ".state.lock")
-      Atomic.open_lock(lock_path, exclusive: true) do
-        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+      Atomic.open_lock(
+        lock_path,
+        exclusive: true,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         verify_target_digests!(data)
         yield data
         self.class.validate_snapshot!(manifest, data)
-        Atomic.write_json(File.join(@run_dir, "state.json"), data)
+        Atomic.write_json_relative(run_directory, "state.json", data)
         @manifest = manifest
         @data = data
       end
@@ -1033,9 +1043,14 @@ module AdversarialReview
     end
 
     def refresh!
-      Atomic.open_lock(File.join(@run_dir, ".state.lock"), exclusive: false) do
-        manifest = Atomic.read_json(File.join(@run_dir, "manifest.json"))
-        data = Atomic.read_json(File.join(@run_dir, "state.json"))
+      Atomic.open_lock(
+        File.join(@run_dir, ".state.lock"),
+        exclusive: false,
+        expected_directory_identity: @run_identity,
+        identity_code: "unsafe_run_dir"
+      ) do |_lock, run_directory|
+        manifest = Atomic.read_json_relative(run_directory, "manifest.json")
+        data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         @manifest = manifest
         @data = data

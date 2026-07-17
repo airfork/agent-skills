@@ -754,6 +754,85 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_generic_transaction_never_reads_forged_run_data_after_lock_authentication
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+      forged_manifest = JSON.parse(JSON.generate(manifest))
+      forged_manifest["requested_model"] = "forged-model"
+      forged_task = AdversarialReview::Prompts.attack_task(
+        forged_manifest, "assumptions-checker", 1
+      )
+      Dir.mktmpdir("adversarial-review-descriptor-binding") do |directory|
+        run_dir = File.join(directory, "run")
+        moved_run_dir = File.join(directory, "authenticated-run")
+        replacement_run_dir = File.join(directory, "replacement-run")
+        AdversarialReview::State.create(run_dir, manifest)
+        AdversarialReview::State.create(replacement_run_dir, forged_manifest)
+        canonical_run_dir = File.realpath(run_dir)
+        authentic_manifest_bytes = File.binread(File.join(run_dir, "manifest.json"))
+        authentic_state_bytes = File.binread(File.join(run_dir, "state.json"))
+        original_open_lock = AdversarialReview::Atomic.method(:open_lock)
+        original_read_json = AdversarialReview::Atomic.method(:read_json)
+        swapped = false
+        # Pre-fix RED evidence: Generic performed two path-based snapshot reads,
+        # consumed the replacement snapshot, and returned without an error.
+        path_reads = 0
+        restore = lambda do
+          if swapped
+            File.rename(run_dir, replacement_run_dir)
+            File.rename(moved_run_dir, run_dir)
+            swapped = false
+          end
+        end
+        open_lock = proc do |path, exclusive:, **options, &operation|
+          original_open_lock.call(
+            path, exclusive: exclusive, **options
+          ) do |lock, run_directory|
+            if File.expand_path(path) == File.join(canonical_run_dir, ".state.lock") &&
+               exclusive
+              File.rename(run_dir, moved_run_dir)
+              File.rename(replacement_run_dir, run_dir)
+              swapped = true
+              begin
+                operation.call(lock, run_directory)
+              ensure
+                restore.call
+              end
+            else
+              operation.call(lock, run_directory)
+            end
+          end
+        end
+        read_json = lambda do |path|
+          value = original_read_json.call(path)
+          if swapped && File.dirname(File.expand_path(path)) == canonical_run_dir &&
+             %w[manifest.json state.json].include?(File.basename(path))
+            path_reads += 1
+            restore.call if path_reads == 2
+          end
+          value
+        end
+
+        error = AdversarialReview::Atomic.stub(:open_lock, open_lock) do
+          AdversarialReview::Atomic.stub(:read_json, read_json) do
+            assert_raises(AdversarialReview::Adapters::Generic::Error) do
+              AdversarialReview::Adapters::Generic.new.run(forged_task, run_dir)
+            end
+          end
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_equal 0, path_reads, "the transaction reopened its authenticated run by path"
+        assert_equal authentic_manifest_bytes, File.binread(File.join(run_dir, "manifest.json"))
+        assert_equal authentic_state_bytes, File.binread(File.join(run_dir, "state.json"))
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
+        assert_empty Dir.children(File.join(replacement_run_dir, "tasks"))
+      ensure
+        restore.call if defined?(restore) && restore
+      end
+    end
+  end
+
   private
 
   def build_manifest(repository, spec: nil, plan: nil, context_paths: [], tier: "default")

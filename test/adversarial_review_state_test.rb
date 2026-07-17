@@ -46,17 +46,19 @@ class AdversarialReviewStateTest < Minitest::Test
     Dir.mktmpdir("adversarial-review-state") do |directory|
       run_dir = File.join(directory, "run")
       lock_observations = []
-      original_write_json = AdversarialReview::Atomic.method(:write_json)
-      writer = lambda do |path, value|
+      original_write_json_relative = AdversarialReview::Atomic.method(:write_json_relative)
+      writer = lambda do |run_directory, name, value, **options, &operation|
         File.open(File.join(run_dir, ".state.lock"), File::RDWR) do |lock|
           acquired = lock.flock(File::LOCK_EX | File::LOCK_NB)
           lock_observations << acquired
           lock.flock(File::LOCK_UN) if acquired
         end
-        original_write_json.call(path, value)
+        original_write_json_relative.call(
+          run_directory, name, value, **options, &operation
+        )
       end
 
-      AdversarialReview::Atomic.stub(:write_json, writer) do
+      AdversarialReview::Atomic.stub(:write_json_relative, writer) do
         AdversarialReview::State.create(run_dir, manifest)
       end
 
@@ -124,16 +126,18 @@ class AdversarialReviewStateTest < Minitest::Test
   def test_bootstrap_write_failure_removes_the_new_run_and_can_retry
     Dir.mktmpdir("adversarial-review-state") do |directory|
       run_dir = File.join(directory, "run")
-      original_write_json = AdversarialReview::Atomic.method(:write_json)
+      original_write_json_relative = AdversarialReview::Atomic.method(:write_json_relative)
       writes = 0
-      writer = lambda do |path, value|
+      writer = lambda do |run_directory, name, value, **options, &operation|
         writes += 1
         raise IOError, "injected state bootstrap failure" if writes == 2
 
-        original_write_json.call(path, value)
+        original_write_json_relative.call(
+          run_directory, name, value, **options, &operation
+        )
       end
 
-      error = AdversarialReview::Atomic.stub(:write_json, writer) do
+      error = AdversarialReview::Atomic.stub(:write_json_relative, writer) do
         assert_raises(IOError) { AdversarialReview::State.create(run_dir, manifest) }
       end
 
@@ -150,9 +154,9 @@ class AdversarialReviewStateTest < Minitest::Test
       run_dir = File.join(directory, "run")
       moved_run_dir = File.join(directory, "run-created-and-moved")
       replacement_file = File.join(run_dir, "unrelated.txt")
-      original_write_json = AdversarialReview::Atomic.method(:write_json)
+      original_write_json_relative = AdversarialReview::Atomic.method(:write_json_relative)
       writes = 0
-      writer = lambda do |path, value|
+      writer = lambda do |run_directory, name, value, **options, &operation|
         writes += 1
         if writes == 2
           File.rename(run_dir, moved_run_dir)
@@ -161,10 +165,12 @@ class AdversarialReviewStateTest < Minitest::Test
           raise IOError, "injected failure after run substitution"
         end
 
-        original_write_json.call(path, value)
+        original_write_json_relative.call(
+          run_directory, name, value, **options, &operation
+        )
       end
 
-      error = AdversarialReview::Atomic.stub(:write_json, writer) do
+      error = AdversarialReview::Atomic.stub(:write_json_relative, writer) do
         assert_raises(IOError) { AdversarialReview::State.create(run_dir, manifest) }
       end
 
@@ -967,6 +973,47 @@ class AdversarialReviewStateTest < Minitest::Test
       end
 
       assert_equal "unsafe_path", error.code
+    end
+  end
+
+  def test_atomic_read_rejects_parent_swap_before_returning_parsed_json
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      parent = File.join(directory, "parent")
+      moved_parent = File.join(directory, "parent-moved")
+      outside = File.join(directory, "outside")
+      Dir.mkdir(parent)
+      Dir.mkdir(outside)
+      source = File.join(parent, "state.json")
+      File.write(source, JSON.generate({"origin" => "inside"}))
+      original_parse = JSON.method(:parse)
+      swapped = false
+      parser = lambda do |contents, *arguments, **options|
+        unless swapped
+          swapped = true
+          File.rename(parent, moved_parent)
+          File.symlink(outside, parent)
+        end
+        original_parse.call(contents, *arguments, **options)
+      end
+
+      error = JSON.stub(:parse, parser) do
+        assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::Atomic.read_json(source)
+        end
+      end
+
+      assert_equal "unsafe_path", error.code
+    end
+  end
+
+  def test_atomic_read_missing_path_preserves_unsafe_path_exit_status
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::Atomic.read_json(File.join(directory, "missing.json"))
+      end
+
+      assert_equal "unsafe_path", error.code
+      assert_equal 2, error.exit_status
     end
   end
 

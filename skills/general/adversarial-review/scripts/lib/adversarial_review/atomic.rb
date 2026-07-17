@@ -6,6 +6,14 @@ require "fcntl"
 module AdversarialReview
   module Atomic
     AT_REMOVEDIR = RUBY_PLATFORM.include?("darwin") ? 0x0080 : 0x0200
+    O_DIRECTORY = if Fcntl.const_defined?(:O_DIRECTORY)
+                    Fcntl::O_DIRECTORY
+                  elsif RUBY_PLATFORM.include?("darwin")
+                    0x00100000
+                  else
+                    0o200000
+                  end
+    MAX_JSON_BYTES = 16 * 1024 * 1024
 
     module Native
       extend Fiddle::Importer
@@ -28,42 +36,58 @@ module AdversarialReview
       destination_name = File.basename(path)
       temporary_name = ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
       with_bound_directory(File.dirname(path)) do |parent, directory|
-        destination = File.join(parent, destination_name)
-        created = false
-        begin
+        verify_directory_identity!(parent, directory)
+        write_json_relative(
+          directory, destination_name, value, temporary_name: temporary_name
+        ) do
           verify_directory_identity!(parent, directory)
-          reject_relative_nonregular(directory, destination_name)
-          flags = File::WRONLY | File::CREAT | File::EXCL
-          flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-          file = open_relative(directory, temporary_name, flags, 0o600)
-          created = true
-          begin
-            file.chmod(0o600)
-            file.write(JSON.generate(value))
-            file.write("\n")
-            file.flush
-            file.fsync
-          ensure
-            file.close unless file.closed?
-          end
-          verify_directory_identity!(parent, directory)
-          reject_relative_nonregular(directory, destination_name)
-          rename_relative(directory, temporary_name, destination_name)
-          created = false
-          directory.fsync
-          verify_directory_identity!(parent, directory)
-        rescue Errno::EEXIST
-          raise_state_error(
-            "unsafe_temp", "atomic temporary path already exists",
-            {"path" => File.join(parent, temporary_name)}
-          )
-        ensure
-          unlink_relative(directory, temporary_name) if created
         end
-        destination
+        verify_directory_identity!(parent, directory)
+        File.join(parent, destination_name)
       end
     rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
       raise_state_error("unsafe_path", "atomic write path is unsafe", {"path" => path, "cause" => error.class.name})
+    end
+
+    def write_json_relative(directory, destination_name, value, temporary_name: nil)
+      validate_relative_name!(destination_name)
+      temporary_name ||= ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
+      validate_relative_name!(temporary_name)
+      created = false
+      begin
+        reject_relative_nonregular(directory, destination_name)
+        flags = File::WRONLY | File::CREAT | File::EXCL
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        file = open_relative(directory, temporary_name, flags, 0o600)
+        created = true
+        begin
+          file.chmod(0o600)
+          file.write(JSON.generate(value))
+          file.write("\n")
+          file.flush
+          file.fsync
+        ensure
+          file.close unless file.closed?
+        end
+        yield if block_given?
+        reject_relative_nonregular(directory, destination_name)
+        rename_relative(directory, temporary_name, destination_name)
+        created = false
+        directory.fsync
+      rescue Errno::EEXIST
+        raise_state_error(
+          "unsafe_temp", "atomic temporary path already exists",
+          {"path" => temporary_name}
+        )
+      ensure
+        unlink_relative(directory, temporary_name) if created
+      end
+      destination_name
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      raise_state_error(
+        "unsafe_path", "atomic write path is unsafe",
+        {"path" => destination_name, "cause" => error.class.name}
+      )
     end
 
     def write_new_json(directory, destination_name, value)
@@ -106,20 +130,51 @@ module AdversarialReview
       )
     end
 
-    def read_json_relative(directory, name, code: "invalid_task")
+    def read_json_relative(directory, name, code: "invalid_json", unsafe_code: "unsafe_path",
+                           unsafe_exit_status: 2)
       flags = File::RDONLY
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
       file = open_relative(directory, name, flags)
       begin
-        reject_nonregular_handle(file, name)
-        JSON.parse(file.read)
+        reject_nonregular_handle(file, name, unsafe_code)
+        if file.stat.size > MAX_JSON_BYTES
+          raise_state_error(code, "persisted JSON exceeds the size limit", {"path" => name}, 3)
+        end
+        contents = file.read(MAX_JSON_BYTES + 1)
+        if contents.bytesize > MAX_JSON_BYTES
+          raise_state_error(code, "persisted JSON exceeds the size limit", {"path" => name}, 3)
+        end
+        value = JSON.parse(contents)
+        yield if block_given?
+        value
       ensure
         file.close if file && !file.closed?
       end
     rescue JSON::ParserError => error
-      raise_state_error(code, "task bundle JSON is invalid", {"path" => name, "cause" => error.message}, 3)
+      raise_state_error(code, "persisted JSON is invalid", {"path" => name, "cause" => error.message}, 3)
     rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
-      raise_state_error(code, "task bundle is unavailable", {"path" => name, "cause" => error.class.name}, 3)
+      raise_state_error(
+        unsafe_code, "persisted JSON is unavailable",
+        {"path" => name, "cause" => error.class.name}, unsafe_exit_status
+      )
+    end
+
+    def with_relative_directory(parent_directory, name, expected_identity: nil,
+                                code: "unsafe_path")
+      flags = File::RDONLY | O_DIRECTORY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      directory = open_relative(parent_directory, name, flags)
+      begin
+        stat = directory.stat
+        unless stat.directory? && (!expected_identity || same_identity?(expected_identity, stat))
+          raise_state_error(code, "relative directory identity is unsafe", {"path" => name})
+        end
+        yield directory
+      ensure
+        directory.close if directory && !directory.closed?
+      end
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      raise_state_error(code, "relative directory is unavailable", {"path" => name, "cause" => error.class.name})
     end
 
     def with_bound_directory(path, code: "unsafe_path", expected_identity: nil)
@@ -254,7 +309,7 @@ module AdversarialReview
           end
           verify_lock_pair!(file, anchor, parent, name, anchor_name, path)
           verify_directory_identity!(parent, directory, code: "unsafe_lock")
-          yield file
+          yield file, directory
         ensure
           file.flock(File::LOCK_UN) if file && !file.closed?
           file.close if file && !file.closed?
@@ -328,21 +383,10 @@ module AdversarialReview
     def read_json(path)
       name = File.basename(path)
       with_bound_directory(File.dirname(path)) do |parent, directory|
-        flags = File::RDONLY
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-        file = open_relative(directory, name, flags)
-        begin
-          reject_nonregular_handle(file, File.join(parent, name))
+        read_json_relative(directory, name) do
           verify_directory_identity!(parent, directory)
-          value = JSON.parse(file.read)
-          verify_directory_identity!(parent, directory)
-          value
-        ensure
-          file.close if file && !file.closed?
         end
       end
-    rescue JSON::ParserError => error
-      raise_state_error("invalid_json", "persisted JSON is invalid", {"path" => path, "cause" => error.message}, 3)
     rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
       raise_state_error("unsafe_path", "persisted state path is unsafe", {"path" => path, "cause" => error.class.name})
     end
@@ -357,10 +401,10 @@ module AdversarialReview
       raise
     end
 
-    def reject_nonregular_handle(file, path)
+    def reject_nonregular_handle(file, path, code = "unsafe_path")
       return if file.stat.file?
 
-      raise_state_error("unsafe_path", "opened path must be a regular file", {"path" => path})
+      raise_state_error(code, "opened path must be a regular file", {"path" => path})
     end
 
     def fsync_directory(directory)
