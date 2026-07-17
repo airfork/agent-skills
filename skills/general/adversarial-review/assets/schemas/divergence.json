@@ -47,7 +47,12 @@
         "input_tokens": {"type": "integer", "minimum": 0},
         "output_tokens": {"type": "integer", "minimum": 0},
         "cached_tokens": {"type": "integer", "minimum": 0},
-        "duration_ms": {"type": "number", "minimum": 0}
+        "duration_ms": {"type": "number", "minimum": 0},
+        "testable_criteria_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "requirements_total": {"type": "integer", "minimum": 0},
+        "requirements_covered": {"type": "integer", "minimum": 0},
+        "coverage_percent": {"type": "number", "minimum": 0, "maximum": 100},
+        "unmapped_tasks": {"type": "integer", "minimum": 0}
       }
     },
     "notes": {"type": "array", "items": {"type": "string", "minLength": 1}}

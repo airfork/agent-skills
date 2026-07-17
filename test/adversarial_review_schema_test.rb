@@ -13,8 +13,44 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_empty AdversarialReview::Schema.validate("attack", valid_attack)
   end
 
+  def test_attack_schema_accepts_optional_role_metrics
+    value = valid_attack.merge("metrics" => role_metrics)
+
+    assert_empty AdversarialReview::Schema.validate("attack", value)
+  end
+
+  def test_attack_schema_rejects_negative_role_count
+    value = valid_attack.merge("metrics" => role_metrics.merge("requirements_total" => -1))
+    errors = AdversarialReview::Schema.validate("attack", value)
+
+    assert_includes errors.map { |error| error.fetch("code") }, "minimum"
+    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.requirements_total"
+  end
+
+  def test_attack_schema_rejects_negative_role_percentage
+    value = valid_attack.merge("metrics" => role_metrics.merge("coverage_percent" => -0.1))
+    errors = AdversarialReview::Schema.validate("attack", value)
+
+    assert_includes errors.map { |error| error.fetch("code") }, "minimum"
+    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.coverage_percent"
+  end
+
+  def test_attack_schema_rejects_role_percentage_above_hundred
+    value = valid_attack.merge("metrics" => role_metrics.merge("testable_criteria_percent" => 100.1))
+    errors = AdversarialReview::Schema.validate("attack", value)
+
+    assert_includes errors.map { |error| error.fetch("code") }, "maximum"
+    assert_includes errors.map { |error| error.fetch("path") }, "$.metrics.testable_criteria_percent"
+  end
+
   def test_divergence_schema_accepts_complete_probe
     assert_empty AdversarialReview::Schema.validate("divergence", valid_divergence)
+  end
+
+  def test_divergence_schema_accepts_optional_attack_role_metrics
+    value = valid_divergence.merge("metrics" => role_metrics)
+
+    assert_empty AdversarialReview::Schema.validate("divergence", value)
   end
 
   def test_dedupe_schema_accepts_complete_groups
@@ -133,6 +169,16 @@ class AdversarialReviewSchemaTest < Minitest::Test
   end
 
   private
+
+  def role_metrics
+    {
+      "testable_criteria_percent" => 87.5,
+      "requirements_total" => 12,
+      "requirements_covered" => 10,
+      "coverage_percent" => 83.3,
+      "unmapped_tasks" => 1,
+    }
+  end
 
   def valid_attack
     {
