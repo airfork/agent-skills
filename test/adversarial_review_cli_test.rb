@@ -298,7 +298,12 @@ class AdversarialReviewCliTest < Minitest::Test
         assert_equal JSON.generate(task) + "\n", File.binread(task_path)
         assert_equal 0o600, File.stat(task_path).mode & 0o777
         assert_empty Dir.children(File.join(run_dir, "results"))
-        assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+        persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+        emitted = persisted.dig("emitted_tasks", task.fetch("task_id"))
+        assert_equal Digest::SHA256.hexdigest(File.binread(task_path)), emitted.fetch("sha256")
+        assert_equal "assumptions-checker", emitted.fetch("angle")
+        assert_equal 1, persisted.dig("task_attempts", task.fetch("task_id"))
+        refute_equal state_before, File.binread(File.join(run_dir, "state.json"))
       end
     end
   end

@@ -142,6 +142,7 @@ module AdversarialReview
         "stage" => "prepared",
         "revise_round" => 1,
         "task_attempts" => {},
+        "emitted_tasks" => {},
         "ingested_results" => {},
         "exact_duplicate_map" => {},
         "exact_duplicate_sources" => {},
@@ -373,17 +374,54 @@ module AdversarialReview
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         verify_ingested_files!(run_directory, data)
+        Atomic.with_relative_directory(
+          run_directory, "tasks", code: "unsafe_task_path", expected_identity: @tasks_identity
+        ) { |_tasks_directory| nil }
         value = yield(
           deep_freeze(deep_copy(manifest)),
           deep_freeze(deep_copy(data))
         )
+        task_bytes = JSON.generate(value) + "\n"
+        task_record = authoritative_task_record!(task_id, value, task_bytes, manifest, data)
+        existing_record = data.fetch("emitted_tasks")[task_id]
+        if existing_record && existing_record != task_record
+          invalid_result!(
+            "invalid_task", "task identity conflicts with its authoritative emitted record",
+            {"task_id" => task_id}
+          )
+        end
+        publication = nil
         Atomic.with_relative_directory(
           run_directory, "tasks",
           code: "unsafe_task_path",
           expected_identity: @tasks_identity
         ) do |tasks_directory|
-          publish_authenticated_task!(tasks_directory, task_id, value)
+          publication = publish_authenticated_task!(tasks_directory, task_id, value)
         end
+        state_published = false
+        begin
+          data.fetch("emitted_tasks")[task_id] = task_record
+          data.fetch("task_attempts")[task_id] = task_record.fetch("attempt")
+          self.class.validate_snapshot!(manifest, data)
+          Atomic.write_json_relative(
+            run_directory, "state.json", data,
+            on_publish: -> { state_published = true }
+          )
+        rescue StandardError => error
+          if state_published
+            @manifest = manifest
+            @data = data
+            raise Error.new(
+              "durability_uncertain",
+              "task and authoritative state are visible but directory durability could not be confirmed",
+              {"task_id" => task_id, "cause" => error.class.name, "message" => error.message}, 3
+            )
+          end
+          rollback_task_publication!(run_directory, task_id, publication)
+          raise
+        end
+        @manifest = manifest
+        @data = data
       end
       task_path
     end
@@ -410,6 +448,7 @@ module AdversarialReview
           expected_identity: @tasks_identity
         ) do |tasks_directory|
           emitted, _emitted_bytes = read_authenticated_task!(tasks_directory, task_id)
+          verify_authoritative_task!(task_id, emitted, _emitted_bytes, manifest, data)
           result = yield(
             deep_freeze(deep_copy(manifest)),
             deep_freeze(deep_copy(data)),
@@ -442,6 +481,7 @@ module AdversarialReview
         ) do |tasks_directory|
           task, task_bytes = read_authenticated_task!(tasks_directory, task_id)
         end
+        verify_authoritative_task!(task_id, task, task_bytes, manifest, data)
         schema_name = result_schema_name!(task)
         errors = Schema.validate(schema_name, payload)
         unless errors.empty?
@@ -859,7 +899,7 @@ module AdversarialReview
         raise Error.new("invalid_state", "manifest and state must be JSON objects", {}, 3)
       end
       required = %w[
-        schema_version run_id mode stage revise_round task_attempts candidates findings
+        schema_version run_id mode stage revise_round task_attempts emitted_tasks candidates findings
         ingested_results exact_duplicate_map exact_duplicate_sources semantic_groups
         judge_votes evidence_gaps overflow overflow_evidence_gaps
         author_actions resolution_checks pending_arbiter_subjects target_digest_history
@@ -900,7 +940,8 @@ module AdversarialReview
         raise Error.new("invalid_state", "target digest history contains invalid snapshots", {}, 3)
       end
       unless data["candidates"].is_a?(Array) && data["findings"].is_a?(Array) &&
-             data["task_attempts"].is_a?(Hash) && data["author_actions"].is_a?(Hash) &&
+             data["task_attempts"].is_a?(Hash) && data["emitted_tasks"].is_a?(Hash) &&
+             data["author_actions"].is_a?(Hash) &&
              data["ingested_results"].is_a?(Hash) && data["exact_duplicate_map"].is_a?(Hash) &&
              data["exact_duplicate_sources"].is_a?(Hash) && data["semantic_groups"].is_a?(Hash) &&
              data["judge_votes"].is_a?(Hash) && data["evidence_gaps"].is_a?(Array) &&
@@ -914,8 +955,20 @@ module AdversarialReview
       valid_attempts = data.fetch("task_attempts").all? do |task_id, attempt|
         task_id.is_a?(String) && !task_id.empty? && attempt.is_a?(Integer) && !attempt.negative?
       end
+      valid_emitted_tasks = data.fetch("emitted_tasks").all? do |task_id, record|
+        record.is_a?(Hash) && record.keys.sort == %w[angle attempt kind round sha256 task_id] &&
+          record["task_id"] == task_id && task_id.is_a?(String) && RUN_ID.match?(task_id) &&
+          RESULT_SCHEMAS.include?(record["kind"]) &&
+          (record["angle"].nil? || (record["angle"].is_a?(String) && !record["angle"].empty?)) &&
+          [1, 2].include?(record["round"]) && record["attempt"].is_a?(Integer) &&
+          record["attempt"].positive? && record["sha256"].is_a?(String) &&
+          record["sha256"].match?(/\A[0-9a-f]{64}\z/) &&
+          data.fetch("task_attempts")[task_id] == record["attempt"] &&
+          valid_authoritative_task_record?(task_id, record, manifest)
+      end
       valid_events = data.fetch("events").all? { |event| valid_event_snapshot?(event) }
-      unless valid_attempts && valid_events
+      unless valid_attempts && valid_emitted_tasks &&
+             data.fetch("task_attempts").keys.sort == data.fetch("emitted_tasks").keys.sort && valid_events
         raise Error.new("invalid_state", "persisted attempts or events are invalid", {}, 3)
       end
       unless valid_ingestion_snapshot?(data)
@@ -1027,6 +1080,21 @@ module AdversarialReview
           candidate["arbiter_evidence"].is_a?(String) && !candidate["arbiter_evidence"].strip.empty?))
     end
 
+    def self.valid_authoritative_task_record?(task_id, record, manifest)
+      match = task_id.match(/\A(?<prefix>.+)-r(?<round>[1-9]\d*)-a(?<attempt>[1-9]\d*)\z/)
+      return false unless match && record["round"] == Integer(match[:round]) &&
+                          record["attempt"] == Integer(match[:attempt]) &&
+                          match[:prefix].start_with?("#{record["kind"]}-")
+
+      angle = record["angle"]
+      return true unless angle
+
+      match[:prefix] == "#{record["kind"]}-#{angle}" &&
+        (!manifest["enabled_tasks"].is_a?(Array) || manifest.fetch("enabled_tasks").include?(angle))
+    rescue ArgumentError
+      false
+    end
+
     def self.valid_finding_snapshot?(finding, candidates_by_id)
       return false unless finding.is_a?(Hash)
 
@@ -1099,12 +1167,13 @@ module AdversarialReview
         end
       end
       valid_results = data.fetch("ingested_results").all? do |task_id, record|
+        emitted = data.fetch("emitted_tasks")[task_id]
         task_id.is_a?(String) && RUN_ID.match?(task_id) && record.is_a?(Hash) &&
           record.keys.sort == %w[round schema sha256 task_sha256] &&
           RESULT_SCHEMAS.include?(record["schema"]) && [1, 2].include?(record["round"]) &&
           [record["sha256"], record["task_sha256"]].all? do |digest|
             digest.is_a?(String) && digest.match?(/\A[0-9a-f]{64}\z/)
-          end
+          end && emitted && emitted["sha256"] == record["task_sha256"]
       end
       valid_duplicate_map = data.fetch("exact_duplicate_map").all? do |fingerprint, candidate_id|
         fingerprint.is_a?(String) && fingerprint.match?(/\A[0-9a-f]{64}\z/) &&
@@ -1630,7 +1699,23 @@ module AdversarialReview
         directory.fsync unless task_exists && auth_exists
         raise
       end
-      true
+      {"task_created" => !task_exists, "auth_created" => !auth_exists}
+    end
+
+    def rollback_task_publication!(run_directory, task_id, publication)
+      return unless publication.is_a?(Hash) && publication.values.any?
+
+      Atomic.with_relative_directory(
+        run_directory, "tasks", code: "unsafe_task_path", expected_identity: @tasks_identity
+      ) do |tasks_directory|
+        if publication["auth_created"]
+          Atomic.unlink_relative(tasks_directory, "#{task_id}.auth.json")
+        end
+        if publication["task_created"]
+          Atomic.unlink_relative(tasks_directory, "#{task_id}.json")
+        end
+        tasks_directory.fsync
+      end
     end
 
     def read_authenticated_task!(directory, task_id)
@@ -1655,6 +1740,73 @@ module AdversarialReview
         "task_id" => task_id,
         "sha256" => Digest::SHA256.hexdigest(task_bytes)
       }
+    end
+
+    def authoritative_task_record!(requested_id, task, task_bytes, manifest, data)
+      unless task.is_a?(Hash) && task["task_id"] == requested_id
+        invalid_result!(
+          "invalid_task", "task ID does not match the requested bundle identity",
+          {"task_id" => requested_id, "embedded_task_id" => task.is_a?(Hash) ? task["task_id"] : nil}
+        )
+      end
+      if task.key?("run_id") && task["run_id"] != manifest.fetch("run_id")
+        invalid_result!("invalid_task", "task run ID does not match the manifest", {"task_id" => requested_id})
+      end
+      match = requested_id.match(/\A(?<prefix>.+)-r(?<round>[1-9]\d*)-a(?<attempt>[1-9]\d*)\z/)
+      unless match
+        invalid_result!("invalid_task", "task ID does not encode a canonical round and attempt")
+      end
+      encoded_round = Integer(match[:round])
+      encoded_attempt = Integer(match[:attempt])
+      round = task.fetch("round", encoded_round)
+      attempt = task.fetch("attempt", encoded_attempt)
+      unless round == encoded_round && round == data.fetch("revise_round") &&
+             attempt == encoded_attempt && attempt.is_a?(Integer) && attempt.positive?
+        invalid_result!(
+          "invalid_task", "task round or attempt does not match its canonical task ID",
+          {"task_id" => requested_id, "round" => round, "attempt" => attempt}
+        )
+      end
+
+      kind = task["kind"]
+      kind = "attack" if kind.nil? && task["role"] == "attacker"
+      kind ||= match[:prefix].split("-").first
+      unless kind.is_a?(String) && RESULT_SCHEMAS.include?(kind) &&
+             match[:prefix].start_with?("#{kind}-")
+        invalid_result!("invalid_task", "task kind does not match its canonical task ID")
+      end
+      angle = task["angle"]
+      if angle
+        unless angle.is_a?(String) && !angle.empty? && match[:prefix] == "#{kind}-#{angle}" &&
+               (!manifest["enabled_tasks"].is_a?(Array) || manifest.fetch("enabled_tasks").include?(angle))
+          invalid_result!("invalid_task", "task angle does not match its canonical task ID or manifest")
+        end
+      end
+      {
+        "task_id" => requested_id,
+        "kind" => kind,
+        "angle" => angle,
+        "round" => round,
+        "attempt" => attempt,
+        "sha256" => Digest::SHA256.hexdigest(task_bytes)
+      }
+    rescue KeyError, ArgumentError => error
+      invalid_result!(
+        "invalid_task", "task identity is incomplete or invalid",
+        {"task_id" => requested_id, "cause" => error.message}
+      )
+    end
+
+    def verify_authoritative_task!(task_id, task, task_bytes, manifest, data)
+      expected = data.fetch("emitted_tasks")[task_id]
+      current = authoritative_task_record!(task_id, task, task_bytes, manifest, data)
+      unless expected && expected == current && data.fetch("task_attempts")[task_id] == current.fetch("attempt")
+        invalid_result!(
+          "invalid_task", "live task bytes do not match authoritative locked state",
+          {"task_id" => task_id}
+        )
+      end
+      true
     end
 
     def apply_result_to_data!(data, task, schema_name, payload, manifest)

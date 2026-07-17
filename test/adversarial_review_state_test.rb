@@ -628,17 +628,23 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
-  def test_ingest_rejects_a_task_kind_schema_mismatch_without_mutation
-    with_ingest_state(stage: "attacking", task_overrides: {"kind" => "judge"}) do |state, run_dir, task|
+  def test_emission_rejects_a_task_kind_schema_mismatch_without_mutation
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "adversarial-review-kind-mismatch")
+      state = AdversarialReview::State.create(run_dir, built)
+      angle = built.fetch("enabled_tasks").first
+      canonical = AdversarialReview::Prompts.attack_task(built, angle, 1)
+      task = canonical.merge("kind" => "judge")
       state_before = File.binread(File.join(run_dir, "state.json"))
 
       error = assert_raises(AdversarialReview::State::InvalidResult) do
-        state.ingest(task.fetch("task_id"), attack_payload(task))
+        state.create_task_bundle(task.fetch("task_id")) { task }
       end
 
-      assert_equal "invalid_task_schema", error.code
+      assert_equal "invalid_task", error.code
       assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
-      assert_empty Dir.children(File.join(run_dir, "results"))
+      assert_empty Dir.children(File.join(run_dir, "tasks"))
     end
   end
 
@@ -663,6 +669,59 @@ class AdversarialReviewStateTest < Minitest::Test
         assert_equal "invalid_task", error.code, name
         assert_equal state_before, File.binread(File.join(run_dir, "state.json")), name
         assert_empty Dir.children(File.join(run_dir, "results")), name
+      end
+    end
+  end
+
+  def test_ingest_rejects_a_replaced_task_and_recomputed_sidecar_against_locked_state
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      task_id = task.fetch("task_id")
+      task_path = File.join(run_dir, "tasks", "#{task_id}.json")
+      auth_path = File.join(run_dir, "tasks", "#{task_id}.auth.json")
+      forged = task.merge("tool_restrictions" => ["forged restriction"])
+      forged_bytes = JSON.generate(forged) + "\n"
+      forged_auth = {
+        "schema_version" => 1,
+        "task_id" => task_id,
+        "sha256" => Digest::SHA256.hexdigest(forged_bytes)
+      }
+      File.binwrite(task_path, forged_bytes)
+      File.binwrite(auth_path, JSON.generate(forged_auth) + "\n")
+      state_before = File.binread(File.join(run_dir, "state.json"))
+
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.ingest(task_id, attack_payload(forged))
+      end
+
+      assert_equal "invalid_task", error.code
+      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+      assert_empty Dir.children(File.join(run_dir, "results"))
+    end
+  end
+
+  def test_create_task_bundle_rejects_noncanonical_task_identity_before_publish
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      angle = built.fetch("enabled_tasks").first
+      canonical = AdversarialReview::Prompts.attack_task(built, angle, 1)
+      cases = [
+        [canonical.fetch("task_id"), canonical.merge("attempt" => 2)],
+        [canonical.fetch("task_id"), canonical.merge("angle" => "forged-angle")],
+        ["attack-#{angle}-r1-a2", canonical]
+      ]
+
+      cases.each_with_index do |(requested_id, task), index|
+        run_dir = File.join(repository, ".git", "adversarial-review-canonical-task-#{index}")
+        state = AdversarialReview::State.create(run_dir, built)
+        state_before = File.binread(File.join(run_dir, "state.json"))
+
+        error = assert_raises(AdversarialReview::State::InvalidResult) do
+          state.create_task_bundle(requested_id) { task }
+        end
+
+        assert_equal "invalid_task", error.code
+        assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+        assert_empty Dir.children(File.join(run_dir, "tasks"))
       end
     end
   end
@@ -997,7 +1056,16 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal task.fetch("task_id"), auth.fetch("task_id")
       assert_equal Digest::SHA256.hexdigest(File.binread(task_path)), auth.fetch("sha256")
       assert_equal 0o600, File.stat(auth_path).mode & 0o777
-      assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      record = persisted.dig("emitted_tasks", task.fetch("task_id"))
+      assert_equal task.fetch("task_id"), record.fetch("task_id")
+      assert_equal "attack", record.fetch("kind")
+      assert_nil record.fetch("angle")
+      assert_equal 1, record.fetch("round")
+      assert_equal 1, record.fetch("attempt")
+      assert_equal Digest::SHA256.hexdigest(File.binread(task_path)), record.fetch("sha256")
+      assert_equal 1, persisted.dig("task_attempts", task.fetch("task_id"))
+      refute_equal state_before, File.binread(File.join(run_dir, "state.json"))
     end
   end
 
@@ -2339,6 +2407,32 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_noncanonical_authoritative_task_identity
+    corruptions = [
+      lambda do |persisted, task_id|
+        persisted.dig("emitted_tasks", task_id)["attempt"] = 2
+        persisted.fetch("task_attempts")[task_id] = 2
+      end,
+      lambda do |persisted, task_id|
+        persisted.dig("emitted_tasks", task_id)["angle"] = "forged-angle"
+      end
+    ]
+
+    corruptions.each do |corrupt|
+      with_ingest_state(stage: "attacking") do |_state, run_dir, task|
+        persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+        corrupt.call(persisted, task.fetch("task_id"))
+        File.binwrite(File.join(run_dir, "state.json"), JSON.generate(persisted) + "\n")
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::State.load(run_dir)
+        end
+
+        assert_equal "invalid_state", error.code
+      end
+    end
+  end
+
   def test_load_rejects_malformed_events
     ["not-an-object", {}, {"type" => "transition", "from" => "prepared"}].each do |event|
       with_state do |_state, run_dir|
@@ -2468,6 +2562,7 @@ class AdversarialReviewStateTest < Minitest::Test
   def emit_result_task(state, schema, overrides = {})
     snapshot = state.to_h
     task_id = overrides.fetch("task_id", "#{schema}-batch-r#{snapshot.fetch("revise_round")}-a1")
+    encoded_attempt = task_id[/-a(?<attempt>[1-9]\d*)\z/, :attempt]
     task = {
       "schema_version" => 1,
       "run_id" => snapshot.fetch("run_id"),
@@ -2477,7 +2572,7 @@ class AdversarialReviewStateTest < Minitest::Test
       "schema_name" => schema,
       "artifact_digests" => snapshot.fetch("current_target_digests"),
       "round" => snapshot.fetch("revise_round"),
-      "attempt" => 1
+      "attempt" => encoded_attempt ? Integer(encoded_attempt) : 1
     }.merge(overrides)
     state.create_task_bundle(task_id) { task }
     task
