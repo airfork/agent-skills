@@ -252,6 +252,41 @@ class AdversarialReviewReportingTest < Minitest::Test
     assert_equal summary.fetch("open_questions"), chat.fetch("open_questions")
   end
 
+  def test_render_recomputes_every_derived_section_from_canonical_inputs
+    source = summary_source(
+      "evidence_gaps" => [{
+        "subject_id" => "G-unproven",
+        "reason" => "UNPROVEN rollback ownership",
+        "evidence" => "No accountable owner is named."
+      }]
+    )
+    summary = AdversarialReview::Reporting.summary(source)
+
+    assert_equal source.fetch("evidence_gaps"), summary.fetch("evidence_gaps")
+
+    mutations = [
+      ->(value) { value["open_questions"] = [] },
+      ->(value) { value["evidence_gaps"] = [] },
+      ->(value) { value["changelog"] = [{"id" => "invented", "summary" => "Invented"}] },
+      ->(value) { value["rejected_findings"] = [{"id" => "invented", "summary" => "Invented"}] }
+    ]
+    mutations.each do |mutate|
+      tampered = JSON.parse(JSON.generate(summary))
+      mutate.call(tampered)
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.markdown(tampered)
+      end
+      assert_equal "invalid_summary", error.code
+    end
+
+    revise = AdversarialReview::Reporting.summary(summary_source("mode" => "revise"))
+    revise["verdict"] = "PASSED"
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.markdown(revise)
+    end
+    assert_equal "invalid_summary", error.code
+  end
+
   def test_overflow_and_nonblocking_rationales_survive_every_output
     source = summary_source
     overflow_id = add_finding(source, 2, reported: false, severity: "MEDIUM")
@@ -275,13 +310,55 @@ class AdversarialReviewReportingTest < Minitest::Test
     assert_equal 1, summary.dig("overflow", "total")
     assert_equal({"Omission:MEDIUM" => 1}, summary.dig("overflow", "by_category_severity"))
     assert_equal "Reviewed and nonblocking at the report cap.",
-                 summary.dig("overflow_evidence_gaps", overflow_id, "rationale")
+                 summary.dig("overflow_evidence_gaps", "representatives", 0, "rationale")
+    assert_equal overflow_id, summary.dig("overflow", "representatives", 0, "id")
     assert_equal 1, summary.dig("metrics", "overflow_total")
     assert_equal summary.fetch("overflow"), chat.fetch("overflow")
     assert_equal summary.fetch("overflow_evidence_gaps"), chat.fetch("overflow_evidence_gaps")
     assert_includes markdown, "## Overflow"
     assert_includes markdown, "Omission:MEDIUM: 1"
     assert_includes markdown, "Reviewed and nonblocking at the report cap."
+  end
+
+  def test_large_overflow_is_bounded_but_retains_aggregate_integrity_and_verdict
+    source = resolved_revise_source
+    overflow_ids = []
+    overflow_gaps = {}
+    2.upto(202) do |index|
+      finding_id = add_finding(source, index, reported: false, severity: "MEDIUM")
+      overflow_ids << finding_id
+      overflow_gaps[finding_id] = {
+        "rationale" => "Reviewed overflow finding #{index} and found it nonblocking.",
+        "recorded_at_stage" => "resolving",
+        "round" => 1
+      }
+    end
+    source["overflow"] = {
+      "total" => overflow_ids.length,
+      "by_category_severity" => {"Omission:MEDIUM" => overflow_ids.length},
+      "items" => overflow_ids
+    }
+    source["overflow_evidence_gaps"] = overflow_gaps
+
+    summary = AdversarialReview::Reporting.summary(source)
+    markdown = AdversarialReview::Reporting.markdown(summary)
+    chat = AdversarialReview::Reporting.chat_payload(summary)
+
+    assert_equal "PASSED", summary.fetch("verdict")
+    assert_equal 201, summary.dig("overflow", "total")
+    assert_equal 201, summary.dig("metrics", "overflow_total")
+    assert_equal 201, summary.dig("overflow_evidence_gaps", "total")
+    assert_operator summary.dig("overflow", "representatives").length, :<=, 5
+    assert_operator summary.dig("overflow_evidence_gaps", "representatives").length, :<=, 5
+    refute summary.fetch("overflow").key?("findings")
+    assert_operator JSON.generate(summary).bytesize, :<, 20_000
+    assert_operator markdown.bytesize, :<, 20_000
+    assert_operator JSON.generate(chat).bytesize, :<, 40_000
+    expected_rows = summary.fetch("findings").length + summary.dig("overflow", "representatives").length
+    assert_equal expected_rows, markdown.lines.grep(/^\| AR-/).length
+    assert_operator expected_rows, :<=, 6
+    assert_includes markdown, "Omission:MEDIUM: 201"
+    assert_includes markdown, "Reviewed overflow finding 2 and found it nonblocking."
   end
 
   def test_overflow_is_required_and_must_match_unreported_findings
@@ -300,6 +377,60 @@ class AdversarialReviewReportingTest < Minitest::Test
       AdversarialReview::Reporting.summary(mismatched)
     end
     assert_equal "invalid_overflow", error.code
+  end
+
+  def test_complete_source_finding_ids_must_be_contiguous
+    source = summary_source
+    missing_id = expected_finding_id("run-report-1", 2)
+    overflow_id = add_finding(source, 3, reported: false, severity: "LOW")
+    source["overflow"] = {
+      "total" => 1,
+      "by_category_severity" => {"Omission:LOW" => 1},
+      "items" => [overflow_id]
+    }
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_findings", error.code
+    assert_includes error.message, "contiguous"
+    refute_equal missing_id, overflow_id
+  end
+
+  def test_persisted_overflow_integrity_cannot_hide_missing_ids
+    source = summary_source
+    source.fetch("findings").first["reported"] = false
+    add_finding(source, 2, reported: true, severity: "CRITICAL")
+    source["overflow"] = {
+      "total" => 1,
+      "by_category_severity" => {"Omission:HIGH" => 1},
+      "items" => [expected_finding_id("run-report-1")]
+    }
+    original = AdversarialReview::Reporting.summary(source)
+    mutations = [
+      ->(summary) { summary.dig("overflow", "id_integrity")["unreported_sha256"] = "0" * 64 },
+      ->(summary) { summary["findings"] = [] }
+    ]
+    mutations.each do |mutate|
+      summary = JSON.parse(JSON.generate(original))
+      mutate.call(summary)
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.markdown(summary)
+      end
+      assert_equal "invalid_summary", error.code
+    end
+  end
+
+  def test_reporting_rejects_more_than_fifty_reported_findings
+    source = summary_source
+    2.upto(51) { |index| add_finding(source, index, reported: true, severity: "LOW") }
+
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(source)
+    end
+
+    assert_equal "invalid_findings", error.code
   end
 
   def test_normalizes_low_level_shape_errors_into_actionable_reporting_errors
