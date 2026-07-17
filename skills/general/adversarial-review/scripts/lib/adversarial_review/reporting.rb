@@ -40,6 +40,11 @@ module AdversarialReview
     SEVERITIES = %w[CRITICAL HIGH MEDIUM LOW].freeze
     MAX_REPORTED_FINDINGS = 50
     OVERFLOW_REPRESENTATIVE_LIMIT = 5
+    # A persisted finding's required JSON keys, scalar values, and non-empty sources
+    # exceed 128 bytes even with one-character values. This intentionally low floor
+    # makes the 16 MiB state-file limit an upper bound of 131,072 findings.
+    MIN_VALID_FINDING_JSON_BYTES = 128
+    MAX_AUTHORITATIVE_FINDINGS = Atomic::MAX_JSON_BYTES / MIN_VALID_FINDING_JSON_BYTES
     MAX_REPORT_BYTES = 64 * 1024 * 1024
 
     module_function
@@ -408,6 +413,9 @@ module AdversarialReview
       unless findings.is_a?(Array) && groups.is_a?(Hash)
         invalid!("invalid_findings", "findings and semantic groups have invalid shapes")
       end
+      if findings.length > MAX_AUTHORITATIVE_FINDINGS
+        invalid!("invalid_findings", "authoritative finding total exceeds the state-file maximum")
+      end
       fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
       canonical = findings.each_with_index.map do |finding, index|
         require_hash!(finding, "finding")
@@ -559,9 +567,14 @@ module AdversarialReview
       items = overflow.fetch("items")
       counts = overflow.fetch("by_category_severity")
       unless total.is_a?(Integer) && total >= 0 && items.is_a?(Array) &&
-             items.all? { |id| id.is_a?(String) } && items.uniq == items && counts.is_a?(Hash) &&
+             items.all? { |id| id.is_a?(String) } && counts.is_a?(Hash) &&
              counts.all? { |key, count| key.is_a?(String) && !key.empty? && count.is_a?(Integer) && count.positive? }
         invalid!("invalid_overflow", "overflow values have invalid shapes")
+      end
+      item_lookup = {}
+      items.each do |finding_id|
+        invalid!("invalid_overflow", "overflow item IDs must be unique") if item_lookup.key?(finding_id)
+        item_lookup[finding_id] = true
       end
       unreported = findings.reject { |finding| finding.fetch("reported") }
       expected_ids = unreported.map { |finding| finding.fetch("id") }
@@ -574,7 +587,8 @@ module AdversarialReview
         expected_counts["#{finding.fetch("category")}:#{finding.fetch("severity")}"] += 1
       end
       expected_counts = expected_counts.sort.to_h
-      unless total == expected_ids.length && items.sort == expected_ids.sort &&
+      unless total == expected_ids.length && items.length == expected_ids.length &&
+             expected_ids.all? { |finding_id| item_lookup.key?(finding_id) } &&
              counts == expected_counts && total == counts.values.inject(0, :+)
         invalid!(
           "invalid_overflow", "overflow does not match unreported promoted findings",
@@ -625,7 +639,13 @@ module AdversarialReview
         {
           "total" => total,
           "by_category_severity" => counts.keys.sort.each_with_object({}) { |key, result| result[key] = counts[key] },
-          "id_integrity" => overflow_id_integrity(findings.length, expected_ids),
+          "id_integrity" => overflow_id_integrity(
+            findings.length,
+            findings.select { |finding| finding.fetch("reported") }.map { |finding| finding.fetch("id") },
+            expected_ids.length,
+            expected_ids.first,
+            expected_ids.last
+          ),
           "representatives" => representative_findings
         },
         {
@@ -684,13 +704,20 @@ module AdversarialReview
       "PASSED"
     end
 
-    def overflow_id_integrity(authoritative_total, unreported_ids)
+    def overflow_id_integrity(
+      authoritative_total, reported_ids, overflow_total, first_unreported_id, last_unreported_id
+    )
+      partition = {
+        "authoritative_total" => authoritative_total,
+        "reported_ids" => reported_ids,
+        "overflow_total" => overflow_total
+      }
       {
         "algorithm" => "sha256",
         "authoritative_total" => authoritative_total,
-        "first_unreported_id" => unreported_ids.first,
-        "last_unreported_id" => unreported_ids.last,
-        "unreported_sha256" => Digest::SHA256.hexdigest(JSON.generate(unreported_ids))
+        "first_unreported_id" => first_unreported_id,
+        "last_unreported_id" => last_unreported_id,
+        "partition_sha256" => Digest::SHA256.hexdigest(JSON.generate(partition))
       }
     end
 
@@ -1179,30 +1206,44 @@ module AdversarialReview
       unless overflow.keys.sort == %w[by_category_severity id_integrity representatives total]
         invalid!("invalid_summary", "render overflow has unexpected or missing fields")
       end
-      total = validate_render_aggregate!(
-        overflow.fetch("by_category_severity"), overflow.fetch("total"), "overflow"
-      )
-      validate_render_count_dimensions!(overflow.fetch("by_category_severity"), SEVERITIES)
       integrity = overflow.fetch("id_integrity")
       require_hash!(integrity, "render overflow ID integrity")
       unless integrity.keys.sort == %w[
-        algorithm authoritative_total first_unreported_id last_unreported_id unreported_sha256
+        algorithm authoritative_total first_unreported_id last_unreported_id partition_sha256
       ]
         invalid!("invalid_summary", "render overflow ID integrity has invalid fields")
       end
       authoritative_total = integrity.fetch("authoritative_total")
-      unless authoritative_total.is_a?(Integer) && authoritative_total == findings.length + total
+      unless authoritative_total.is_a?(Integer) && authoritative_total >= 0
+        invalid!("invalid_summary", "render overflow authoritative total is invalid")
+      end
+      if authoritative_total > MAX_AUTHORITATIVE_FINDINGS
+        invalid!("invalid_summary", "render overflow authoritative total exceeds the state-file maximum")
+      end
+      total = validate_render_aggregate!(
+        overflow.fetch("by_category_severity"), overflow.fetch("total"), "overflow"
+      )
+      validate_render_count_dimensions!(overflow.fetch("by_category_severity"), SEVERITIES)
+      unless authoritative_total == findings.length + total
         invalid!("invalid_summary", "render overflow authoritative total is inconsistent")
       end
-      fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
-      complete_ids = (1..authoritative_total).map { |suffix| format("AR-%s-%03d", fingerprint, suffix) }
       reported_ids = findings.map { |finding| finding.fetch("id") }
-      unless (reported_ids - complete_ids).empty?
-        invalid!("invalid_summary", "render reported IDs exceed the authoritative finding range")
+      reported_suffixes = reported_ids.each_with_object({}) do |finding_id, indexed|
+        suffix = finding_id_suffix(finding_id, run_id)
+        if suffix > authoritative_total
+          invalid!("invalid_summary", "render reported IDs exceed the authoritative finding range")
+        end
+        indexed[suffix] = true
       end
-      reported_lookup = reported_ids.each_with_object({}) { |finding_id, indexed| indexed[finding_id] = true }
-      unreported_ids = complete_ids.reject { |finding_id| reported_lookup.key?(finding_id) }
-      expected_integrity = overflow_id_integrity(authoritative_total, unreported_ids)
+      first_unreported_id = implicit_unreported_boundary(
+        run_id, authoritative_total, reported_suffixes, :first
+      )
+      last_unreported_id = implicit_unreported_boundary(
+        run_id, authoritative_total, reported_suffixes, :last
+      )
+      expected_integrity = overflow_id_integrity(
+        authoritative_total, reported_ids, total, first_unreported_id, last_unreported_id
+      )
       unless integrity == expected_integrity
         invalid!("invalid_summary", "render overflow ID integrity is inconsistent")
       end
@@ -1214,7 +1255,8 @@ module AdversarialReview
       end
       representative_ids = representatives.map do |representative|
         validate_render_overflow_representative!(
-          representative, unreported_ids, overflow.fetch("by_category_severity")
+          representative, run_id, authoritative_total, reported_suffixes,
+          overflow.fetch("by_category_severity")
         )
       end
       unless representative_ids.uniq == representative_ids
@@ -1250,7 +1292,7 @@ module AdversarialReview
         finding_id = gap.fetch("id")
         category = validate_enum!("overflow evidence-gap category", gap.fetch("category"), CATEGORIES)
         severity = validate_enum!("overflow evidence-gap severity", gap.fetch("severity"), %w[MEDIUM LOW])
-        unless unreported_ids.include?(finding_id) &&
+        unless implicit_unreported_id?(finding_id, run_id, authoritative_total, reported_suffixes) &&
                gaps.fetch("by_category_severity").fetch("#{category}:#{severity}", 0).positive?
           invalid!("invalid_summary", "render overflow evidence-gap representative is inconsistent")
         end
@@ -1297,7 +1339,9 @@ module AdversarialReview
       true
     end
 
-    def validate_render_overflow_representative!(representative, unreported_ids, counts)
+    def validate_render_overflow_representative!(
+      representative, run_id, authoritative_total, reported_suffixes, counts
+    )
       require_hash!(representative, "render overflow representative")
       unless representative.keys.sort == %w[category id location severity summary]
         invalid!("invalid_summary", "render overflow representative has invalid fields")
@@ -1305,12 +1349,28 @@ module AdversarialReview
       finding_id = representative.fetch("id")
       category = validate_enum!("overflow representative category", representative.fetch("category"), CATEGORIES)
       severity = validate_enum!("overflow representative severity", representative.fetch("severity"), SEVERITIES)
-      unless unreported_ids.include?(finding_id) && counts.fetch("#{category}:#{severity}", 0).positive?
+      unless implicit_unreported_id?(finding_id, run_id, authoritative_total, reported_suffixes) &&
+             counts.fetch("#{category}:#{severity}", 0).positive?
         invalid!("invalid_summary", "render overflow representative is inconsistent")
       end
       nonempty_string!(representative.fetch("location"), "overflow representative location")
       nonempty_string!(representative.fetch("summary"), "overflow representative summary")
       finding_id
+    end
+
+    def implicit_unreported_id?(finding_id, run_id, authoritative_total, reported_suffixes)
+      suffix = finding_id_suffix(finding_id, run_id)
+      suffix <= authoritative_total && !reported_suffixes.key?(suffix)
+    end
+
+    def implicit_unreported_boundary(run_id, authoritative_total, reported_suffixes, direction)
+      return nil if authoritative_total == reported_suffixes.length
+
+      suffix = direction == :first ? 1 : authoritative_total
+      step = direction == :first ? 1 : -1
+      suffix += step while reported_suffixes.key?(suffix)
+      fingerprint = Digest::SHA256.hexdigest(run_id)[0, 8]
+      format("AR-%s-%03d", fingerprint, suffix)
     end
 
     def validate_render_metrics!(metrics, findings, overflow)

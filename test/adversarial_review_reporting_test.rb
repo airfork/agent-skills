@@ -409,7 +409,7 @@ class AdversarialReviewReportingTest < Minitest::Test
     }
     original = AdversarialReview::Reporting.summary(source)
     mutations = [
-      ->(summary) { summary.dig("overflow", "id_integrity")["unreported_sha256"] = "0" * 64 },
+      ->(summary) { summary.dig("overflow", "id_integrity")["partition_sha256"] = "0" * 64 },
       ->(summary) { summary["findings"] = [] }
     ]
     mutations.each do |mutate|
@@ -420,6 +420,31 @@ class AdversarialReviewReportingTest < Minitest::Test
       end
       assert_equal "invalid_summary", error.code
     end
+  end
+
+  def test_huge_authoritative_total_is_rejected_before_partition_expansion
+    summary = AdversarialReview::Reporting.summary(summary_source)
+    huge_total = (AdversarialReview::Atomic::MAX_JSON_BYTES / 128) + 1
+    overflow = summary.fetch("overflow")
+    overflow["total"] = huge_total - summary.fetch("findings").length
+    overflow["by_category_severity"] = {"Omission:LOW" => overflow.fetch("total")}
+    overflow.dig("id_integrity")["authoritative_total"] = huge_total
+    expanded = false
+    expansion_probe = lambda do |*_arguments|
+      expanded = true
+      raise "partition expansion reached"
+    end
+
+    error = nil
+    AdversarialReview::Reporting.stub(:overflow_id_integrity, expansion_probe) do
+      error = assert_raises(AdversarialReview::Reporting::Error) do
+        AdversarialReview::Reporting.markdown(summary)
+      end
+    end
+
+    refute expanded
+    assert_equal "invalid_summary", error.code
+    assert_includes error.message, "maximum"
   end
 
   def test_reporting_rejects_more_than_fifty_reported_findings
