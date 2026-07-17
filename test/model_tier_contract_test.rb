@@ -281,6 +281,25 @@ class ModelTierContractTest < Minitest::Test
     assert_includes skill, "Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation."
   end
 
+  def test_adversarial_role_payload_contracts_are_normative
+    attack_angles = read("skills/general/adversarial-review/attack-angles.md")
+    judge_rubric = read("skills/general/adversarial-review/judge-rubric.md")
+
+    assert_includes attack_angles, '"artifact_digests": {"docs/spec.md": "<64 lowercase hex SHA-256>"}'
+    assert_includes attack_angles, '"checks_completed": ["named check actually performed"]'
+    assert_includes attack_angles, '"location": {"path": "docs/spec.md", "line_start": 12, "line_end": 14, "heading": "Rollout"}'
+    assert_includes attack_angles, "Every attacker and divergence probe must return the current artifact digests and the checks it actually completed."
+
+    assert_includes judge_rubric, "Candidate IDs are immutable after ingestion and use `C-<angle-slug>-<attempt>-<sequence>`; every later role returns those IDs instead of batch-local indexes."
+    assert_includes judge_rubric, '"disposition": "PROMOTE|REFUTE|UNPROVEN"'
+    assert_includes judge_rubric, "`UNPROVEN` records an evidence gap; it is neither a promotion nor a refutation."
+    assert_includes judge_rubric, "At `--ultra`, aggregate three independent votes only when at least two voters independently meet the evidence burden for the same `PROMOTE` or `REFUTE` disposition."
+    assert_includes judge_rubric, "Any split involving `UNPROVEN` goes to arbitration and is never counted as a refutation."
+    assert_includes judge_rubric, "- `author-is-right` -> `REJECTED`"
+    assert_includes judge_rubric, "- `judge-is-right` -> `UNRESOLVED`"
+    assert_includes judge_rubric, "- `needs-human` -> `UNRESOLVED`"
+  end
+
   def test_codex_model_inheritance_is_structurally_guarded
     agent_paths = Dir.glob(File.join(REPO_UNDER_TEST, "skills", "*", "*", "agents", "codex", "*.toml"))
     refute_empty agent_paths

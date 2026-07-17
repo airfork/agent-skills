@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "task_id", "angle", "probe_id", "hypothesis", "artifact_digests", "checks_completed", "findings", "metrics", "notes"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "run_id": {"type": "string", "minLength": 1},
+    "task_id": {"type": "string", "minLength": 1},
+    "angle": {"type": "string", "minLength": 1},
+    "probe_id": {"type": "string", "enum": ["probe-1", "probe-2", "probe-3"]},
+    "hypothesis": {"type": "string", "minLength": 1},
+    "artifact_digests": {
+      "type": "object",
+      "additionalProperties": {"type": "string", "minLength": 1, "pattern": "^[0-9a-f]{64}$"}
+    },
+    "checks_completed": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["location", "category", "summary", "evidence", "consequence"],
+        "properties": {
+          "location": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path", "line_start", "line_end", "heading"],
+            "properties": {
+              "path": {"type": "string", "minLength": 1},
+              "line_start": {"type": "integer", "minimum": 1},
+              "line_end": {"type": "integer", "minimum": 1},
+              "heading": {"type": "string", "minLength": 1}
+            }
+          },
+          "category": {"enum": ["Omission", "Ambiguity", "Inconsistency", "Incorrect fact", "Extraneous"]},
+          "summary": {"type": "string", "minLength": 1},
+          "evidence": {"type": "string", "minLength": 1},
+          "consequence": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "input_tokens": {"type": "integer", "minimum": 0},
+        "output_tokens": {"type": "integer", "minimum": 0},
+        "cached_tokens": {"type": "integer", "minimum": 0},
+        "duration_ms": {"type": "number", "minimum": 0}
+      }
+    },
+    "notes": {"type": "array", "items": {"type": "string", "minLength": 1}}
+  }
+}

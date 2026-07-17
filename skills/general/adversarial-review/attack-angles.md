@@ -2,14 +2,23 @@
 
 Each attacker gets the same packet, one angle, and a fresh read-only context. Attackers may read repository files needed to check claims. They must output JSON only.
 
+## Normative Attack Result
+
+Every attacker and divergence probe must return the current artifact digests and the checks it actually completed. Paths identify the reviewed artifact, digests are 64-character lowercase hexadecimal SHA-256 values, and locations are structured records rather than `path:line` strings.
+
 Common output:
 
 ```json
 {
+  "schema_version": 1,
+  "run_id": "ar-20260717-example",
+  "task_id": "attack-assumptions-1",
   "angle": "angle name",
+  "artifact_digests": {"docs/spec.md": "<64 lowercase hex SHA-256>"},
+  "checks_completed": ["named check actually performed"],
   "findings": [
     {
-      "location": "path:line or section",
+      "location": {"path": "docs/spec.md", "line_start": 12, "line_end": 14, "heading": "Rollout"},
       "category": "Omission|Ambiguity|Inconsistency|Incorrect fact|Extraneous",
       "summary": "concrete defect",
       "evidence": "quote from doc or repo evidence",
@@ -20,6 +29,8 @@ Common output:
   "notes": []
 }
 ```
+
+The `attack` schema in `assets/schemas/attack.json` is the closed, executable contract. Do not add metadata or substitute prose locations. Record only checks that were actually performed; a missing required check may be retried by the control plane.
 
 Do not include weak preferences. A finding needs a concrete consequence for implementation, testing, user behavior, safety, security, schedule risk, or maintainability.
 
@@ -162,17 +173,23 @@ Procedure:
 3. The parent diffs the outlines for materially different architecture, state model, API, sequencing, validation, or rollout assumptions.
 4. Treat divergence as empirical ambiguity evidence and send it through cull.
 
-Attacker output:
+Each divergence task uses one immutable `probe_id` (`probe-1`, `probe-2`, or `probe-3`), states its concrete `hypothesis`, and otherwise uses the same envelope, findings, structured locations, artifact digests, checks, metrics, and notes as the common attack result.
+
+Attacker output follows `assets/schemas/divergence.json`:
 
 ```json
 {
+  "schema_version": 1,
+  "run_id": "ar-20260717-example",
+  "task_id": "divergence-1",
   "angle": "divergence-probe",
-  "implementation_outline": {
-    "files": [],
-    "data_flow": [],
-    "verification": []
-  },
-  "ambiguity_evidence": []
+  "probe_id": "probe-1",
+  "hypothesis": "The rollout is implemented as an explicit state machine.",
+  "artifact_digests": {"docs/spec.md": "<64 lowercase hex SHA-256>"},
+  "checks_completed": ["implementation outline", "state model", "verification path"],
+  "findings": [],
+  "metrics": {},
+  "notes": []
 }
 ```
 
