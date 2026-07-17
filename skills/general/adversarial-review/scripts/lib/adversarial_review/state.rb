@@ -59,6 +59,18 @@ module AdversarialReview
       "fixed" => "resolved",
       "rejected" => "rejected"
     }.freeze
+    MUTATION_STAGES = {
+      "ingest_candidate" => %w[attacking fresh-sweep].freeze,
+      "promote" => %w[culling culling-new-findings].freeze,
+      "record_author_action" => %w[awaiting-author].freeze,
+      "record_resolution" => %w[resolving].freeze,
+      "set_pending_arbiter_subjects" => %w[resolving culling-new-findings].freeze,
+      "require_fresh_sweep" => %w[resolving culling-new-findings].freeze,
+      "mark_fresh_sweep_completed" => %w[fresh-sweep].freeze,
+      "record_degraded_capability" => TRANSITIONS.keys.freeze,
+      "update_current_digests" => TRANSITIONS.keys.freeze,
+      "apply_arbiter" => %w[arbitrating].freeze
+    }.freeze
 
     def self.default_run_dir(repository:, run_id:)
       validate_run_id!(run_id)
@@ -235,6 +247,7 @@ module AdversarialReview
       slug = sanitize_angle(angle)
       created = nil
       mutate! do |data|
+        ensure_mutation_stage!(data, "ingest_candidate")
         sequence = data.fetch("candidates").count do |candidate|
           candidate.fetch("angle") == slug && candidate.fetch("attempt") == attempt
         end + 1
@@ -261,6 +274,7 @@ module AdversarialReview
       end
       promoted = nil
       mutate! do |data|
+        ensure_mutation_stage!(data, "promote")
         validated_groups = groups.map { |group| validate_promotion_group!(group) }
         group_ids = validated_groups.map { |group| group.fetch("group_id") }
         duplicate_group_id = group_ids.group_by { |id| id }.find { |_id, ids| ids.length > 1 }
@@ -334,6 +348,7 @@ module AdversarialReview
 
     def record_author_action(finding_id, action)
       mutate! do |data|
+        ensure_mutation_stage!(data, "record_author_action")
         find_finding!(data, finding_id)
         status = action.is_a?(Hash) ? action["status"] : action
         unless %w[fixed rejected].include?(status)
@@ -360,6 +375,7 @@ module AdversarialReview
         raise Error.new("invalid_resolution", "resolution state is invalid", {"status" => status}, 3)
       end
       mutate! do |data|
+        ensure_mutation_stage!(data, "record_resolution")
         finding = find_finding!(data, finding_id)
         if status == "stuck" && data.fetch("revise_round") < 2
           raise Error.new(
@@ -385,6 +401,7 @@ module AdversarialReview
         raise Error.new("invalid_arbiter_subjects", "arbiter subjects must be finding IDs", {}, 3)
       end
       mutate! do |data|
+        ensure_mutation_stage!(data, "set_pending_arbiter_subjects")
         finding_ids.each { |id| find_finding!(data, id) }
         data["pending_arbiter_subjects"] = finding_ids.uniq.sort
       end
@@ -393,6 +410,7 @@ module AdversarialReview
 
     def require_fresh_sweep!
       mutate! do |data|
+        ensure_mutation_stage!(data, "require_fresh_sweep")
         data["fresh_sweep_required"] = true
         data["fresh_sweep_completed"] = false
       end
@@ -400,7 +418,10 @@ module AdversarialReview
     end
 
     def mark_fresh_sweep_completed!
-      mutate! { |data| data["fresh_sweep_completed"] = true }
+      mutate! do |data|
+        ensure_mutation_stage!(data, "mark_fresh_sweep_completed")
+        data["fresh_sweep_completed"] = true
+      end
       self
     end
 
@@ -409,6 +430,7 @@ module AdversarialReview
         raise Error.new("invalid_capability", "degraded capability must be named", {}, 3)
       end
       mutate! do |data|
+        ensure_mutation_stage!(data, "record_degraded_capability")
         data.fetch("degraded_capabilities") << capability
         data.fetch("degraded_capabilities").uniq!
         data.fetch("degraded_capabilities").sort!
@@ -419,6 +441,7 @@ module AdversarialReview
     def update_current_digests(digests)
       validate_digest_set!(digests)
       mutate! do |data|
+        ensure_mutation_stage!(data, "update_current_digests")
         unless digests.keys.sort == data.fetch("current_target_digests").keys.sort
           raise Error.new("target_digest_mismatch", "target digest paths changed", {"current" => digests}, 3)
         end
@@ -445,6 +468,7 @@ module AdversarialReview
         raise Error.new("invalid_arbiter_verdict", "arbiter verdict is invalid", {"verdict" => verdict}, 3)
       end
       mutate! do |data|
+        ensure_mutation_stage!(data, "apply_arbiter")
         finding = find_finding!(data, finding_id)
         case verdict
         when "author-is-right"
@@ -510,6 +534,9 @@ module AdversarialReview
              manifest["mode"] == data["mode"] && [1, 2].include?(data["revise_round"])
         raise Error.new("invalid_state", "persisted stage, mode, or revise round is invalid", {}, 3)
       end
+      unless data["next_action"] == NEXT_ACTIONS.fetch(data["stage"])
+        raise Error.new("invalid_state", "persisted next action does not match the stage", {}, 3)
+      end
       unless data["target_digest_history"].is_a?(Array) && !data["target_digest_history"].empty? &&
              data["target_digest_history"].all? { |entry| entry.is_a?(Hash) } &&
              data["current_target_digests"].is_a?(Hash)
@@ -534,6 +561,13 @@ module AdversarialReview
              [true, false].include?(data["fresh_sweep_required"]) &&
              [true, false].include?(data["fresh_sweep_completed"])
         raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
+      end
+      valid_attempts = data.fetch("task_attempts").all? do |task_id, attempt|
+        task_id.is_a?(String) && !task_id.empty? && attempt.is_a?(Integer) && !attempt.negative?
+      end
+      valid_events = data.fetch("events").all? { |event| valid_event_snapshot?(event) }
+      unless valid_attempts && valid_events
+        raise Error.new("invalid_state", "persisted attempts or events are invalid", {}, 3)
       end
       unless data.fetch("candidates").all? { |candidate| valid_candidate_snapshot?(candidate) }
         raise Error.new("invalid_state", "persisted candidates are invalid", {}, 3)
@@ -571,6 +605,17 @@ module AdversarialReview
       findings_by_id = data.fetch("findings").each_with_object({}) do |finding, indexed|
         indexed[finding.fetch("id")] = finding
       end
+      source_counts = Hash.new(0)
+      data.fetch("findings").each do |finding|
+        finding.fetch("candidate_ids").each { |candidate_id| source_counts[candidate_id] += 1 }
+      end
+      valid_candidate_ownership = candidates_by_id.all? do |candidate_id, candidate|
+        count = source_counts[candidate_id]
+        candidate.fetch("state") == "promoted" ? count == 1 : count.zero?
+      end
+      unless valid_candidate_ownership && source_counts.values.all? { |count| count == 1 }
+        raise Error.new("invalid_state", "promoted candidate ownership is invalid", {}, 3)
+      end
       valid_actions = data.fetch("author_actions").all? do |finding_id, action|
         findings_by_id.key?(finding_id) && valid_author_action_snapshot?(action)
       end
@@ -591,6 +636,17 @@ module AdversarialReview
       end
       unless valid_actions && valid_resolutions && valid_arbiter_subjects && valid_pairings
         raise Error.new("invalid_state", "persisted finding disposition maps are invalid", {}, 3)
+      end
+      if %w[complete did-not-converge].include?(data.fetch("stage"))
+        terminal_event = data.fetch("events").last
+        unless terminal_event && terminal_event["type"] == "transition" &&
+               terminal_event["to"] == data.fetch("stage")
+          raise Error.new("invalid_state", "terminal state is missing its terminal transition", {}, 3)
+        end
+        if data.fetch("stage") == "complete" &&
+           !completion_blockers(data, from_stage: terminal_event.fetch("from")).empty?
+          raise Error.new("invalid_state", "complete state violates completion invariants", {}, 3)
+        end
       end
       true
     rescue KeyError, TypeError => error
@@ -643,12 +699,43 @@ module AdversarialReview
       %w[fixed rejected].include?(status)
     end
 
+    def self.valid_event_snapshot?(event)
+      return false unless event.is_a?(Hash) && event["type"].is_a?(String) && !event["type"].empty?
+      return true unless event["type"] == "transition"
+
+      from = event["from"]
+      to = event["to"]
+      from.is_a?(String) && to.is_a?(String) && TRANSITIONS.fetch(from, []).include?(to)
+    end
+
     def self.terminal_pairing(action, resolution)
       status = action.is_a?(Hash) ? action["status"] : action
       expected_resolution = TERMINAL_PAIRINGS[status]
       return :incomplete unless expected_resolution && %w[resolved rejected].include?(resolution)
 
       expected_resolution == resolution ? :complete : :invalid
+    end
+
+    def self.completion_blockers(data, from_stage:)
+      blockers = []
+      unless data.fetch("current_target_digests") == data.fetch("target_digest_history").last
+        blockers << "target-digest-mismatch"
+      end
+      blockers << "pending-arbiter" unless data.fetch("pending_arbiter_subjects").empty?
+      if data.fetch("fresh_sweep_required") && !data.fetch("fresh_sweep_completed")
+        blockers << "fresh-sweep-incomplete"
+      end
+      blockers << "degraded-capabilities" unless data.fetch("degraded_capabilities").empty?
+      blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
+      data.fetch("findings").each do |finding|
+        finding_id = finding.fetch("id")
+        action = data.fetch("author_actions")[finding_id]
+        resolution = data.fetch("resolution_checks")[finding_id]
+        blockers << "author-action:#{finding_id}" unless valid_author_action_snapshot?(action)
+        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(resolution)
+        blockers << "terminal-pair:#{finding_id}" if terminal_pairing(action, resolution) == :invalid
+      end
+      blockers
     end
 
     def self.canonical_missing_path(path)
@@ -739,29 +826,24 @@ module AdversarialReview
     end
 
     def completion_blockers(data, from_stage:)
-      blockers = []
-      blockers << "target-digest-mismatch" unless target_digests_match?(data)
-      blockers << "pending-arbiter" unless data.fetch("pending_arbiter_subjects").empty?
-      if data.fetch("fresh_sweep_required") && !data.fetch("fresh_sweep_completed")
-        blockers << "fresh-sweep-incomplete"
-      end
-      blockers << "degraded-capabilities" unless data.fetch("degraded_capabilities").empty?
-      blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
-      data.fetch("findings").each do |finding|
-        finding_id = finding.fetch("id")
-        action = data["author_actions"][finding_id]
-        resolution = data["resolution_checks"][finding_id]
-        blockers << "author-action:#{finding_id}" unless terminal_author_action?(action)
-        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(resolution)
-        if self.class.terminal_pairing(action, resolution) == :invalid
-          blockers << "terminal-pair:#{finding_id}"
-        end
-      end
-      blockers
+      self.class.completion_blockers(data, from_stage: from_stage)
     end
 
-    def terminal_author_action?(action)
-      self.class.valid_author_action_snapshot?(action)
+    def ensure_mutation_stage!(data, operation)
+      stage = data.fetch("stage")
+      if %w[complete did-not-converge].include?(stage)
+        raise Error.new(
+          "terminal_state", "terminal review state cannot be mutated",
+          {"stage" => stage, "operation" => operation}, 3
+        )
+      end
+      allowed = MUTATION_STAGES.fetch(operation)
+      return if allowed.include?(stage)
+
+      raise Error.new(
+        "invalid_stage", "review state mutation is not allowed in the current stage",
+        {"stage" => stage, "operation" => operation, "allowed" => allowed}, 3
+      )
     end
 
     def target_digests_match?(data)

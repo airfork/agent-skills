@@ -223,6 +223,7 @@ class AdversarialReviewStateTest < Minitest::Test
 
   def test_ingests_immutable_candidate_ids_per_angle_and_attempt
     with_state do |state, _run_dir|
+      state.transition_to("attacking")
       first = state.ingest_candidate("Assumptions Checker", 1, finding("first"))
       second = state.ingest_candidate("Assumptions Checker", 1, finding("second"))
 
@@ -249,8 +250,10 @@ class AdversarialReviewStateTest < Minitest::Test
       left = AdversarialReview::State.create(File.join(directory, "left"), manifest)
       right = AdversarialReview::State.create(File.join(directory, "right"), manifest)
       [left, right].each do |state|
+        state.transition_to("attacking")
         state.ingest_candidate("tester", 1, finding("low"))
         state.ingest_candidate("tester", 1, finding("high"))
+        advance(state, %w[deduplicating culling])
       end
       low = promotion_group("G-low", "C-tester-1-1", "LOW", 0.99, "z.md", 4)
       high = promotion_group("G-high", "C-tester-1-2", "HIGH", 0.80, "a.md", 9)
@@ -267,8 +270,10 @@ class AdversarialReviewStateTest < Minitest::Test
 
   def test_promotion_rejects_duplicate_semantic_group_ids
     with_state do |state, _run_dir|
+      state.transition_to("attacking")
       state.ingest_candidate("tester", 1, finding("first"))
       state.ingest_candidate("tester", 1, finding("second"))
+      advance(state, %w[deduplicating culling])
       groups = [
         promotion_group("G-duplicate", "C-tester-1-1", "HIGH", 0.9, "a.md", 1),
         promotion_group("G-duplicate", "C-tester-1-2", "HIGH", 0.9, "a.md", 1)
@@ -293,7 +298,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_record_author_action_rejects_an_unknown_terminal_status
-    with_promoted_state("mode" => "critique") do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
       error = assert_raises(AdversarialReview::State::Error) do
         state.record_author_action(finding_id, "waived")
       end
@@ -304,8 +309,9 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_completion_requires_a_terminal_resolution
-    with_promoted_state({}, stage: "culling-new-findings") do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
       state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
 
       error = assert_completion_blocked(state)
 
@@ -314,47 +320,50 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_completion_rejects_fixed_action_with_rejected_resolution
-    with_promoted_state("mode" => "critique") do |state, finding_id, run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, run_dir|
       state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
       state.record_resolution(finding_id, "resolved")
       persisted = state.to_h
       persisted.fetch("resolution_checks")[finding_id] = "rejected"
       persisted.fetch("findings").first["state"] = "rejected"
 
-      refute state.can_complete?(persisted, from_stage: "culling")
+      refute state.can_complete?(persisted, from_stage: "resolving")
       File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
       error = assert_raises(AdversarialReview::State::Error) do
         state.transition_to("complete")
       end
 
       assert_equal "invalid_state", error.code
-      assert_equal "culling", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
+      assert_equal "resolving", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
     end
   end
 
   def test_completion_rejects_rejected_action_with_resolved_resolution
-    with_promoted_state("mode" => "critique") do |state, finding_id, run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, run_dir|
       state.record_author_action(finding_id, "rejected")
+      state.transition_to("resolving")
       state.record_resolution(finding_id, "rejected")
       persisted = state.to_h
       persisted.fetch("resolution_checks")[finding_id] = "resolved"
       persisted.fetch("findings").first["state"] = "resolved"
 
-      refute state.can_complete?(persisted, from_stage: "culling")
+      refute state.can_complete?(persisted, from_stage: "resolving")
       File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
       error = assert_raises(AdversarialReview::State::Error) do
         state.transition_to("complete")
       end
 
       assert_equal "invalid_state", error.code
-      assert_equal "culling", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
+      assert_equal "resolving", JSON.parse(File.read(File.join(run_dir, "state.json"))).fetch("stage")
     end
   end
 
   def test_record_resolution_rejects_incompatible_terminal_pairs_without_mutation
     [["fixed", "rejected"], ["rejected", "resolved"]].each do |action, resolution|
-      with_promoted_state do |state, finding_id, _run_dir|
+      with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
         state.record_author_action(finding_id, action)
+        state.transition_to("resolving")
 
         error = assert_raises(AdversarialReview::State::Error) do
           state.record_resolution(finding_id, resolution)
@@ -372,9 +381,11 @@ class AdversarialReviewStateTest < Minitest::Test
       ["fixed", "resolved", "rejected"],
       ["rejected", "rejected", "fixed"]
     ].each do |initial_action, resolution, replacement_action|
-      with_promoted_state do |state, finding_id, _run_dir|
+      with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
         state.record_author_action(finding_id, initial_action)
+        state.transition_to("resolving")
         state.record_resolution(finding_id, resolution)
+        advance(state, %w[arbitrating awaiting-author])
 
         error = assert_raises(AdversarialReview::State::Error) do
           state.record_author_action(finding_id, replacement_action)
@@ -389,8 +400,9 @@ class AdversarialReviewStateTest < Minitest::Test
 
   def test_valid_terminal_pairs_complete
     [["fixed", "resolved"], ["rejected", "rejected"]].each do |action, resolution|
-      with_promoted_state("mode" => "critique") do |state, finding_id, _run_dir|
+      with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
         state.record_author_action(finding_id, action)
+        state.transition_to("resolving")
         state.record_resolution(finding_id, resolution)
 
         assert state.can_complete?
@@ -401,7 +413,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_record_resolution_refuses_stuck_before_the_round_cap
-    with_promoted_state do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "resolving") do |state, finding_id, _run_dir|
       error = assert_raises(AdversarialReview::State::Error) do
         state.record_resolution(finding_id, "stuck")
       end
@@ -413,11 +425,10 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_stuck_at_the_round_cap_blocks_ordinary_completion
-    with_promoted_state do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
       state.record_author_action(finding_id, "fixed")
-      advance(state, %w[awaiting-author resolving fresh-sweep culling-new-findings])
+      advance(state, %w[resolving fresh-sweep culling-new-findings arbitrating])
       state.apply_arbiter(finding_id, "judge-is-right")
-      state.transition_to("arbitrating")
 
       error = assert_completion_blocked(state)
 
@@ -427,9 +438,12 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_completion_refuses_pending_arbitration
-    with_promoted_state({}, stage: "culling-new-findings") do |state, finding_id, _run_dir|
-      make_terminal(state, finding_id)
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
+      state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
+      state.record_resolution(finding_id, "resolved")
       state.set_pending_arbiter_subjects([finding_id])
+      state.transition_to("arbitrating")
 
       error = assert_completion_blocked(state)
 
@@ -490,9 +504,9 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_arbiter_author_is_right_maps_to_rejected
-    with_promoted_state do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
       state.record_author_action(finding_id, "rejected")
-
+      advance(state, %w[resolving arbitrating])
       state.apply_arbiter(finding_id, "author-is-right")
 
       assert_equal "rejected", state.findings.first.fetch("state")
@@ -501,9 +515,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_arbiter_judge_is_right_becomes_stuck_at_the_round_cap
-    with_promoted_state do |state, finding_id, _run_dir|
-      advance(state, %w[awaiting-author resolving fresh-sweep culling-new-findings])
-
+    with_promoted_state({}, stage: "round-two-arbitrating") do |state, finding_id, _run_dir|
       state.apply_arbiter(finding_id, "judge-is-right")
 
       assert_equal "stuck", state.findings.first.fetch("state")
@@ -512,8 +524,9 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_arbiter_needs_human_remains_contested_and_blocks_completion
-    with_promoted_state do |state, finding_id, _run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, _run_dir|
       state.record_author_action(finding_id, "rejected")
+      advance(state, %w[resolving arbitrating])
       state.apply_arbiter(finding_id, "needs-human")
 
       error = assert_completion_blocked(state)
@@ -601,6 +614,130 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_atomic_write_rejects_parent_swap_before_temporary_creation
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      parent = File.join(directory, "parent")
+      moved_parent = File.join(directory, "parent-moved")
+      outside = File.join(directory, "outside")
+      Dir.mkdir(parent)
+      Dir.mkdir(outside)
+      destination = File.join(parent, "state.json")
+
+      swap_parent = lambda do |_length|
+        File.rename(parent, moved_parent)
+        File.symlink(outside, parent)
+        "fixed"
+      end
+      error = SecureRandom.stub(:hex, swap_parent) do
+        assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::Atomic.write_json(destination, {"changed" => true})
+        end
+      end
+
+      assert_equal "unsafe_path", error.code
+      refute File.exist?(File.join(outside, "state.json"))
+      assert_empty Dir.children(moved_parent)
+    end
+  end
+
+  def test_atomic_write_rejects_parent_swap_during_temporary_write
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      parent = File.join(directory, "parent")
+      moved_parent = File.join(directory, "parent-moved")
+      outside = File.join(directory, "outside")
+      Dir.mkdir(parent)
+      Dir.mkdir(outside)
+      destination = File.join(parent, "state.json")
+      temporary_name = ".state.json.tmp-#{Process.pid}-fixed"
+      original_generate = JSON.method(:generate)
+      swap_parent = lambda do |value|
+        File.rename(parent, moved_parent)
+        File.symlink(outside, parent)
+        File.write(File.join(outside, temporary_name), "attacker-controlled")
+        original_generate.call(value)
+      end
+
+      error = SecureRandom.stub(:hex, "fixed") do
+        JSON.stub(:generate, swap_parent) do
+          assert_raises(AdversarialReview::State::Error) do
+            AdversarialReview::Atomic.write_json(destination, {"changed" => true})
+          end
+        end
+      end
+
+      assert_equal "unsafe_path", error.code
+      refute File.exist?(File.join(outside, "state.json"))
+      assert_equal "attacker-controlled", File.read(File.join(outside, temporary_name))
+      assert_empty Dir.children(moved_parent)
+    end
+  end
+
+  def test_atomic_read_rejects_parent_swap_before_file_open
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      parent = File.join(directory, "parent")
+      moved_parent = File.join(directory, "parent-moved")
+      outside = File.join(directory, "outside")
+      Dir.mkdir(parent)
+      Dir.mkdir(outside)
+      source = File.join(parent, "state.json")
+      File.write(source, JSON.generate({"origin" => "inside"}))
+      File.write(File.join(outside, "state.json"), JSON.generate({"origin" => "outside"}))
+      canonical_parent = File.realpath(parent)
+      original_open = File.method(:open)
+      swapped = false
+      opener = lambda do |*arguments, &block|
+        watched_paths = [parent, source, canonical_parent, File.join(canonical_parent, "state.json")]
+        if !swapped && watched_paths.include?(arguments.first)
+          swapped = true
+          File.rename(parent, moved_parent)
+          File.symlink(outside, parent)
+        end
+        original_open.call(*arguments, &block)
+      end
+
+      error = File.stub(:open, opener) do
+        assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::Atomic.read_json(source)
+        end
+      end
+
+      assert_equal "unsafe_path", error.code
+    end
+  end
+
+  def test_atomic_lock_rejects_parent_swap_before_file_open
+    Dir.mktmpdir("adversarial-review-atomic") do |directory|
+      parent = File.join(directory, "parent")
+      moved_parent = File.join(directory, "parent-moved")
+      outside = File.join(directory, "outside")
+      Dir.mkdir(parent)
+      Dir.mkdir(outside)
+      lock_path = File.join(parent, ".state.lock")
+      File.write(lock_path, "")
+      File.write(File.join(outside, ".state.lock"), "")
+      canonical_parent = File.realpath(parent)
+      original_open = File.method(:open)
+      swapped = false
+      opener = lambda do |*arguments, &block|
+        watched_paths = [parent, lock_path, canonical_parent, File.join(canonical_parent, ".state.lock")]
+        if !swapped && watched_paths.include?(arguments.first)
+          swapped = true
+          File.rename(parent, moved_parent)
+          File.symlink(outside, parent)
+        end
+        original_open.call(*arguments, &block)
+      end
+
+      error = File.stub(:open, opener) do
+        assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::Atomic.open_lock(lock_path, exclusive: true) { flunk "unsafe lock yielded" }
+        end
+      end
+
+      assert_equal "unsafe_lock", error.code
+    end
+  end
+
   def test_state_reads_wait_for_the_stable_exclusive_lock
     skip "fork unavailable" unless Process.respond_to?(:fork)
     with_state do |_state, run_dir|
@@ -644,6 +781,7 @@ class AdversarialReviewStateTest < Minitest::Test
   def test_concurrent_writers_do_not_lose_candidates
     skip "fork unavailable" unless Process.respond_to?(:fork)
     with_state do |_state, run_dir|
+      AdversarialReview::State.load(run_dir).transition_to("attacking")
       pids = 4.times.map do |index|
         fork do
           state = AdversarialReview::State.load(run_dir)
@@ -775,7 +913,9 @@ class AdversarialReviewStateTest < Minitest::Test
 
   def test_promotion_uses_confidence_path_line_and_group_tie_breakers
     with_state do |state, _run_dir|
+      state.transition_to("attacking")
       5.times { |index| state.ingest_candidate("tester", 1, finding("item-#{index}")) }
+      advance(state, %w[deduplicating culling])
       groups = [
         promotion_group("G-z", "C-tester-1-1", "HIGH", 0.8, "a.md", 1),
         promotion_group("G-confidence", "C-tester-1-2", "HIGH", 0.9, "z.md", 1),
@@ -815,6 +955,75 @@ class AdversarialReviewStateTest < Minitest::Test
       error = assert_raises(AdversarialReview::State::Error) { state.transition_to("complete") }
 
       assert_equal 3, error.to_h.fetch("exit_status")
+    end
+  end
+
+  def test_terminal_states_reject_every_public_mutation_without_writing
+    terminal_paths = {
+      "complete" => %w[attacking deduplicating culling complete],
+      "did-not-converge" => %w[
+        attacking deduplicating culling awaiting-author resolving did-not-converge
+      ]
+    }
+    mutations = {
+      "ingest" => lambda do |state|
+        state.ingest_candidate("tester", 1, finding("late"))
+      end,
+      "promote" => ->(state) { state.promote([]) },
+      "author-action" => ->(state) { state.record_author_action("AR-deadbeef-001", "fixed") },
+      "resolution" => ->(state) { state.record_resolution("AR-deadbeef-001", "resolved") },
+      "arbiter-subjects" => ->(state) { state.set_pending_arbiter_subjects([]) },
+      "require-sweep" => ->(state) { state.require_fresh_sweep! },
+      "complete-sweep" => ->(state) { state.mark_fresh_sweep_completed! },
+      "degraded" => ->(state) { state.record_degraded_capability("read_only") },
+      "digests" => ->(state) { state.update_current_digests("docs/spec.md" => "b" * 64) },
+      "arbiter" => ->(state) { state.apply_arbiter("AR-deadbeef-001", "author-is-right") }
+    }
+
+    terminal_paths.each do |terminal_stage, stages|
+      mutations.each do |mutation_name, mutation|
+        with_state do |state, run_dir|
+          advance(state, stages)
+          state_path = File.join(run_dir, "state.json")
+          before = File.binread(state_path)
+
+          error = assert_raises(AdversarialReview::State::Error, "#{terminal_stage}:#{mutation_name}") do
+            mutation.call(state)
+          end
+
+          assert_equal "terminal_state", error.code, "#{terminal_stage}:#{mutation_name}"
+          assert_equal before, File.binread(state_path), "#{terminal_stage}:#{mutation_name}"
+        end
+      end
+    end
+  end
+
+  def test_public_mutations_reject_wrong_nonterminal_stages_without_writing
+    mutations = {
+      "ingest" => lambda do |state|
+        state.ingest_candidate("tester", 1, finding("early"))
+      end,
+      "promote" => ->(state) { state.promote([]) },
+      "author-action" => ->(state) { state.record_author_action("AR-deadbeef-001", "fixed") },
+      "resolution" => ->(state) { state.record_resolution("AR-deadbeef-001", "resolved") },
+      "arbiter-subjects" => ->(state) { state.set_pending_arbiter_subjects([]) },
+      "require-sweep" => ->(state) { state.require_fresh_sweep! },
+      "complete-sweep" => ->(state) { state.mark_fresh_sweep_completed! },
+      "arbiter" => ->(state) { state.apply_arbiter("AR-deadbeef-001", "author-is-right") }
+    }
+
+    mutations.each do |mutation_name, mutation|
+      with_state do |state, run_dir|
+        state_path = File.join(run_dir, "state.json")
+        before = File.binread(state_path)
+
+        error = assert_raises(AdversarialReview::State::Error, mutation_name) do
+          mutation.call(state)
+        end
+
+        assert_equal "invalid_stage", error.code, mutation_name
+        assert_equal before, File.binread(state_path), mutation_name
+      end
     end
   end
 
@@ -903,8 +1112,9 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_an_invalid_persisted_author_action
-    with_promoted_state do |state, finding_id, run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, run_dir|
       state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
       state.record_resolution(finding_id, "resolved")
       persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
       persisted["author_actions"][finding_id] = "waived"
@@ -920,7 +1130,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_disposition_maps_for_unknown_findings
-    with_promoted_state do |state, finding_id, run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, run_dir|
       state.record_author_action(finding_id, "fixed")
       persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
       persisted["resolution_checks"]["AR-deadbeef-999"] = "resolved"
@@ -936,8 +1146,9 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_an_invalid_persisted_resolution_status
-    with_promoted_state do |state, finding_id, run_dir|
+    with_promoted_state({}, stage: "awaiting-author") do |state, finding_id, run_dir|
       state.record_author_action(finding_id, "fixed")
+      state.transition_to("resolving")
       state.record_resolution(finding_id, "resolved")
       persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
       persisted["resolution_checks"][finding_id] = "passed"
@@ -967,6 +1178,115 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_load_rejects_a_next_action_mismatch
+    with_state do |_state, run_dir|
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted["next_action"] = "complete"
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_load_rejects_invalid_task_attempt_entries
+    [{"task-1" => -1}, {"task-1" => "1"}, {"" => 0}].each do |attempts|
+      with_state do |_state, run_dir|
+        persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+        persisted["task_attempts"] = attempts
+        File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::State.load(run_dir)
+        end
+
+        assert_equal "invalid_state", error.code
+      end
+    end
+  end
+
+  def test_load_rejects_malformed_events
+    ["not-an-object", {}, {"type" => "transition", "from" => "prepared"}].each do |event|
+      with_state do |_state, run_dir|
+        persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+        persisted["events"] = [event]
+        File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+        error = assert_raises(AdversarialReview::State::Error) do
+          AdversarialReview::State.load(run_dir)
+        end
+
+        assert_equal "invalid_state", error.code
+      end
+    end
+  end
+
+  def test_load_rejects_a_sourced_candidate_reset_to_candidate
+    with_promoted_state do |_state, _finding_id, run_dir|
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted.fetch("candidates").first["state"] = "candidate"
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_load_rejects_an_unreferenced_promoted_candidate
+    with_promoted_state do |_state, _finding_id, run_dir|
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      duplicate = persisted.fetch("candidates").first.dup
+      duplicate["id"] = "C-tester-1-2"
+      duplicate["sequence"] = 2
+      persisted.fetch("candidates") << duplicate
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_load_rejects_a_candidate_sourced_by_multiple_findings
+    with_promoted_state do |_state, _finding_id, run_dir|
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      duplicate = JSON.parse(JSON.generate(persisted.fetch("findings").first))
+      duplicate["id"] = duplicate.fetch("id").sub(/001\z/, "002")
+      duplicate["group_id"] = "G-002"
+      persisted.fetch("findings") << duplicate
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
+  def test_load_revalidates_complete_state_invariants
+    with_state do |state, run_dir|
+      advance(state, %w[attacking deduplicating culling complete])
+      persisted = JSON.parse(File.read(File.join(run_dir, "state.json")))
+      persisted["degraded_capabilities"] = ["read_only"]
+      File.write(File.join(run_dir, "state.json"), JSON.generate(persisted))
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::State.load(run_dir)
+      end
+
+      assert_equal "invalid_state", error.code
+    end
+  end
+
   private
 
   def with_state(overrides = {})
@@ -979,14 +1299,28 @@ class AdversarialReviewStateTest < Minitest::Test
 
   def with_promoted_state(overrides = {}, stage: "culling")
     with_state(overrides) do |state, run_dir|
+      state.transition_to("attacking")
       candidate = state.ingest_candidate("tester", 1, finding("promoted"))
+      advance(state, %w[deduplicating culling])
       state.promote([
         promotion_group("G-001", candidate.fetch("id"), "HIGH", 0.9, "docs/spec.md", 3)
       ])
-      stages = %w[attacking deduplicating culling]
-      if stage == "culling-new-findings"
-        stages.concat(%w[awaiting-author resolving fresh-sweep culling-new-findings])
-      end
+      stages = case stage
+               when "culling"
+                 []
+               when "awaiting-author"
+                 %w[awaiting-author]
+               when "resolving"
+                 %w[awaiting-author resolving]
+               when "arbitrating"
+                 %w[awaiting-author resolving arbitrating]
+               when "culling-new-findings"
+                 %w[awaiting-author resolving fresh-sweep culling-new-findings]
+               when "round-two-arbitrating"
+                 %w[awaiting-author resolving fresh-sweep culling-new-findings arbitrating]
+               else
+                 raise "unsupported promoted-state stage: #{stage}"
+               end
       advance(state, stages)
       yield state, state.findings.first.fetch("id"), run_dir
     end
@@ -1000,11 +1334,6 @@ class AdversarialReviewStateTest < Minitest::Test
     error = assert_raises(AdversarialReview::State::Error) { state.transition_to("complete") }
     assert_equal "completion_blocked", error.code
     error
-  end
-
-  def make_terminal(state, finding_id)
-    state.record_author_action(finding_id, "fixed")
-    state.record_resolution(finding_id, "resolved")
   end
 
   def finding(title)
