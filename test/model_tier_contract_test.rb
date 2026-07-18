@@ -404,7 +404,7 @@ class ModelTierContractTest < Minitest::Test
     assert_match(/required capability.*`unavailable`.*safety boundary.*`behavioral`/im, skill)
     assert_includes skill, "replaces only an ordinary `PASSED`"
     assert_match(/`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict/im, skill)
-    assert_match(/revise\/reject outcomes.*separately disclose degradation/im, skill)
+    assert_includes skill, "Retained verdicts disclose degraded capabilities separately."
   end
 
   def test_adversarial_review_adapter_ineligibility_is_not_universal_cli_fallback
@@ -438,7 +438,8 @@ class ModelTierContractTest < Minitest::Test
       assert_includes normalized, "DEGRADED CAPABILITIES"
       assert_includes normalized, "replaces only an ordinary `PASSED`"
       assert_includes normalized, "`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict"
-      assert_match(/revise\/reject outcomes.*separately disclose degradation/i, normalized)
+      assert_includes normalized, "Retained verdicts disclose degraded capabilities separately."
+      refute_match(/revise\/reject outcomes.*keep their verdict/i, normalized)
     end
   end
 

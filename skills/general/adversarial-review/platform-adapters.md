@@ -16,8 +16,8 @@ capabilities: `fresh_context`, `repository_access`, `read_only`,
 Use `DEGRADED CAPABILITIES` when any required capability is `unavailable` or a
 required safety boundary (`fresh_context`, `repository_access`, or `read_only`)
 is only `behavioral`. It replaces only an ordinary `PASSED`. `REPORT ONLY`,
-`PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict;
-revise/reject outcomes also keep their verdict and separately disclose degradation.
+`PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict.
+Retained verdicts disclose degraded capabilities separately.
 
 The public CLI supplies `parallel_dispatch` as `unavailable`, and the required
 capability gate makes the direct adapter result ineligible before reviewed

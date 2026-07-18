@@ -108,7 +108,7 @@ executor/CLI/model/effort provenance, retries, timing, and usage metrics when
 exposed. `DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a
 required capability is unavailable or a safety boundary is behavioral.
 `REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their
-verdict; revise/reject outcomes also keep their verdict and separately disclose degradation.
+verdict. Retained verdicts disclose degraded capabilities separately.
 Running a review never installs global links or agent configuration.
 
 If Ruby is unavailable, use the bounded manual fallback in the skill: follow

@@ -67,5 +67,5 @@ never claim scripted crash recovery or resumability.
 ## Outcomes
 
 `DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a required capability is `unavailable` or a safety boundary is `behavioral`.
-`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict; revise/reject outcomes also keep their verdict and separately disclose degradation.
+`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict. Retained verdicts disclose degraded capabilities separately.
 Return the script's stable IDs, provenance, and usage. Critique mode never edits targets.
