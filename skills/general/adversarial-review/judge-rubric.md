@@ -113,6 +113,8 @@ Status rules:
 
 In round 2 only, include `new_findings` for regressions introduced by revision. New `CRITICAL` or `HIGH` findings prevent a passing verdict.
 
+Only the parent supplies `FIXED|REJECTED` author actions. Reviewers never edit targets or manufacture author decisions. After round-one actions, verify each promoted finding by ID. In round 2 only, run the fresh sweep after resolution and cull any new candidates normally. Stop after two revision rounds; any stuck promoted finding produces `DID NOT CONVERGE`.
+
 ## Arbiter
 
 At `--high` and `--ultra`, arbitrate stuck findings before sending them to the user.

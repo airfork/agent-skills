@@ -147,9 +147,9 @@ class ModelTierContractTest < Minitest::Test
       assert_includes code_skill, sentence
       assert_includes code_adapter, sentence
     end
-    assert_includes adversarial_skill, "For `--report-only`, replace the convergence verdict with `REPORT ONLY - N findings` and emit only Findings and Metrics"
-    assert_includes adversarial_skill, "use `ID | Category | Severity | Location | Summary` with no Resolution column"
-    assert_includes adversarial_skill, "do not emit Changelog, Rejected Findings, or Open Questions because no revision or resolution occurred"
+    assert_includes adversarial_skill, "`--report-only` is `--mode critique --output both`"
+    assert_includes adversarial_skill, "`--chat-only` is `--output chat`"
+    assert_includes adversarial_skill, "Critique mode never edits targets."
   end
 
   def test_limited_capacity_and_terminal_verdicts_are_deterministic
@@ -197,9 +197,10 @@ class ModelTierContractTest < Minitest::Test
     refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
 
     adversarial_adapter = read("skills/general/adversarial-review/platform-adapters.md")
-    adversarial_codex_policy = "For Codex fallback roles, require fresh context, the parent session's selected GPT-5.6 model, and xhigh (or the host's maximum) effort; if Codex cannot prove all three, stop and report that the adversarial-review tier was not enforceable."
-    assert_includes adversarial_adapter, adversarial_codex_policy
-    refute_includes adversarial_adapter, "continue with inherited settings only when the user still wants the review"
+    assert_includes adversarial_adapter, "Treat generic mode as the portable baseline and first-class fallback."
+    assert_includes adversarial_adapter, "The control plane never silently downgrades model, effort, tier, or vendor."
+    assert_includes adversarial_adapter, "requested and observed model"
+    assert_includes adversarial_adapter, "A failed or missing observation selects Generic Adapter"
 
     adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
     portable_effort_policy = "If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback."
@@ -242,12 +243,12 @@ class ModelTierContractTest < Minitest::Test
   def test_codex_adversarial_fallback_is_fail_closed
     adapter = read("skills/general/adversarial-review/platform-adapters.md")
 
-    assert_includes adapter, "The Codex fail-closed rule above takes precedence over the portable sequential fallback below."
-    assert_includes adapter, "write the complete role prompt and review packet to stdin, close stdin, and capture the combined startup transcript"
-    assert_includes adapter, "--model <selected-gpt-5.6-slug>"
-    assert_includes adapter, "Before dispatching named agents, check `codex --version`."
-    assert_includes adapter, "Codex v0.137.0 or an unverified version must use the validated fallback launcher or stop."
-    refute_includes adapter, "If an environment cannot spawn subagents, run the same roles sequentially and disclose it:"
+    assert_includes adapter, "A direct adapter may run only when a pinned executable"
+    assert_includes adapter, "Runtime events must\nconfirm all shared-gate claims."
+    assert_includes adapter, "Codex `0.144.5` was observed during design"
+    assert_includes adapter, "so it currently\nfalls back to generic"
+    assert_includes adapter, "A future version may run direct only after machine\nattestation passes"
+    refute_includes adapter, "downgrade to `--high`"
   end
 
   def test_base_branch_fallback_executes_without_origin_head
@@ -298,6 +299,54 @@ class ModelTierContractTest < Minitest::Test
     assert_includes judge_rubric, "- `author-is-right` -> `REJECTED`"
     assert_includes judge_rubric, "- `judge-is-right` -> `UNRESOLVED`"
     assert_includes judge_rubric, "- `needs-human` -> `UNRESOLVED`"
+  end
+
+  def test_adversarial_review_public_control_plane_is_portable_and_explicit
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    angles = read("skills/general/adversarial-review/attack-angles.md")
+    rubric = read("skills/general/adversarial-review/judge-rubric.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+    usage = read("USAGE.md")
+    commands = read("COMMANDS.md")
+    catalog = read("CATALOG.md")
+    manifest = YAML.load_file(File.join(REPO_UNDER_TEST, "skills.yaml"))
+    metadata = manifest.fetch("skills").find { |entry| entry.fetch("name") == "adversarial-review" }
+
+    assert_includes skill, "scripts/adversarial-review start"
+    assert_includes skill, "--executor auto|codex|claude|cursor|gemini|generic"
+    assert_includes skill, "--output chat|file|both"
+    assert_includes skill, "`--report-only` is `--mode critique --output both`"
+    assert_includes skill, "`--chat-only` is `--output chat`"
+    assert_includes skill, "The default is `--mode revise --output both`"
+    assert_includes skill, "DID NOT CONVERGE"
+    assert_includes skill, "The parent alone applies `FIXED|REJECTED` actions"
+    assert_includes skill, "does not install or change global skill links, agent definitions, or user configuration"
+
+    assert_includes angles, "Candidate IDs remain immutable"
+    assert_includes rubric, '"disposition": "PROMOTE|REFUTE|UNPROVEN"'
+    assert_includes rubric, "Any split involving `UNPROVEN` goes to arbitration"
+    assert_includes rubric, "In round 2 only"
+
+    %w[Generic Codex Claude Cursor Gemini].each do |adapter|
+      assert_includes adapters, "## #{adapter} Adapter"
+    end
+    assert_includes adapters, "never silently downgrades model, effort, tier, or vendor"
+    assert_includes adapters, "machine-readable runtime attestation"
+    assert_includes adapters, "requested and observed model and effort"
+    assert_includes adapters, "Claude-only"
+    assert_includes adapters, "Direct execution currently rejects `--jobs` greater than 1"
+    assert_includes adapters, "malicious same-UID local administrator"
+
+    assert_includes usage, "--executor auto|codex|claude|cursor|gemini|generic"
+    assert_includes usage, "--output chat|file|both"
+    assert_includes commands, "skills/general/adversarial-review/scripts/adversarial-review start"
+    refute_includes commands, "rtk skills/general/adversarial-review/scripts/adversarial-review"
+    assert_match(/script-backed portable control plane/i, catalog)
+
+    assert_equal %w[claude codex cursor gemini], metadata.fetch("interfaces").sort
+    assert metadata.dig("install", "cursor", "enabled")
+    assert_equal "deep", metadata.fetch("recommended_model_tier")
+    assert_equal "ultracode", metadata.fetch("heavy_model_tier")
   end
 
   def test_codex_model_inheritance_is_structurally_guarded

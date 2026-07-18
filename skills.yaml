@@ -44,6 +44,7 @@ skills:
     interfaces:
       - claude
       - codex
+      - cursor
       - gemini
     recommended_model_tier: deep
     heavy_model_tier: ultracode
@@ -55,13 +56,13 @@ skills:
         enabled: true
         mode: symlink
       cursor:
-        enabled: false
+        enabled: true
         mode: symlink
       gemini:
         enabled: true
         mode: symlink
-    description: Cross-platform adversarial review workflow for specs and implementation plans, using fresh-context attack angles, refute-or-promote culling, revise/reject loops, and resolution verification before implementation.
-    notes: Place in general because the portable core targets Codex, Claude Code, and Gemini/Antigravity. Install the skill folder through scripts/sync-skills for Codex, Claude, and Gemini; Codex named-agent TOMLs require a separate, explicit copy to ~/.codex/agents/.
+    description: Script-backed portable control plane for deterministic adversarial review of specs and plans, with verified direct adapters or first-class generic task bundles, immutable IDs, revise/reject resolution, and resumable provenance-rich reports.
+    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, and Gemini, but review execution never applies global install changes. Direct adapters run only after machine-readable capability attestation; unsupported or unverified CLIs use generic bundles. Codex named-agent TOMLs remain optional separate setup.
 
   - name: code-review
     path: skills/codex-cursor/code-review

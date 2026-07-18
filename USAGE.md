@@ -20,7 +20,7 @@ folder.
 
 | Skill | Category | Install | Recommended tier | Use for |
 |-------|----------|---------|------------------|---------|
-| `adversarial-review` | `general` | Codex, Claude, Gemini | `deep` | Fresh-context critique of specs, plans, migration plans, architecture designs, and other planning docs before implementation. |
+| `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
 | `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
 | `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
 | `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
@@ -31,59 +31,70 @@ Use `adversarial-review` before implementing non-trivial, high-impact,
 ambiguous, security-sensitive, architecture-shaping, or expensive-to-rework
 plans and specs.
 
-Inputs must be repository files: a spec, a plan, or both. The v1 workflow does
-not review pasted text, tickets, or external docs.
+Inputs must be repository files: a spec, a plan, or both. The portable Ruby
+control plane owns task contracts, validation, state, IDs, and reports; host
+agents execute its read-only task bundles.
 
 ### Invocation
 
-Codex:
+`$adversarial-review`, `/adversarial-review`, Cursor/Gemini skill activation,
+and equivalent natural language map to the checked-in executable:
 
-```text
-Use $adversarial-review docs/spec.md docs/plan.md
-Use $adversarial-review docs/spec.md --high
-Use $adversarial-review docs/spec.md docs/plan.md --report-only
+```bash
+skills/general/adversarial-review/scripts/adversarial-review start \
+  --repository . --spec docs/spec.md --plan docs/plan.md \
+  --tier default --mode revise --output both \
+  --executor auto --model MODEL --effort EFFORT
 ```
 
-Claude Code:
-
-```text
-/adversarial-review docs/spec.md docs/plan.md
-/adversarial-review docs/spec.md docs/plan.md --ultra
-```
-
-Gemini/Antigravity:
-
-```text
-Activate adversarial-review for docs/spec.md docs/plan.md
-Run adversarial-review on docs/spec.md docs/plan.md --high
-```
-
-Natural-language equivalents also apply, such as:
-
-```text
-Run adversarial review on the payments spec and implementation plan.
-```
+Run the executable or any subcommand with `--help` for parser-level syntax.
 
 ### Options
 
-| Option | Behavior |
-|--------|----------|
-| no flag | Default maximum-rigor pipeline: attack wave, refute-or-promote cull, revise/reject, resolution verification, two-revise-round cap. All roles use xhigh reasoning when available. |
-| `--high` | Default pipeline plus arbiter pass for stuck findings and the divergence probe angle. |
-| `--ultra` | Claude only. Implies `--high`; run as an UltraCode workflow with wider fan-out, 3-vote refutation per finding, and optional cross-model arbitration. In Codex, downgrade to `--high` and disclose it. |
-| `--report-only` | Attack, cull, and report findings only. Do not revise documents, run resolution checks, run the round-2 fresh sweep, or emit convergence verdicts tied to revision. |
+The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
+`--output chat|file|both`.
 
-There is no quick or low tier for this skill.
+| Option | Values/default | Behavior |
+|--------|----------------|----------|
+| `--spec`, `--plan` | one or both required | Repository-relative review targets. |
+| `--repository` | current directory | Canonical repository root. |
+| `--tier` | `default|high|ultra`; `default` | `high` adds divergence/arbitration; direct `ultra` is Claude-only. Non-Claude auto selection uses generic, never a silent `high` downgrade. |
+| `--mode` | `critique|revise`; `revise` | Critique reports only; revise accepts parent fixes/rejections and verifies resolution. |
+| `--output` | `chat|file|both`; `both` | Select rendered destinations. File output defaults beside the first target as `<stem>-review.md`. |
+| `--executor` | `auto|codex|claude|cursor|gemini|generic`; `auto` | Auto uses direct execution only after exact runtime attestation; otherwise it emits generic bundles. |
+| `--model`, `--effort` | `inherit` | Direct execution requires explicit exact values. Generic mode records requested values and host evidence. |
+| `--jobs` | positive integer; `1` | Direct execution rejects values above 1; generic emits independent bundles for host-native parallelism. |
+| `--context` | repeatable path | Add bounded repository context. |
+| `--run-dir` | generated beneath Git common state | Override durable run state location. |
+| `--report` | generated sibling report | Override the report path outside the run directory and protected inputs. |
+| `--report-only` | alias | Exactly `--mode critique --output both`. |
+| `--chat-only` | alias | Exactly `--output chat`. |
+| `--ultra` | alias | Exactly `--tier ultra`. |
 
-### Action Rules
+There is no quick/low tier and no silent model, effort, tier, or vendor
+downgrade. Direct adapters must attest fresh context, canonical repository,
+read-only policy, requested and observed model/effort, structured output,
+session binding, and usage. Failed or unavailable direct capability probes
+produce generic task bundles with explicit degradation.
 
-- Review may spawn read-only attacker, judge, and arbiter subagents without
-  asking for extra permission.
-- Attackers may read repository files needed to verify document claims.
-- The parent may edit only the reviewed spec or plan files during revision.
-- The workflow must preserve a rejection path for weak or incorrect findings.
-- Reports are written next to the first reviewed document as
-  `<doc-stem>-review.md` by default.
+### Lifecycle
+
+1. Run `start`; retain the returned `run_dir` and task paths.
+2. For each generic reviewer task, return its closed-schema result and capability
+   declaration with `ingest --run-dir RUN --task ID --result RESULT.json
+   --capabilities CAPABILITIES.json`. Direct adapters dispatch validated tasks
+   serially.
+3. Run `continue --run-dir RUN` until more results or parent actions are needed.
+   Submit parent-only `FIXED|REJECTED` actions with `continue --actions
+   ACTIONS.json`; reviewers never edit targets.
+4. Repeat `continue` through per-ID resolution and the round-two fresh sweep.
+   The two-round cap ends as passed or `DID NOT CONVERGE`.
+5. Inspect resumable state with `status --run-dir RUN --json`.
+
+Reports contain immutable candidate/finding IDs, `PROMOTE|REFUTE|UNPROVEN`
+dispositions, source angles, current target digests, complete capability and
+executor/CLI/model/effort provenance, retries, timing, and usage metrics when
+exposed. Running a review never installs global links or agent configuration.
 
 ## `code-review`
 

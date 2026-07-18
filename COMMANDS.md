@@ -14,5 +14,9 @@ Run these from the repository root. User-facing commands are intentionally plain
 | `scripts/sync-skills --target codex --dry-run` | Preview managed skill symlink changes. | Read-only. |
 | `scripts/sync-skills --target codex --apply` | Apply managed Codex skill symlink changes when explicitly requested. | Changes the selected global skill directory. |
 | `scripts/run-codex-5.6-skill-review <luna\|terra\|sol>` | Run the existing model-bound compatibility review. | May update its report only after a successful review. |
+| `skills/general/adversarial-review/scripts/adversarial-review start --repository . --spec docs/spec.md --plan docs/plan.md --executor generic --model MODEL --effort EFFORT` | Start a portable adversarial-review run and emit validated task bundles. | Creates durable run state; defaults to chat and sibling report output. |
+| `skills/general/adversarial-review/scripts/adversarial-review ingest --run-dir RUN --task ID --result RESULT.json --capabilities CAPABILITIES.json` | Validate and ingest one generic reviewer result. | Advances only the named task in durable run state. |
+| `skills/general/adversarial-review/scripts/adversarial-review continue --run-dir RUN` | Advance the validated state machine or render a terminal report. | Updates durable run state and configured report output. |
+| `skills/general/adversarial-review/scripts/adversarial-review status --run-dir RUN --json` | Print deterministic resumable run status. | Read-only. |
 
 There is no repository-wide application server, build system, or linter to wrap. Skill-specific checks belong with the skill or its contract test.

@@ -32,6 +32,8 @@ Common output:
 
 The `attack` schema in `assets/schemas/attack.json` is the closed, executable contract. Do not add metadata or substitute prose locations. Record only checks that were actually performed; a missing required check may be retried by the control plane.
 
+The control plane assigns a candidate ID at ingestion. Candidate IDs remain immutable through dedupe, cull, arbitration, author action, resolution, and reporting; later roles must return the supplied ID rather than renumbering findings.
+
 Do not include weak preferences. A finding needs a concrete consequence for implementation, testing, user behavior, safety, security, schedule risk, or maintainability.
 
 ## Constructive Reader: Implementer
