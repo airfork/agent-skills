@@ -528,6 +528,23 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def test_authoritative_plan_matches_the_claude_2_1_212_stream_json_argv
+    plan = File.read(File.join(
+      __dir__, "..", "docs", "plans",
+      "2026-07-17-adversarial-review-portable-control-plane-implementation-plan.md"
+    ))
+    expected = <<~RUBY.strip
+      [claude_realpath, "-p", "--bare", "--no-session-persistence",
+       "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
+       "--model", model, "--effort", effort, "--verbose",
+       "--output-format", "stream-json", "--json-schema",
+       JSON.generate(role_schema), prompt]
+    RUBY
+
+    assert_includes plan, expected
+    assert_includes plan, "Claude Code 2.1.212 requires `--verbose` with print-mode `stream-json`."
+  end
+
   def test_codex_adapter_probes_then_runs_with_exact_argv_and_provenance
     with_repository(files: {"docs/spec.md" => "# Reviewed secret\n"}) do |repository|
       Dir.mktmpdir("adversarial-review-codex-bin") do |bin|
@@ -550,6 +567,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute(required_checks: ["assumption-coverage"])
 
         assert_equal "complete", result.status
+        assert_normalized_capabilities(result.capabilities, "codex complete")
         assert_equal payload, result.payload
         assert_equal 114, result.usage.fetch("total_tokens")
         execution_provenance = adapter.runtime_provenance.fetch("executions").fetch(0)
@@ -566,6 +584,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         refute_includes preflight.fetch("stdin"), "REVIEWED SECRET"
         refute_equal File.realpath(repository), preflight.fetch("cwd")
         assert_equal false, preflight.fetch("relative_review_visible")
+        assert_equal true, preflight.fetch("git_repository")
         refute_includes preflight.fetch("argv").join(" "), File.realpath(repository)
         assert_equal ["ok"], preflight.fetch("schema_payload").fetch("required")
         refute_equal schema, preflight.fetch("schema_payload")
@@ -604,6 +623,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute(required_checks: ["assumption-coverage"])
 
         assert_equal "generic", result.status
+        assert_normalized_capabilities(result.capabilities, "codex preflight fallback")
         assert_equal "runtime_attestation_missing", result.error_code
         records = fake_cli_records(log)
         assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
@@ -635,6 +655,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
 
         assert_equal "generic", result.status
         assert_equal "capability_probe_failed", result.error_code
+        assert_normalized_capabilities(result.capabilities, "codex help fallback")
         assert_equal ["help"], fake_cli_records(log).map { |record| record.fetch("kind") }
       end
     end
@@ -662,6 +683,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute(required_checks: ["assumption-coverage"])
 
         assert_equal "complete", result.status
+        assert_normalized_capabilities(result.capabilities, "claude complete")
         assert_equal payload, result.payload
         assert_equal 100, result.usage.fetch("total_tokens")
         execution_provenance = adapter.runtime_provenance.fetch("executions").fetch(0)
@@ -675,6 +697,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         refute_includes preflight.fetch("argv").last, "REVIEWED SECRET"
         refute_equal File.realpath(repository), preflight.fetch("cwd")
         assert_equal false, preflight.fetch("relative_review_visible")
+        assert_equal true, preflight.fetch("git_repository")
         refute_includes preflight.fetch("argv").join(" "), File.realpath(repository)
         preflight_schema = JSON.parse(preflight.fetch("argv").fetch(15))
         assert_equal ["ok"], preflight_schema.fetch("required")
@@ -714,6 +737,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute
 
         assert_equal "generic", result.status
+        assert_normalized_capabilities(result.capabilities, "claude ultra fallback")
         assert_equal "independent_vote_unattested", result.error_code
         records = fake_cli_records(log)
         assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
@@ -743,6 +767,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute
 
         assert_equal "generic", result.status
+        assert_normalized_capabilities(result.capabilities, "claude current fallback")
         assert_equal "runtime_selection_mismatch", result.error_code
         records = fake_cli_records(log)
         assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
@@ -789,6 +814,27 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_direct_preflight_fallback(provider, property, options)
       end
     end
+  end
+
+  def test_direct_adapters_return_normalized_capabilities_on_version_failure
+    %w[codex claude].each do |provider|
+      result, records = run_direct_adapter_case(provider, version_text: "")
+
+      assert_equal "generic", result.status, provider
+      assert_equal "version_probe_failed", result.error_code, provider
+      assert_normalized_capabilities(result.capabilities, "#{provider} version fallback")
+      assert_equal %w[help version], records.map { |record| record.fetch("kind") }, provider
+    end
+  end
+
+  def test_unsupported_direct_tier_returns_normalized_unavailable_capabilities
+    result, records = run_direct_adapter_case("codex", tier: "ultra")
+
+    assert_equal "generic", result.status
+    assert_equal "unsupported_tier", result.error_code
+    assert_normalized_capabilities(result.capabilities, "unsupported tier")
+    assert result.capabilities.values.all? { |entry| entry.fetch("status") == "unavailable" }
+    assert_empty records
   end
 
   def test_claude_current_init_shape_is_parsed_but_unreported_controls_fail_closed
@@ -912,6 +958,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     result, records = run_direct_adapter_case(provider, **arguments)
     assert_equal "generic", result.status, "#{provider}: #{property}"
     assert_equal false, result.ordinary_result, "#{provider}: #{property}"
+    assert_normalized_capabilities(result.capabilities, "#{provider}: #{property}")
     assert_equal expected_error, result.error_code, "#{provider}: #{property}" if expected_error
     assert_equal %w[help version run], records.map { |record| record.fetch("kind") },
                  "#{provider}: #{property}"
@@ -921,10 +968,23 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def assert_normalized_capabilities(record, label)
+    assert_equal AdversarialReview::Capabilities::FIELDS.sort, record.keys.sort, label
+    record.each do |field, declaration|
+      assert_equal %w[evidence requested source status], declaration.keys.sort,
+                   "#{label}: #{field}"
+      assert_includes AdversarialReview::Capabilities::STATUSES,
+                      declaration.fetch("status"), "#{label}: #{field}"
+      refute_empty declaration.fetch("evidence"), "#{label}: #{field}"
+      refute_empty declaration.fetch("source"), "#{label}: #{field}"
+    end
+  end
+
   def run_direct_adapter_case(provider, stream: nil, streams: nil, tier: "high",
                               observed_model: nil, observed_effort: nil,
                               observed_models: nil, observed_efforts: nil,
-                              session_ids: nil, payloads: nil, cli_version: nil)
+                              session_ids: nil, payloads: nil, cli_version: nil,
+                              version_text: nil)
     selected_model = observed_model ||
       (provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8")
     selected_effort = observed_effort || (provider == "codex" ? "xhigh" : "high")
@@ -938,7 +998,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           stream: selected_streams.fetch(0), streams: selected_streams,
           observed_model: selected_model, observed_effort: selected_effort,
           observed_models: observed_models, observed_efforts: observed_efforts,
-          session_ids: session_ids, payloads: payloads, cli_version: cli_version
+          session_ids: session_ids, payloads: payloads, cli_version: cli_version,
+          version_text: version_text
         )
         klass = provider == "codex" ?
           AdversarialReview::Adapters::Codex : AdversarialReview::Adapters::Claude
@@ -982,7 +1043,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   def write_direct_adapter_fake(directory, provider:, log:, payload:, stream:, help_text: nil,
                                 observed_model:, observed_effort:, streams: nil,
                                 observed_models: nil, observed_efforts: nil,
-                                session_ids: nil, payloads: nil, cli_version: nil)
+                                session_ids: nil, payloads: nil, cli_version: nil,
+                                version_text: nil)
     default_help = if provider == "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
     else
@@ -1003,7 +1065,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       configured_sessions = #{(session_ids || []).inspect}
       configured_payloads = #{(payloads || []).map { |item| JSON.generate(item) }.inspect}
       help_text = #{(help_text || default_help).inspect}
-      version_text = #{version.inspect}
+      version_text = #{version_text.nil? ? version.inspect : version_text.inspect}
       help_call = (provider == "codex" && ARGV == ["exec", "--help"]) ||
                   (provider == "claude" && ARGV == ["--help"])
       version_call = ARGV == ["--version"]
@@ -1027,8 +1089,12 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       else
         configured_sessions.fetch([prior_runs, configured_sessions.length - 1].min)
       end
+      git_repository = system(
+        "/usr/bin/git", "-C", Dir.pwd, "rev-parse", "--is-inside-work-tree",
+        out: File::NULL, err: File::NULL
+      )
       schema_payload = nil
-      if provider == "codex" && (schema_index = ARGV.index("--output-schema"))
+      if git_repository && provider == "codex" && (schema_index = ARGV.index("--output-schema"))
         schema_payload = JSON.parse(File.read(ARGV.fetch(schema_index + 1)))
         output_index = ARGV.index("--output-last-message")
         File.open(ARGV.fetch(output_index + 1), "w", 0o600) { |file| file.write(payload) }
@@ -1041,10 +1107,13 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       record = {
         "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
         "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload,
-        "relative_review_visible" => !relative_review_contents.nil?
+        "relative_review_visible" => !relative_review_contents.nil?,
+        "git_repository" => git_repository
       }
       File.open(log, "a", 0o600) { |file| file.puts(JSON.generate(record)) }
-      if help_call
+      if !git_repository
+        exit 78
+      elsif help_call
         puts help_text
       elsif version_call
         puts version_text

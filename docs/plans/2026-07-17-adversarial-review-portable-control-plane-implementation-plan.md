@@ -838,9 +838,12 @@ Claude's complete ordered argv template is:
 ```ruby
 [claude_realpath, "-p", "--bare", "--no-session-persistence",
  "--permission-mode", "plan", "--tools", "Read,Grep,Glob",
- "--model", model, "--effort", effort, "--output-format", "stream-json",
- "--json-schema", JSON.generate(role_schema), prompt]
+ "--model", model, "--effort", effort, "--verbose",
+ "--output-format", "stream-json", "--json-schema",
+ JSON.generate(role_schema), prompt]
 ```
+
+Claude Code 2.1.212 requires `--verbose` with print-mode `stream-json`.
 
 If a version changes this surface, update the template, its labelled fixtures,
 and tests together; substring assertions are insufficient.

@@ -144,6 +144,7 @@ module AdversarialReview
         ensure_direct_configuration!
         @runtime_provenance_records = nil
         @direct_session_ids = nil
+        @last_normalized_capabilities = nil
         @last_active_phase = nil
         @last_active_attempt = nil
         support = self.class.runtime_decision(
@@ -183,9 +184,11 @@ module AdversarialReview
 
           @active_phase = "preflight"
           @active_attempt = 0
+          @last_normalized_capabilities = unavailable_capabilities("preflight attestation missing")
           preflight_result, preflight_envelope = invoke_prompt(preflight_prompt)
           probe_results << preflight_result if preflight_result
           record_runtime_observation(preflight_envelope)
+          capture_envelope_capabilities(preflight_envelope)
           preflight_error = attestation_error(preflight_result, preflight_envelope)
           return direct_failure(preflight_error, probe_results) if preflight_error
           preflight_usage = valid_usage(preflight_envelope["usage"])
@@ -251,15 +254,21 @@ module AdversarialReview
 
       def execute_with_one_repair(requested_model:, requested_effort:,
                                   required_checks: [])
+        @execution_requested_model = requested_model
+        @execution_requested_effort = requested_effort
         attempts = 0
         results = []
         usage = Hash.new(0)
         loop do
           attempts += 1
           @active_attempt = attempts if @runtime_provenance_records
+          @last_normalized_capabilities = unavailable_capabilities(
+            "execution attempt #{attempts} capability attestation missing"
+          )
           runner_result, envelope = invoke(attempts == 2)
           results << runner_result
           record_runtime_observation(envelope) if @runtime_provenance_records
+          capture_envelope_capabilities(envelope)
           unless successful_process?(runner_result)
             code = runner_result && runner_result.timed_out ? "process_timeout" : "process_failed"
             return failed_execution(code, attempts, results, usage)
@@ -294,12 +303,10 @@ module AdversarialReview
           end
 
           begin
-            normalized_capabilities = Capabilities.normalize(
-              envelope["capabilities"] || {},
-              requested_model: requested_model,
-              requested_effort: requested_effort
-            )
+            normalized_capabilities = @last_normalized_capabilities ||
+              unavailable_capabilities("execution capability envelope missing")
             capability_gate = Capabilities.gate(normalized_capabilities, "PASS")
+            @last_normalized_capabilities = normalized_capabilities
           rescue Capabilities::Error
             return failed_execution("capability_attestation_invalid", attempts, results, usage)
           end
@@ -375,6 +382,7 @@ module AdversarialReview
         Dir.mkdir(@preflight_repository, 0o700)
         Dir.mkdir(@isolated_home, 0o700)
         Dir.mkdir(@isolated_config_root, 0o700)
+        initialize_preflight_repository!
         @schema_path = File.join(@direct_root, "role-schema.json")
         Runner.write_private_file(@schema_path, JSON.generate(@role_schema))
         @preflight_schema_path = File.join(@direct_root, "preflight-schema.json")
@@ -385,6 +393,39 @@ module AdversarialReview
           "failure" => nil
         }
         @direct_session_ids = {}
+      end
+
+      def initialize_preflight_repository!
+        git = Runner.resolve_executable(
+          "git", repository: @repository, run_directory: @run_directory,
+          config_root: @isolated_config_root, excluded_roots: [@direct_root]
+        )
+        environment = {
+          "HOME" => @isolated_home,
+          "XDG_CONFIG_HOME" => @isolated_config_root,
+          "GIT_CONFIG_NOSYSTEM" => "1",
+          "GIT_CONFIG_GLOBAL" => File::NULL
+        }
+        initialized = Runner.run(
+          argv: [git.path, "init", "--quiet", @preflight_repository],
+          stdin_data: "", timeout_seconds: @timeout_seconds,
+          env: environment, chdir: @direct_root, executable: git,
+          excluded_roots: [@direct_root]
+        )
+        verified = Runner.run(
+          argv: [git.path, "rev-parse", "--is-inside-work-tree"],
+          stdin_data: "", timeout_seconds: @timeout_seconds,
+          env: environment, chdir: @preflight_repository,
+          repository: @preflight_repository, executable: git,
+          excluded_roots: [@direct_root]
+        )
+        unless successful_process?(initialized) && successful_process?(verified) &&
+               verified.stdout.strip == "true"
+          raise Runner::Error.new(
+            "preflight_git_init_failed",
+            "private preflight repository could not be initialized"
+          )
+        end
       end
 
       def run_probe(argv)
@@ -434,11 +475,8 @@ module AdversarialReview
           observed_model: terminal["model"], observed_effort: terminal["effort"]
         )
         return "runtime_selection_mismatch" unless decision.execution_allowed
-        normalized = Capabilities.normalize(
-          envelope["capabilities"] || {},
-          requested_model: @requested_model,
-          requested_effort: @requested_effort
-        )
+        normalized = @last_normalized_capabilities ||
+          unavailable_capabilities("preflight capability envelope missing")
         gate = Capabilities.gate(normalized, "PASS")
         return "capabilities_degraded" unless gate.fetch("capability_status") == "CAPABILITIES SATISFIED"
         return "structured_output_unattested" unless direct_payload_valid?(envelope["payload"])
@@ -449,8 +487,9 @@ module AdversarialReview
 
       def direct_failure(code, runner_results = [])
         record_failure(code)
+        normalized = result_capabilities(nil, code)
         ExecutionResult.new(
-          status: "generic", payload: nil, usage: {}, capabilities: nil,
+          status: "generic", payload: nil, usage: {}, capabilities: normalized,
           attempts: 0, runner_results: runner_results,
           error_code: code, ordinary_result: false,
           runtime_provenance: provenance_snapshot
@@ -574,6 +613,68 @@ module AdversarialReview
         )
       end
 
+      def capture_envelope_capabilities(envelope)
+        return unless envelope.is_a?(Hash)
+        record = envelope["capabilities"]
+        return unless record.is_a?(Hash)
+        normalized = Capabilities.normalize(
+          record,
+          requested_model: requested_model_for_capabilities,
+          requested_effort: requested_effort_for_capabilities
+        )
+        source = "#{adapter_name} #{@active_phase || "execution"} capability envelope"
+        normalized.each do |field, declaration|
+          next unless declaration.fetch("status") == "unavailable" &&
+                      declaration.fetch("evidence") == "not reported"
+          normalized[field] = declaration.merge(
+            "evidence" => "#{field} was not reported",
+            "source" => source
+          )
+        end
+        @last_normalized_capabilities = normalized
+      rescue Capabilities::Error
+        @last_normalized_capabilities = unavailable_capabilities(
+          "capability envelope was invalid"
+        )
+      end
+
+      def result_capabilities(candidate, code)
+        if candidate
+          Capabilities.gate(candidate, "PASS")
+          return JSON.parse(JSON.generate(candidate))
+        end
+        return JSON.parse(JSON.generate(@last_normalized_capabilities)) if @last_normalized_capabilities
+
+        unavailable_capabilities(code.tr("_", " "))
+      rescue Capabilities::Error
+        unavailable_capabilities("#{code.tr("_", " ")} and capability record invalid")
+      end
+
+      def unavailable_capabilities(reason)
+        source = "#{adapter_name} #{@active_phase || "adapter"} capability gate"
+        template = Capabilities.template(
+          requested_model: requested_model_for_capabilities,
+          requested_effort: requested_effort_for_capabilities
+        )
+        template.each do |field, declaration|
+          declaration["evidence"] = "#{field} unavailable: #{reason}"
+          declaration["source"] = source
+        end
+        Capabilities.normalize(
+          template,
+          requested_model: requested_model_for_capabilities,
+          requested_effort: requested_effort_for_capabilities
+        )
+      end
+
+      def requested_model_for_capabilities
+        @requested_model || @execution_requested_model
+      end
+
+      def requested_effort_for_capabilities
+        @requested_effort || @execution_requested_effort
+      end
+
       def preflight_prompt
         "Return {\"ok\":true} only. Do not inspect repository content. This request only verifies the isolated runtime controls."
       end
@@ -654,9 +755,10 @@ module AdversarialReview
 
       def failed_execution(code, attempts, results, usage, capabilities = nil)
         record_failure(code)
+        normalized = result_capabilities(capabilities, code)
         ExecutionResult.new(
           status: "generic", payload: nil, usage: usage.to_h,
-          capabilities: capabilities, attempts: attempts, runner_results: results,
+          capabilities: normalized, attempts: attempts, runner_results: results,
           error_code: code, ordinary_result: false,
           runtime_provenance: provenance_snapshot
         )
