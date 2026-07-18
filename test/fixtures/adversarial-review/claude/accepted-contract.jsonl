@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"$SESSION_ID","cwd":"$CWD","model":"$OBSERVED_MODEL","permissionMode":"plan","tools":["Read","Grep","Glob"],"fresh":true,"effort":"$OBSERVED_EFFORT","independent_vote":true}
+{"type":"result","subtype":"success","structured_output":$ROLE_RESPONSE,"usage":{"input_tokens":37,"cache_read_input_tokens":6,"output_tokens":13,"total_tokens":50}}

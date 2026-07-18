@@ -1,2 +1,0 @@
-{"type":"runtime.start","session_id":"$SESSION_ID","fresh":true,"model":"$MODEL","effort":"$EFFORT","workdir":"$REPOSITORY","permission_mode":"plan","tools":["Read","Grep","Glob"],"independent_vote":true}
-{"type":"result","subtype":"success","structured_output":$ROLE_RESPONSE,"usage":{"input_tokens":37,"cache_read_input_tokens":6,"output_tokens":13,"total_tokens":50}}

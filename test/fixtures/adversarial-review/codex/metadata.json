@@ -1,5 +1,7 @@
 {
-  "cli": "codex-cli 0.144.5",
-  "capture_command": "codex exec --ephemeral --sandbox read-only --json --output-schema SCHEMA --output-last-message OUTPUT -",
+  "cli": "adversarial-review Codex attestation contract v1",
+  "help_surface_version": "codex-cli 0.144.5",
+  "capture_command": "not a live capture; deterministic contract fixture for fake-cli conformance tests",
+  "fixture_kind": "synthetic-contract",
   "sanitized": true
 }

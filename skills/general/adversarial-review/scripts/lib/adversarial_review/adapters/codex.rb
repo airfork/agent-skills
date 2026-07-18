@@ -33,12 +33,13 @@ module AdversarialReview
       def invoke_prompt(prompt)
         @invocation_sequence = @invocation_sequence.to_i + 1
         output_path = File.join(@direct_root, "codex-final-#{@invocation_sequence}.json")
+        repository = active_repository
         argv = [
           @pinned_executable.path, "exec", "--ephemeral", "--ignore-user-config",
           "--ignore-rules", "--strict-config", "--sandbox", "read-only",
           "--model", @requested_model, "-c",
           "model_reasoning_effort=#{@requested_effort.inspect}",
-          "--cd", @repository, "--json", "--output-schema", active_schema_path,
+          "--cd", repository, "--json", "--output-schema", active_schema_path,
           "--output-last-message", output_path, "-"
         ]
         result = run_direct(argv: argv, stdin_data: prompt)
@@ -63,12 +64,12 @@ module AdversarialReview
         usage = completed.is_a?(Hash) ? completed["usage"] : nil
         terminal = runtime_terminal(runtime)
         capabilities = runtime_capabilities(runtime, payload, usage)
-        record_provenance(runtime, terminal)
         {
           "payload" => payload,
           "terminal" => terminal,
           "usage" => usage,
-          "capabilities" => capabilities
+          "capabilities" => capabilities,
+          "provenance" => runtime_provenance_record(runtime)
         }
       rescue JSON::ParserError, Errno::ENOENT, Errno::EACCES, Errno::EPERM,
              Errno::ELOOP, Errno::ENOTDIR, IOError
@@ -106,13 +107,12 @@ module AdversarialReview
       def runtime_capabilities(runtime, payload, usage)
         runtime ||= {}
         session_id = runtime["session_id"]
-        fresh = runtime["fresh"] == true && nonempty_text?(session_id) &&
-                (@preflight_mode || session_id != @preflight_session_id)
-        workdir_matches = runtime["workdir"] == @repository
+        fresh = runtime["fresh"] == true && nonempty_text?(session_id)
+        workdir_matches = runtime["workdir"] == active_repository
         read_only = runtime["sandbox"] == "read-only"
         model_matches = runtime["model"] == @requested_model
         effort_matches = runtime["effort"] == @requested_effort
-        structured = direct_payload_valid?(payload)
+        structured = payload.is_a?(Hash)
         metered = valid_usage?(usage)
         direct_capabilities(
           source: "Codex runtime event",
@@ -121,14 +121,14 @@ module AdversarialReview
           read_only: [read_only, "runtime sandbox #{runtime["sandbox"].inspect}"],
           model_selection: [model_matches, "runtime model #{runtime["model"].inspect}"],
           effort_selection: [effort_matches, "runtime effort #{runtime["effort"].inspect}"],
-          structured_output: [structured, "final-message file validated against role schema"],
+          structured_output: [structured, "machine JSON object received; role schema checked separately"],
           usage_metrics: [metered, "turn.completed usage event"]
         )
       end
 
-      def record_provenance(runtime, terminal)
-        return unless runtime.is_a?(Hash) && terminal.is_a?(Hash)
-        @runtime_provenance = {
+      def runtime_provenance_record(runtime)
+        return {} unless runtime.is_a?(Hash)
+        {
           "adapter" => "codex",
           "cli_version" => @cli_version,
           "executable" => @pinned_executable.path,

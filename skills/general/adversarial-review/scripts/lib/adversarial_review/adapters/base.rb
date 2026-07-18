@@ -10,7 +10,7 @@ module AdversarialReview
       )
       ExecutionResult = Struct.new(
         :status, :payload, :usage, :capabilities, :attempts,
-        :runner_results, :error_code, :ordinary_result,
+        :runner_results, :error_code, :ordinary_result, :runtime_provenance,
         keyword_init: true
       )
 
@@ -132,7 +132,7 @@ module AdversarialReview
         @source_env = source_env
         @run_directory = run_directory
         @configured_config_root = config_root
-        @runtime_provenance = nil
+        @runtime_provenance_records = nil
         @capability_probe = nil
         self
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
@@ -142,6 +142,10 @@ module AdversarialReview
 
       def execute(required_checks: [])
         ensure_direct_configuration!
+        @runtime_provenance_records = nil
+        @direct_session_ids = nil
+        @last_active_phase = nil
+        @last_active_attempt = nil
         support = self.class.runtime_decision(
           adapter: adapter_name, tier: tier,
           requested_model: @requested_model, requested_effort: @requested_effort,
@@ -153,39 +157,41 @@ module AdversarialReview
           @executable_candidate, repository: @repository,
           run_directory: @run_directory, config_root: @configured_config_root
         )
-        probe_results = []
-        help_result = run_probe(help_argv)
-        probe_results << help_result
-        unless successful_process?(help_result) && help_capabilities_present?(help_result.stdout)
-          return direct_failure("capability_probe_failed", probe_results)
-        end
-        version_result = run_probe([@pinned_executable.path, "--version"])
-        probe_results << version_result
-        unless successful_process?(version_result) && nonempty_text?(version_result.stdout)
-          return direct_failure("version_probe_failed", probe_results)
-        end
-        @cli_version = version_result.stdout.strip
-        @capability_probe = {
-          "help_argv" => help_argv.dup,
-          "version_argv" => [@pinned_executable.path, "--version"],
-          "cli_version" => @cli_version,
-          "executable" => @pinned_executable.path
-        }
-
         Runner.with_isolated_directory(prefix: "adversarial-review-direct") do |root|
           prepare_isolated_runtime(root)
           @preflight_mode = true
+          @active_phase = "probe"
+          @active_attempt = nil
+          probe_results = []
+          help_result = run_probe(help_argv)
+          probe_results << help_result
+          unless successful_process?(help_result) && help_capabilities_present?(help_result.stdout)
+            return direct_failure("capability_probe_failed", probe_results)
+          end
+          version_result = run_probe([@pinned_executable.path, "--version"])
+          probe_results << version_result
+          unless successful_process?(version_result) && nonempty_text?(version_result.stdout)
+            return direct_failure("version_probe_failed", probe_results)
+          end
+          @cli_version = version_result.stdout.strip
+          @capability_probe = {
+            "help_argv" => help_argv.dup,
+            "version_argv" => [@pinned_executable.path, "--version"],
+            "cli_version" => @cli_version,
+            "executable" => @pinned_executable.path
+          }
+
+          @active_phase = "preflight"
+          @active_attempt = 0
           preflight_result, preflight_envelope = invoke_prompt(preflight_prompt)
           probe_results << preflight_result if preflight_result
+          record_runtime_observation(preflight_envelope)
           preflight_error = attestation_error(preflight_result, preflight_envelope)
           return direct_failure(preflight_error, probe_results) if preflight_error
-          if tier == "ultra" && preflight_envelope.dig("terminal", "independent_vote") != true
-            return direct_failure("independent_vote_unattested", probe_results)
-          end
-          @preflight_session_id = preflight_envelope.dig("terminal", "session_id")
           preflight_usage = valid_usage(preflight_envelope["usage"])
 
           @preflight_mode = false
+          @active_phase = "execution"
           result = execute_with_one_repair(
             requested_model: @requested_model,
             requested_effort: @requested_effort,
@@ -197,10 +203,13 @@ module AdversarialReview
         ensure
           @schema_path = nil
           @preflight_schema_path = nil
+          @preflight_repository = nil
           @isolated_home = nil
           @isolated_config_root = nil
           @direct_root = nil
           @preflight_mode = false
+          @active_phase = nil
+          @active_attempt = nil
         end
       rescue Runner::Error
         direct_failure("runner_error")
@@ -211,7 +220,7 @@ module AdversarialReview
       end
 
       def runtime_provenance
-        @runtime_provenance && JSON.parse(JSON.generate(@runtime_provenance))
+        provenance_snapshot
       end
 
       def capability_probe
@@ -247,8 +256,10 @@ module AdversarialReview
         usage = Hash.new(0)
         loop do
           attempts += 1
+          @active_attempt = attempts if @runtime_provenance_records
           runner_result, envelope = invoke(attempts == 2)
           results << runner_result
+          record_runtime_observation(envelope) if @runtime_provenance_records
           unless successful_process?(runner_result)
             code = runner_result && runner_result.timed_out ? "process_timeout" : "process_failed"
             return failed_execution(code, attempts, results, usage)
@@ -266,6 +277,10 @@ module AdversarialReview
           end
 
           terminal = envelope.fetch("terminal")
+          terminal_error = direct_terminal_error(terminal)
+          if terminal_error
+            return failed_execution(terminal_error, attempts, results, usage)
+          end
           decision = self.class.runtime_decision(
             adapter: adapter_name,
             tier: tier,
@@ -303,7 +318,8 @@ module AdversarialReview
             return ExecutionResult.new(
               status: "complete", payload: payload, usage: usage.to_h,
               capabilities: normalized_capabilities, attempts: attempts,
-              runner_results: results, error_code: nil, ordinary_result: true
+              runner_results: results, error_code: nil, ordinary_result: true,
+              runtime_provenance: provenance_snapshot
             )
           end
           return failed_execution("invalid_result", attempts, results, usage) if attempts == 2
@@ -353,33 +369,46 @@ module AdversarialReview
 
       def prepare_isolated_runtime(root)
         @direct_root = File.realpath(root)
+        @preflight_repository = File.join(@direct_root, "empty-repository")
         @isolated_home = File.join(@direct_root, "home")
         @isolated_config_root = File.join(@direct_root, "config")
+        Dir.mkdir(@preflight_repository, 0o700)
         Dir.mkdir(@isolated_home, 0o700)
         Dir.mkdir(@isolated_config_root, 0o700)
         @schema_path = File.join(@direct_root, "role-schema.json")
         Runner.write_private_file(@schema_path, JSON.generate(@role_schema))
         @preflight_schema_path = File.join(@direct_root, "preflight-schema.json")
         Runner.write_private_file(@preflight_schema_path, JSON.generate(PREFLIGHT_SCHEMA))
+        @runtime_provenance_records = {
+          "preflight" => nil,
+          "executions" => [],
+          "failure" => nil
+        }
+        @direct_session_ids = {}
       end
 
       def run_probe(argv)
+        repository = active_repository
         Runner.run(
           argv: argv, stdin_data: "", timeout_seconds: @timeout_seconds,
-          env: child_environment(source_env: @source_env), chdir: @repository,
-          repository: @repository, run_directory: @run_directory,
-          config_root: @configured_config_root, executable: @pinned_executable
+          env: child_environment(
+            source_env: @source_env, isolated_home: @isolated_home,
+            isolated_config_root: @isolated_config_root
+          ),
+          chdir: repository, repository: repository, run_directory: @run_directory,
+          config_root: @isolated_config_root, executable: @pinned_executable
         )
       end
 
       def run_direct(argv:, stdin_data:)
+        repository = active_repository
         Runner.run(
           argv: argv, stdin_data: stdin_data, timeout_seconds: @timeout_seconds,
           env: child_environment(
             source_env: @source_env, isolated_home: @isolated_home,
             isolated_config_root: @isolated_config_root
           ),
-          chdir: @repository, repository: @repository,
+          chdir: repository, repository: repository,
           run_directory: @run_directory, config_root: @isolated_config_root,
           executable: @pinned_executable
         )
@@ -397,6 +426,8 @@ module AdversarialReview
         return "runtime_attestation_missing" unless envelope.is_a?(Hash)
         terminal = envelope["terminal"]
         return "runtime_attestation_missing" unless terminal.is_a?(Hash) && terminal["terminal"] == true
+        terminal_error = direct_terminal_error(terminal)
+        return terminal_error if terminal_error
         decision = self.class.runtime_decision(
           adapter: adapter_name, tier: tier,
           requested_model: @requested_model, requested_effort: @requested_effort,
@@ -410,16 +441,19 @@ module AdversarialReview
         )
         gate = Capabilities.gate(normalized, "PASS")
         return "capabilities_degraded" unless gate.fetch("capability_status") == "CAPABILITIES SATISFIED"
+        return "structured_output_unattested" unless direct_payload_valid?(envelope["payload"])
         nil
       rescue Capabilities::Error
         "capability_attestation_invalid"
       end
 
       def direct_failure(code, runner_results = [])
+        record_failure(code)
         ExecutionResult.new(
           status: "generic", payload: nil, usage: {}, capabilities: nil,
           attempts: 0, runner_results: runner_results,
-          error_code: code, ordinary_result: false
+          error_code: code, ordinary_result: false,
+          runtime_provenance: provenance_snapshot
         )
       end
 
@@ -427,6 +461,58 @@ module AdversarialReview
         return [] unless payload.is_a?(Hash)
         checks = payload["checks_completed"] || payload["checks"]
         checks.is_a?(Array) ? checks : []
+      end
+
+      def active_repository
+        @preflight_mode ? @preflight_repository : @repository
+      end
+
+      def direct_terminal_error(terminal)
+        return nil unless @direct_session_ids
+        session_id = terminal["session_id"]
+        return "runtime_attestation_missing" unless nonempty_text?(session_id)
+        return "session_reused" if @direct_session_ids.key?(session_id)
+        if tier == "ultra" && terminal["independent_vote"] != true
+          return "independent_vote_unattested"
+        end
+
+        @direct_session_ids[session_id] = {
+          "phase" => @active_phase,
+          "attempt" => @active_attempt
+        }
+        nil
+      end
+
+      def record_runtime_observation(envelope)
+        return unless @runtime_provenance_records
+        @last_active_phase = @active_phase
+        @last_active_attempt = @active_attempt
+        vendor = envelope.is_a?(Hash) && envelope["provenance"].is_a?(Hash) ?
+          envelope.fetch("provenance") : {}
+        record = JSON.parse(JSON.generate(vendor)).merge(
+          "phase" => @active_phase,
+          "attempt" => @active_attempt,
+          "status" => vendor.empty? ? "missing" : "observed"
+        )
+        if @active_phase == "preflight"
+          @runtime_provenance_records["preflight"] = record
+        else
+          @runtime_provenance_records.fetch("executions") << record
+        end
+      end
+
+      def record_failure(code)
+        return unless @runtime_provenance_records
+        @runtime_provenance_records["failure"] = {
+          "phase" => @active_phase || @last_active_phase || "probe",
+          "attempt" => @active_attempt || @last_active_attempt,
+          "error_code" => code
+        }
+      end
+
+      def provenance_snapshot
+        return nil unless @runtime_provenance_records
+        JSON.parse(JSON.generate(@runtime_provenance_records))
       end
 
       def valid_usage(value)
@@ -567,10 +653,12 @@ module AdversarialReview
       end
 
       def failed_execution(code, attempts, results, usage, capabilities = nil)
+        record_failure(code)
         ExecutionResult.new(
           status: "generic", payload: nil, usage: usage.to_h,
           capabilities: capabilities, attempts: attempts, runner_results: results,
-          error_code: code, ordinary_result: false
+          error_code: code, ordinary_result: false,
+          runtime_provenance: provenance_snapshot
         )
       end
     end

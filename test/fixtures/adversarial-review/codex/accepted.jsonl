@@ -1,2 +1,2 @@
-{"type":"runtime.start","session_id":"$SESSION_ID","fresh":true,"sandbox":"read-only","workdir":"$REPOSITORY","model":"$MODEL","effort":"$EFFORT"}
+{"type":"runtime.start","session_id":"$SESSION_ID","fresh":true,"sandbox":"read-only","workdir":"$CWD","model":"$OBSERVED_MODEL","effort":"$OBSERVED_EFFORT"}
 {"type":"turn.completed","usage":{"input_tokens":41,"cached_input_tokens":7,"output_tokens":11,"reasoning_tokens":5,"total_tokens":57}}

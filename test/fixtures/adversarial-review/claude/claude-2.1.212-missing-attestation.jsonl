@@ -1,0 +1,2 @@
+{"type":"system","subtype":"init","session_id":"$SESSION_ID","cwd":"$CWD","model":"$OBSERVED_MODEL","permissionMode":"plan","tools":["Read","Grep","Glob"]}
+{"type":"result","subtype":"success","structured_output":$ROLE_RESPONSE,"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}

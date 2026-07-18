@@ -517,9 +517,12 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     %w[codex claude].each do |provider|
       metadata = JSON.parse(File.read(adapter_fixture(provider, "metadata.json")))
       assert_equal true, metadata.fetch("sanitized"), provider
-      assert_match(/\A(?:codex-cli|Claude Code) /, metadata.fetch("cli"), provider)
-      assert_includes metadata.fetch("capture_command"), provider, provider
-      %w[accepted.jsonl missing-attestation.jsonl].each do |fixture|
+      assert_includes metadata.fetch("fixture_kind"), "contract", provider
+      assert_kind_of String, metadata.fetch("capture_command"), provider
+      fixtures = provider == "codex" ?
+        %w[accepted.jsonl missing-attestation.jsonl] :
+        %w[accepted-contract.jsonl claude-2.1.212-missing-attestation.jsonl]
+      fixtures.each do |fixture|
         refute_empty File.read(adapter_fixture(provider, fixture)), "#{provider}/#{fixture}"
       end
     end
@@ -532,7 +535,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         payload = direct_role_payload
         fake = write_direct_adapter_fake(
           bin, provider: "codex", log: log, payload: payload,
-          stream: File.read(adapter_fixture("codex", "accepted.jsonl"))
+          stream: File.read(adapter_fixture("codex", "accepted.jsonl")),
+          observed_model: "gpt-5.6-sol", observed_effort: "xhigh"
         )
         schema = attack_role_schema
         prompt = "REVIEWED SECRET: inspect docs/spec.md"
@@ -548,17 +552,21 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal "complete", result.status
         assert_equal payload, result.payload
         assert_equal 114, result.usage.fetch("total_tokens")
-        assert_equal "codex-cli 0.144.5", adapter.runtime_provenance.fetch("cli_version")
-        assert_equal "codex-session-2", adapter.runtime_provenance.fetch("session_id")
-        assert_equal File.realpath(fake), adapter.runtime_provenance.fetch("executable")
-        assert_equal File.realpath(repository), adapter.runtime_provenance.fetch("workdir")
-        assert_equal "gpt-5.6-sol", adapter.runtime_provenance.fetch("observed_model")
-        assert_equal "xhigh", adapter.runtime_provenance.fetch("observed_effort")
+        execution_provenance = adapter.runtime_provenance.fetch("executions").fetch(0)
+        assert_equal "codex-cli contract-vNext", execution_provenance.fetch("cli_version")
+        assert_equal "codex-session-2", execution_provenance.fetch("session_id")
+        assert_equal File.realpath(fake), execution_provenance.fetch("executable")
+        assert_equal File.realpath(repository), execution_provenance.fetch("workdir")
+        assert_equal "gpt-5.6-sol", execution_provenance.fetch("observed_model")
+        assert_equal "xhigh", execution_provenance.fetch("observed_effort")
 
         records = fake_cli_records(log)
         assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
         preflight, execution = records.select { |record| record.fetch("kind") == "run" }
         refute_includes preflight.fetch("stdin"), "REVIEWED SECRET"
+        refute_equal File.realpath(repository), preflight.fetch("cwd")
+        assert_equal false, preflight.fetch("relative_review_visible")
+        refute_includes preflight.fetch("argv").join(" "), File.realpath(repository)
         assert_equal ["ok"], preflight.fetch("schema_payload").fetch("required")
         refute_equal schema, preflight.fetch("schema_payload")
         assert_equal prompt, execution.fetch("stdin")
@@ -584,7 +592,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         log = File.join(bin, "codex-calls.jsonl")
         fake = write_direct_adapter_fake(
           bin, provider: "codex", log: log, payload: direct_role_payload,
-          stream: File.read(adapter_fixture("codex", "missing-attestation.jsonl"))
+          stream: File.read(adapter_fixture("codex", "missing-attestation.jsonl")),
+          observed_model: "gpt-5.6-sol", observed_effort: "xhigh"
         )
         adapter = AdversarialReview::Adapters::Codex.new(
           executable: fake, repository: repository, model: "gpt-5.6-sol",
@@ -613,7 +622,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         fake = write_direct_adapter_fake(
           bin, provider: "codex", log: log, payload: direct_role_payload,
           stream: File.read(adapter_fixture("codex", "accepted.jsonl")),
-          help_text: "Usage: codex exec --ephemeral --json\n"
+          help_text: "Usage: codex exec --ephemeral --json\n",
+          observed_model: "gpt-5.6-sol", observed_effort: "xhigh"
         )
         adapter = AdversarialReview::Adapters::Codex.new(
           executable: fake, repository: repository, model: "gpt-5.6-sol",
@@ -637,7 +647,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         payload = direct_role_payload
         fake = write_direct_adapter_fake(
           bin, provider: "claude", log: log, payload: payload,
-          stream: File.read(adapter_fixture("claude", "accepted.jsonl"))
+          stream: File.read(adapter_fixture("claude", "accepted-contract.jsonl")),
+          observed_model: "claude-opus-4-8", observed_effort: "high"
         )
         schema = attack_role_schema
         prompt = "REVIEWED SECRET: inspect docs/spec.md"
@@ -653,15 +664,19 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal "complete", result.status
         assert_equal payload, result.payload
         assert_equal 100, result.usage.fetch("total_tokens")
-        assert_equal "Claude Code 2.1.212", adapter.runtime_provenance.fetch("cli_version")
-        assert_equal true, adapter.runtime_provenance.fetch("independent_vote")
-        assert_equal "claude-session-2", adapter.runtime_provenance.fetch("session_id")
+        execution_provenance = adapter.runtime_provenance.fetch("executions").fetch(0)
+        assert_equal "Claude Code contract-vNext", execution_provenance.fetch("cli_version")
+        assert_equal true, execution_provenance.fetch("independent_vote")
+        assert_equal "claude-session-2", execution_provenance.fetch("session_id")
 
         records = fake_cli_records(log)
         assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
         preflight, execution = records.select { |record| record.fetch("kind") == "run" }
         refute_includes preflight.fetch("argv").last, "REVIEWED SECRET"
-        preflight_schema = JSON.parse(preflight.fetch("argv").fetch(14))
+        refute_equal File.realpath(repository), preflight.fetch("cwd")
+        assert_equal false, preflight.fetch("relative_review_visible")
+        refute_includes preflight.fetch("argv").join(" "), File.realpath(repository)
+        preflight_schema = JSON.parse(preflight.fetch("argv").fetch(15))
         assert_equal ["ok"], preflight_schema.fetch("required")
         refute_equal schema, preflight_schema
         assert_equal prompt, execution.fetch("argv").last
@@ -669,10 +684,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal [
           "-p", "--bare", "--no-session-persistence", "--permission-mode", "plan",
           "--tools", "Read,Grep,Glob", "--model", "claude-opus-4-8", "--effort", "high",
-          "--output-format", "stream-json", "--json-schema", schema_json, prompt
+          "--verbose", "--output-format", "stream-json", "--json-schema", schema_json, prompt
         ], execution.fetch("argv")
         assert_equal 1, execution.fetch("argv").count("--json-schema")
-        assert_equal schema_json, execution.fetch("argv").fetch(14)
+        assert_equal schema_json, execution.fetch("argv").fetch(15)
         assert_equal "", execution.fetch("stdin")
         refute execution.fetch("env").key?("TOP_SECRET")
       end
@@ -683,12 +698,12 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     with_repository(files: {"docs/spec.md" => "# Secret\n"}) do |repository|
       Dir.mktmpdir("adversarial-review-claude-bin") do |bin|
         log = File.join(bin, "claude-calls.jsonl")
-        stream = File.read(adapter_fixture("claude", "accepted.jsonl")).sub(
+        stream = File.read(adapter_fixture("claude", "accepted-contract.jsonl")).sub(
           '"independent_vote":true', '"independent_vote":false'
         )
         fake = write_direct_adapter_fake(
           bin, provider: "claude", log: log, payload: direct_role_payload,
-          stream: stream
+          stream: stream, observed_model: "claude-opus-4-8", observed_effort: "high"
         )
         adapter = AdversarialReview::Adapters::Claude.new(
           executable: fake, repository: repository, model: "claude-opus-4-8",
@@ -715,7 +730,9 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         log = File.join(bin, "claude-calls.jsonl")
         fake = write_direct_adapter_fake(
           bin, provider: "claude", log: log, payload: direct_role_payload,
-          stream: File.read(adapter_fixture("claude", "missing-attestation.jsonl"))
+          stream: File.read(adapter_fixture("claude", "claude-2.1.212-missing-attestation.jsonl")),
+          observed_model: "claude-sonnet-4-8", observed_effort: "high",
+          cli_version: "2.1.212 (Claude Code)"
         )
         adapter = AdversarialReview::Adapters::Claude.new(
           executable: fake, repository: repository, model: "claude-sonnet-4-8",
@@ -726,7 +743,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         result = adapter.execute
 
         assert_equal "generic", result.status
-        assert_equal "runtime_attestation_missing", result.error_code
+        assert_equal "runtime_selection_mismatch", result.error_code
         records = fake_cli_records(log)
         assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
         records.each do |record|
@@ -736,7 +753,209 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def test_direct_adapters_fail_closed_for_each_unattested_property
+    codex = File.read(adapter_fixture("codex", "accepted.jsonl"))
+    claude = File.read(adapter_fixture("claude", "accepted-contract.jsonl"))
+    cases = {
+      "codex" => {
+        "fresh missing" => {stream: codex.sub('"fresh":true,', "")},
+        "fresh false" => {stream: codex.sub('"fresh":true', '"fresh":false')},
+        "workdir" => {stream: codex.sub('"workdir":"$CWD"', '"workdir":"/wrong"')},
+        "sandbox" => {stream: codex.sub('"sandbox":"read-only"', '"sandbox":"workspace-write"')},
+        "model" => {stream: codex, observed_model: "wrong-model"},
+        "effort" => {stream: codex, observed_effort: "low"},
+        "structured output" => {stream: codex, payloads: [{"ok" => false}]},
+        "usage" => {stream: without_usage(codex)}
+      },
+      "claude" => {
+        "fresh missing" => {stream: claude.sub('"fresh":true,', "")},
+        "fresh false" => {stream: claude.sub('"fresh":true', '"fresh":false')},
+        "workdir" => {stream: claude.sub('"cwd":"$CWD"', '"cwd":"/wrong"')},
+        "permission" => {stream: claude.sub('"permissionMode":"plan"', '"permissionMode":"default"')},
+        "tools" => {stream: claude.sub('["Read","Grep","Glob"]', '["Read","Grep","Glob","Bash"]')},
+        "model" => {stream: claude, observed_model: "wrong-model"},
+        "effort" => {stream: claude, observed_effort: "low"},
+        "structured output" => {stream: claude, payloads: [{"ok" => false}]},
+        "usage" => {stream: without_usage(claude)},
+        "ultra independence" => {
+          stream: claude.sub('"independent_vote":true', '"independent_vote":false'),
+          tier: "ultra"
+        }
+      }
+    }
+
+    cases.each do |provider, provider_cases|
+      provider_cases.each do |property, options|
+        assert_direct_preflight_fallback(provider, property, options)
+      end
+    end
+  end
+
+  def test_claude_current_init_shape_is_parsed_but_unreported_controls_fail_closed
+    stream = File.read(
+      adapter_fixture("claude", "claude-2.1.212-missing-attestation.jsonl")
+    )
+
+    assert_direct_preflight_fallback(
+      "claude", "Claude Code 2.1.212 unreported effort and freshness",
+      stream: stream, tier: "high", expected_error: "runtime_selection_mismatch",
+      cli_version: "2.1.212 (Claude Code)"
+    )
+  end
+
+  def test_claude_ultra_requires_independence_on_every_execution_attempt
+    accepted = File.read(adapter_fixture("claude", "accepted-contract.jsonl"))
+    execution_without_independence = accepted.sub(
+      '"independent_vote":true', '"independent_vote":false'
+    )
+    result, records = run_direct_adapter_case(
+      "claude", streams: [accepted, execution_without_independence], tier: "ultra"
+    )
+
+    assert_equal "generic", result.status
+    assert_equal "independent_vote_unattested", result.error_code
+    assert_equal 1, result.attempts
+    assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+  end
+
+  def test_claude_ultra_requires_independence_again_on_a_repair_attempt
+    accepted = File.read(adapter_fixture("claude", "accepted-contract.jsonl"))
+    repair_without_independence = accepted.sub(
+      '"independent_vote":true', '"independent_vote":false'
+    )
+    invalid = direct_role_payload.merge("schema_version" => 2)
+    result, records = run_direct_adapter_case(
+      "claude", streams: [accepted, accepted, repair_without_independence],
+      session_ids: %w[preflight execution repair],
+      payloads: [{"ok" => true}, invalid, direct_role_payload], tier: "ultra"
+    )
+
+    assert_equal "generic", result.status
+    assert_equal "independent_vote_unattested", result.error_code
+    assert_equal 2, result.attempts
+    assert_equal 3, records.count { |record| record.fetch("kind") == "run" }
+    assert_equal 2, result.runtime_provenance.fetch("failure").fetch("attempt")
+  end
+
+  def test_direct_adapter_rejects_a_reused_execution_session
+    %w[codex claude].each do |provider|
+      stream = accepted_direct_stream(provider)
+      result, = run_direct_adapter_case(
+        provider, streams: [stream, stream], session_ids: %w[reused reused],
+        tier: provider == "claude" ? "high" : "high"
+      )
+
+      assert_equal "generic", result.status, provider
+      assert_equal "session_reused", result.error_code, provider
+      assert_equal false, result.ordinary_result, provider
+    end
+  end
+
+  def test_repair_attempt_must_use_a_third_fresh_session
+    %w[codex claude].each do |provider|
+      stream = accepted_direct_stream(provider)
+      invalid = direct_role_payload.merge("schema_version" => 2)
+      result, records = run_direct_adapter_case(
+        provider, streams: [stream, stream, stream],
+        session_ids: ["preflight", "execution", "execution"],
+        payloads: [{"ok" => true}, invalid, direct_role_payload],
+        tier: "high"
+      )
+
+      assert_equal "generic", result.status, provider
+      assert_equal "session_reused", result.error_code, provider
+      assert_equal 2, result.attempts, provider
+      assert_equal 3, records.count { |record| record.fetch("kind") == "run" }, provider
+    end
+  end
+
+  def test_failed_execution_provenance_keeps_preflight_separate_and_names_attempt
+    %w[codex claude].each do |provider|
+      accepted = accepted_direct_stream(provider)
+      missing = missing_direct_stream(provider)
+      result, = run_direct_adapter_case(
+        provider, streams: [accepted, missing], tier: "high"
+      )
+
+      assert_equal "generic", result.status, provider
+      provenance = result.runtime_provenance
+      assert_equal "preflight", provenance.fetch("preflight").fetch("phase"), provider
+      assert_equal "execution", provenance.fetch("failure").fetch("phase"), provider
+      assert_equal 1, provenance.fetch("failure").fetch("attempt"), provider
+      execution = provenance.fetch("executions").fetch(0)
+      assert_equal "execution", execution.fetch("phase"), provider
+      assert_equal 1, execution.fetch("attempt"), provider
+      refute_equal provenance.fetch("preflight").fetch("session_id"), execution["session_id"], provider
+    end
+  end
+
   private
+
+  def without_usage(stream)
+    stream.sub(/"usage":\{[^}]*\}/, '"usage":null')
+  end
+
+  def accepted_direct_stream(provider)
+    name = provider == "codex" ? "accepted.jsonl" : "accepted-contract.jsonl"
+    File.read(adapter_fixture(provider, name))
+  end
+
+  def missing_direct_stream(provider)
+    name = provider == "codex" ?
+      "missing-attestation.jsonl" : "claude-2.1.212-missing-attestation.jsonl"
+    File.read(adapter_fixture(provider, name))
+  end
+
+  def assert_direct_preflight_fallback(provider, property, options)
+    arguments = options.dup
+    expected_error = arguments.delete(:expected_error)
+    result, records = run_direct_adapter_case(provider, **arguments)
+    assert_equal "generic", result.status, "#{provider}: #{property}"
+    assert_equal false, result.ordinary_result, "#{provider}: #{property}"
+    assert_equal expected_error, result.error_code, "#{provider}: #{property}" if expected_error
+    assert_equal %w[help version run], records.map { |record| record.fetch("kind") },
+                 "#{provider}: #{property}"
+    records.each do |record|
+      refute_includes record.fetch("stdin"), "REVIEWED SECRET", "#{provider}: #{property}"
+      refute_includes record.fetch("argv").join(" "), "REVIEWED SECRET", "#{provider}: #{property}"
+    end
+  end
+
+  def run_direct_adapter_case(provider, stream: nil, streams: nil, tier: "high",
+                              observed_model: nil, observed_effort: nil,
+                              observed_models: nil, observed_efforts: nil,
+                              session_ids: nil, payloads: nil, cli_version: nil)
+    selected_model = observed_model ||
+      (provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8")
+    selected_effort = observed_effort || (provider == "codex" ? "xhigh" : "high")
+    selected_streams = streams || [stream || accepted_direct_stream(provider)]
+    captured = nil
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-#{provider}-matrix") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        fake = write_direct_adapter_fake(
+          bin, provider: provider, log: log, payload: direct_role_payload,
+          stream: selected_streams.fetch(0), streams: selected_streams,
+          observed_model: selected_model, observed_effort: selected_effort,
+          observed_models: observed_models, observed_efforts: observed_efforts,
+          session_ids: session_ids, payloads: payloads, cli_version: cli_version
+        )
+        klass = provider == "codex" ?
+          AdversarialReview::Adapters::Codex : AdversarialReview::Adapters::Claude
+        adapter = klass.new(
+          executable: fake, repository: repository, model: provider == "codex" ?
+            "gpt-5.6-sol" : "claude-opus-4-8",
+          effort: provider == "codex" ? "xhigh" : "high",
+          role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET: inspect docs/spec.md", tier: tier,
+          timeout_seconds: 2
+        )
+        result = adapter.execute(required_checks: ["assumption-coverage"])
+        captured = [result, fake_cli_records(log), adapter]
+      end
+    end
+    captured
+  end
 
   def adapter_fixture(provider, name)
     File.join(__dir__, "fixtures", "adversarial-review", provider, name)
@@ -760,13 +979,17 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     }
   end
 
-  def write_direct_adapter_fake(directory, provider:, log:, payload:, stream:, help_text: nil)
+  def write_direct_adapter_fake(directory, provider:, log:, payload:, stream:, help_text: nil,
+                                observed_model:, observed_effort:, streams: nil,
+                                observed_models: nil, observed_efforts: nil,
+                                session_ids: nil, payloads: nil, cli_version: nil)
     default_help = if provider == "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
     else
-      "  -p, --print\n  --bare\n  --no-session-persistence\n  --permission-mode\n  --tools\n  --model\n  --effort\n  --output-format\n  --json-schema\n"
+      "  -p, --print\n  --bare\n  --no-session-persistence\n  --permission-mode\n  --tools\n  --model\n  --effort\n  --verbose\n  --output-format\n  --json-schema\n"
     end
-    version = provider == "codex" ? "codex-cli 0.144.5" : "Claude Code 2.1.212"
+    version = cli_version || (provider == "codex" ?
+      "codex-cli contract-vNext" : "Claude Code contract-vNext")
     name = provider == "codex" ? "codex" : "claude"
     body = <<~RUBY
       \#!#{RbConfig.ruby}
@@ -774,7 +997,11 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       provider = #{provider.inspect}
       log = #{log.inspect}
       role_payload = #{JSON.generate(payload).inspect}
-      template = #{stream.inspect}
+      templates = #{(streams || [stream]).inspect}
+      observed_models = #{(observed_models || [observed_model]).inspect}
+      observed_efforts = #{(observed_efforts || [observed_effort]).inspect}
+      configured_sessions = #{(session_ids || []).inspect}
+      configured_payloads = #{(payloads || []).map { |item| JSON.generate(item) }.inspect}
       help_text = #{(help_text || default_help).inspect}
       version_text = #{version.inspect}
       help_call = (provider == "codex" && ARGV == ["exec", "--help"]) ||
@@ -782,32 +1009,39 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       version_call = ARGV == ["--version"]
       kind = help_call ? "help" : (version_call ? "version" : "run")
       stdin_text = STDIN.read
-      model_index = ARGV.index("--model")
-      model = model_index ? ARGV.fetch(model_index + 1) : ""
-      effort = if provider == "codex"
-        config_index = ARGV.index("-c")
-        raw = config_index ? ARGV.fetch(config_index + 1).sub("model_reasoning_effort=", "") : '""'
-        JSON.parse(raw)
-      else
-        effort_index = ARGV.index("--effort")
-        effort_index ? ARGV.fetch(effort_index + 1) : ""
-      end
       prior_runs = if File.exist?(log)
         File.readlines(log).count { |line| JSON.parse(line)["kind"] == "run" }
       else
         0
       end
-      payload = prior_runs.zero? ? JSON.generate({"ok" => true}) : role_payload
-      session_id = "#{provider}-session-\#{prior_runs + 1}"
+      template = templates.fetch([prior_runs, templates.length - 1].min)
+      observed_model = observed_models.fetch([prior_runs, observed_models.length - 1].min)
+      observed_effort = observed_efforts.fetch([prior_runs, observed_efforts.length - 1].min)
+      payload = if configured_payloads.empty?
+        prior_runs.zero? ? JSON.generate({"ok" => true}) : role_payload
+      else
+        configured_payloads.fetch([prior_runs, configured_payloads.length - 1].min)
+      end
+      session_id = if configured_sessions.empty?
+        "#{provider}-session-\#{prior_runs + 1}"
+      else
+        configured_sessions.fetch([prior_runs, configured_sessions.length - 1].min)
+      end
       schema_payload = nil
       if provider == "codex" && (schema_index = ARGV.index("--output-schema"))
         schema_payload = JSON.parse(File.read(ARGV.fetch(schema_index + 1)))
         output_index = ARGV.index("--output-last-message")
         File.open(ARGV.fetch(output_index + 1), "w", 0o600) { |file| file.write(payload) }
       end
+      relative_review_contents = begin
+        File.read(File.join("docs", "spec.md"))
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES
+        nil
+      end
       record = {
         "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
-        "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload
+        "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload,
+        "relative_review_visible" => !relative_review_contents.nil?
       }
       File.open(log, "a", 0o600) { |file| file.puts(JSON.generate(record)) }
       if help_call
@@ -815,9 +1049,9 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       elsif version_call
         puts version_text
       else
-        rendered = template.gsub("$REPOSITORY", Dir.pwd)
-                           .gsub("$MODEL", model)
-                           .gsub("$EFFORT", effort)
+        rendered = template.gsub("$CWD", Dir.pwd)
+                           .gsub("$OBSERVED_MODEL", observed_model)
+                           .gsub("$OBSERVED_EFFORT", observed_effort)
                            .gsub("$SESSION_ID", session_id)
                            .gsub("$ROLE_RESPONSE", payload)
         STDOUT.write(rendered)
