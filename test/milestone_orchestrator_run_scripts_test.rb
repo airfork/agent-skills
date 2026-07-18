@@ -57,8 +57,8 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
   # --- run-verification ---
 
   def test_passing_command_emits_digest_and_log
-    plan = write_plan("verify-ok" => {"argv" => ["ruby", "-e", "puts 'line1'; puts 'ok'"],
-                                      "cwd" => ".", "timeout_seconds" => 60})
+    plan = write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "puts 'line1'; puts 'ok'"],
+                                       "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(RUN_VERIFICATION, plan, "verify-ok")
     assert_equal 0, exit_code
     digest = JSON.parse(stdout)
@@ -71,8 +71,8 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
   end
 
   def test_failing_command_exits_one_with_fail_digest
-    plan = write_plan("verify-bad" => {"argv" => ["ruby", "-e", "warn 'boom'; exit 3"],
-                                       "cwd" => ".", "timeout_seconds" => 60})
+    plan = write_plan({"verify-bad" => {"argv" => ["ruby", "-e", "warn 'boom'; exit 3"],
+                                        "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(RUN_VERIFICATION, plan, "verify-bad")
     assert_equal 1, exit_code
     digest = JSON.parse(stdout)
@@ -82,8 +82,8 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
   end
 
   def test_timeout_kills_and_reports
-    plan = write_plan("verify-slow" => {"argv" => ["ruby", "-e", "sleep 60"],
-                                        "cwd" => ".", "timeout_seconds" => 1})
+    plan = write_plan({"verify-slow" => {"argv" => ["ruby", "-e", "sleep 60"],
+                                         "cwd" => ".", "timeout_seconds" => 1}})
     stdout, _stderr, exit_code = run_script(RUN_VERIFICATION, plan, "verify-slow")
     assert_equal 1, exit_code
     digest = JSON.parse(stdout)
@@ -92,14 +92,14 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
   end
 
   def test_unregistered_command_refused
-    plan = write_plan("verify-ok" => {"argv" => ["true"], "cwd" => ".", "timeout_seconds" => 60})
+    plan = write_plan({"verify-ok" => {"argv" => ["true"], "cwd" => ".", "timeout_seconds" => 60}})
     _stdout, stderr, exit_code = run_script(RUN_VERIFICATION, plan, "verify-rogue")
     assert_equal 3, exit_code
     assert_match(/not registered/i, stderr)
   end
 
   def test_expected_sha_mismatch_refused
-    plan = write_plan("verify-ok" => {"argv" => ["true"], "cwd" => ".", "timeout_seconds" => 60})
+    plan = write_plan({"verify-ok" => {"argv" => ["true"], "cwd" => ".", "timeout_seconds" => 60}})
     _stdout, stderr, exit_code = run_script(RUN_VERIFICATION, plan, "verify-ok",
                                             "--expected-sha", "f" * 40)
     assert_equal 4, exit_code
@@ -110,7 +110,7 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
 
   def test_clean_artifacts_pass
     write_spec
-    write_plan("verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60})
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
     assert_equal 0, exit_code, stdout
     assert_includes stdout, "0 error(s)"
@@ -118,7 +118,7 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
 
   def test_unresolved_markers_are_errors
     write_spec("# Spec\n\nTBD: decide storage.\n")
-    write_plan("verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60})
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
     assert_equal 1, exit_code
     assert_match(/ERROR unresolved_marker SPEC\.md:3/, stdout)
@@ -126,8 +126,8 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
 
   def test_missing_executable_is_error
     write_spec
-    write_plan("verify-ok" => {"argv" => ["./scripts/definitely-not-here"], "cwd" => ".",
-                               "timeout_seconds" => 60})
+    write_plan({"verify-ok" => {"argv" => ["./scripts/definitely-not-here"], "cwd" => ".",
+                                "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
     assert_equal 1, exit_code
     assert_match(/ERROR missing_executable/, stdout)
@@ -135,8 +135,8 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
 
   def test_long_gate_warns_but_passes
     write_spec
-    write_plan("verify-gate" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".",
-                                 "timeout_seconds" => 5400})
+    write_plan({"verify-gate" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".",
+                                  "timeout_seconds" => 5400}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
     assert_equal 0, exit_code
     assert_match(/WARN long_gate/, stdout)
@@ -147,7 +147,7 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
     File.write(File.join(@repo, "PROJECT_STATUS.md"), "status\n")
     system("git", "-C", @repo, "add", "PROJECT_STATUS.md")
     write_spec
-    write_plan("verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60})
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
     assert_equal 0, exit_code
     assert_match(/WARN unowned_contract_file PROJECT_STATUS\.md/, stdout)

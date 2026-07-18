@@ -1,4 +1,5 @@
 require "minitest/autorun"
+require "minitest/mock"
 require "digest"
 require "open3"
 

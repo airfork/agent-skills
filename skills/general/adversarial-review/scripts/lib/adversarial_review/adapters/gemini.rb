@@ -125,7 +125,8 @@ module AdversarialReview
       def parse_result(result)
         return nil unless result.is_a?(Runner::Result) && result.exit_status == 0 && !result.timed_out
 
-        envelope = JSON.parse(result.stdout, object_class: DuplicateRejectingHash)
+        envelope = JSON.parse(result.stdout, object_class: DuplicateRejectingHash,
+                                             allow_duplicate_key: false)
         unless envelope.is_a?(Hash) && %w[response startup stats].all? { |key| envelope.key?(key) }
           raise JSON::ParserError, "Gemini response envelope is invalid"
         end

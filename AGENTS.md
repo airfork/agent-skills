@@ -33,6 +33,7 @@ This repository stores custom agent skills and related authoring guidance.
 ## Verification and cleanup
 
 - Run `scripts/test` for the repository's normal test suite and `scripts/verify` for the full local contract, syntax, and test gate.
+- On Ruby 4.0+ (minitest 6), the test suite needs the extracted `minitest-mock` gem: `gem install minitest-mock`.
 - Preview generated-artifact cleanup with `scripts/clean --dry-run` or `scripts/archive-clean --dry-run` before applying it. Cleanup scripts are path-scoped and must never be used to remove tracked files or unrelated user work.
 - Do not delete artifacts as part of routine agent work. If cleanup is explicitly requested, use the checked-in cleanup scripts and report the exact mode used.
 - When changing install metadata, run `scripts/sync-skills --dry-run` for each affected target; do not apply global symlink changes without explicit user direction.

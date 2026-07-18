@@ -22,6 +22,10 @@ module AdversarialReview
         :runner_results, :error_code, :ordinary_result, :runtime_provenance,
         keyword_init: true
       )
+      # json >= 2.16 no longer routes duplicate keys through +[]=+ when
+      # +object_class+ is given, so parse sites must also pass
+      # +allow_duplicate_key: false+; this class covers older json versions,
+      # which ignore that option.
       class DuplicateRejectingHash < Hash
         def []=(key, value)
           raise JSON::ParserError, "duplicate JSON key #{key.inspect}" if key?(key)
@@ -779,7 +783,8 @@ module AdversarialReview
           if max_objects && events.length >= max_objects
             raise JSON::ParserError, "#{label} event limit exceeded"
           end
-          event = JSON.parse(line, object_class: DuplicateRejectingHash)
+          event = JSON.parse(line, object_class: DuplicateRejectingHash,
+                                   allow_duplicate_key: false)
           unless event.is_a?(Hash)
             raise JSON::ParserError, "#{label} event is not an object"
           end
