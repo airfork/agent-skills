@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require "json"
 require "tmpdir"
+require "thread"
 
 SKILL = File.expand_path("../skills/general/adversarial-review", __dir__) unless defined?(SKILL)
 $LOAD_PATH.unshift(File.join(SKILL, "scripts", "lib"))
@@ -467,6 +468,22 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     assert_equal 1, result.attempts
   end
 
+  def test_usage_telemetry_rejects_unknown_nested_and_non_integer_values
+    adapter = AdversarialReview::Adapters::Base.new
+    valid = {
+      "input_tokens" => 3, "cached_input_tokens" => 1,
+      "cache_read_input_tokens" => 2, "cache_creation_input_tokens" => 4,
+      "output_tokens" => 5, "reasoning_tokens" => 6, "total_tokens" => 8
+    }
+
+    assert_equal valid, adapter.send(:valid_usage, valid)
+    assert_equal({}, adapter.send(:valid_usage, valid.merge("unknown" => 9)))
+    assert_equal({}, adapter.send(:valid_usage, {"input_tokens" => {"nested" => 1}}))
+    assert_equal({}, adapter.send(:valid_usage, {"input_tokens" => 1.0}))
+    assert_equal({}, adapter.send(:valid_usage, {"input_tokens" => Float::INFINITY}))
+    assert_equal({}, adapter.send(:valid_usage, {"input_tokens" => -1}))
+  end
+
   def test_repair_is_bounded_when_both_results_are_invalid
     adapter = harness_adapter([
       {"payload" => "invalid", "terminal" => runtime_event, "usage" => {}},
@@ -543,6 +560,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
 
     assert_includes plan, expected
     assert_includes plan, "Claude Code 2.1.212 requires `--verbose` with print-mode `stream-json`."
+    assert_includes plan,
+                    "Direct execution requires a caller-supplied `dispatch_capability` observation; adapters never infer or fabricate parallel dispatch."
+    assert_includes plan,
+                    "Codex final-message output must update the precreated `0600` file in place. Atomic replacement, symlinks, identity changes, and oversized output are rejected fail closed."
   end
 
   def test_codex_adapter_probes_then_runs_with_exact_argv_and_provenance
@@ -564,7 +585,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           source_env: {"LANG" => "C", "TOP_SECRET" => "must-not-leak"}
         )
 
-        result = adapter.execute(required_checks: ["assumption-coverage"])
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"],
+          dispatch_capability: observed_dispatch
+        )
 
         assert_equal "complete", result.status
         assert_normalized_capabilities(result.capabilities, "codex complete")
@@ -594,6 +618,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         refute execution.fetch("env").key?("PATH")
         schema_path = execution.fetch("argv").fetch(15)
         output_path = execution.fetch("argv").fetch(17)
+        assert_equal true, execution.fetch("output_preexisting")
+        assert_equal 0o600, execution.fetch("output_mode")
         assert_equal [
           "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
           "--strict-config", "--sandbox", "read-only", "--model", "gpt-5.6-sol",
@@ -620,7 +646,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
         )
 
-        result = adapter.execute(required_checks: ["assumption-coverage"])
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"],
+          dispatch_capability: observed_dispatch
+        )
 
         assert_equal "generic", result.status
         assert_normalized_capabilities(result.capabilities, "codex preflight fallback")
@@ -651,7 +680,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
         )
 
-        result = adapter.execute
+        result = adapter.execute(dispatch_capability: observed_dispatch)
 
         assert_equal "generic", result.status
         assert_equal "capability_probe_failed", result.error_code
@@ -680,7 +709,10 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           source_env: {"LC_ALL" => "C", "TOP_SECRET" => "must-not-leak"}
         )
 
-        result = adapter.execute(required_checks: ["assumption-coverage"])
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"],
+          dispatch_capability: observed_dispatch
+        )
 
         assert_equal "complete", result.status
         assert_normalized_capabilities(result.capabilities, "claude complete")
@@ -734,7 +766,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           prompt: "REVIEWED SECRET", tier: "ultra", timeout_seconds: 2
         )
 
-        result = adapter.execute
+        result = adapter.execute(dispatch_capability: observed_dispatch)
 
         assert_equal "generic", result.status
         assert_normalized_capabilities(result.capabilities, "claude ultra fallback")
@@ -764,7 +796,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
         )
 
-        result = adapter.execute
+        result = adapter.execute(dispatch_capability: observed_dispatch)
 
         assert_equal "generic", result.status
         assert_normalized_capabilities(result.capabilities, "claude current fallback")
@@ -812,6 +844,202 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     cases.each do |provider, provider_cases|
       provider_cases.each do |property, options|
         assert_direct_preflight_fallback(provider, property, options)
+      end
+    end
+  end
+
+  def test_direct_adapter_requires_caller_observed_parallel_dispatch
+    %w[codex claude].each do |provider|
+      missing, missing_records = run_direct_adapter_case(
+        provider, dispatch_capability: nil
+      )
+      unavailable, unavailable_records = run_direct_adapter_case(
+        provider,
+        dispatch_capability: observed_dispatch.merge("status" => "unavailable")
+      )
+
+      [missing, unavailable].each do |result|
+        assert_equal "generic", result.status, provider
+        assert_equal "capabilities_degraded", result.error_code, provider
+        assert_equal "unavailable", result.capabilities.dig("parallel_dispatch", "status"), provider
+        assert_equal false, result.ordinary_result, provider
+      end
+      assert_equal %w[help version run], missing_records.map { |entry| entry.fetch("kind") }, provider
+      assert_equal %w[help version run], unavailable_records.map { |entry| entry.fetch("kind") }, provider
+    end
+  end
+
+  def test_direct_adapter_accepts_a_normalized_caller_dispatch_record
+    %w[codex claude].each do |provider|
+      result, = run_direct_adapter_case(
+        provider, dispatch_capability: enforced_capabilities
+      )
+
+      assert_equal "complete", result.status, provider
+      assert_equal "enforced", result.capabilities.dig("parallel_dispatch", "status"), provider
+    end
+  end
+
+  def test_direct_protocol_rejects_duplicates_out_of_order_and_mixed_sessions
+    %w[codex claude].each do |provider|
+      startup, terminal = accepted_direct_stream(provider).lines
+      terminal_with_other_session = terminal.sub(/}\s*\z/, ',"session_id":"other-session"}')
+      intermediate_with_other_session = JSON.generate(
+        "type" => "progress", "session_id" => "other-session"
+      ) + "\n"
+      malformed_streams = {
+        "duplicate startup" => startup + startup + terminal,
+        "duplicate terminal" => startup + terminal + terminal,
+        "terminal before startup" => terminal + startup,
+        "event after terminal" => startup + terminal + JSON.generate("type" => "late") + "\n",
+        "mixed terminal session" => startup + terminal_with_other_session + "\n",
+        "mixed intermediate session" => startup + intermediate_with_other_session + terminal
+      }
+
+      malformed_streams.each do |label, stream|
+        result, records = run_direct_adapter_case(provider, stream: stream)
+
+        assert_equal "generic", result.status, "#{provider}: #{label}"
+        assert_equal "runtime_attestation_missing", result.error_code, "#{provider}: #{label}"
+        assert_equal %w[help version run], records.map { |entry| entry.fetch("kind") },
+                     "#{provider}: #{label}"
+      end
+    end
+  end
+
+  def test_valid_preflight_usage_survives_attestation_failure
+    %w[codex claude].each do |provider|
+      result, = run_direct_adapter_case(
+        provider, stream: accepted_direct_stream(provider), observed_model: "wrong-model"
+      )
+
+      assert_equal "generic", result.status, provider
+      expected = provider == "codex" ? 57 : 50
+      assert_equal expected, result.usage.fetch("total_tokens"), provider
+    end
+  end
+
+  def test_preflight_execution_and_repair_usage_are_counted_once_each
+    %w[codex claude].each do |provider|
+      accepted = accepted_direct_stream(provider)
+      invalid = direct_role_payload.merge("schema_version" => 2)
+      result, = run_direct_adapter_case(
+        provider, streams: [accepted, accepted, accepted],
+        session_ids: %w[preflight execution repair],
+        payloads: [{"ok" => true}, invalid, direct_role_payload]
+      )
+
+      expected = provider == "codex" ? 171 : 150
+      assert_equal "complete", result.status, provider
+      assert_equal expected, result.usage.fetch("total_tokens"), provider
+    end
+  end
+
+  def test_codex_final_response_rejects_oversize_replacement_and_symlink
+    adapter = AdversarialReview::Adapters::Codex.allocate
+    Dir.mktmpdir("adversarial-review-final") do |directory|
+      %w[oversize replacement symlink].each do |attack|
+        path = File.join(directory, "#{attack}.json")
+        identity = adapter.send(:prepare_final_response, path)
+        case attack
+        when "oversize"
+          File.open(path, File::WRONLY | File::TRUNC) do |file|
+            file.write("x" * (AdversarialReview::Adapters::Codex::MAX_FINAL_RESPONSE_BYTES + 1))
+          end
+        when "replacement"
+          File.unlink(path)
+          AdversarialReview::Runner.write_private_file(path, JSON.generate("ok" => true))
+        when "symlink"
+          target = File.join(directory, "target.json")
+          AdversarialReview::Runner.write_private_file(target, JSON.generate("ok" => true))
+          File.unlink(path)
+          File.symlink(target, path)
+        end
+
+        error = assert_raises(AdversarialReview::Runner::SecurityError, attack) do
+          adapter.send(:read_private_json, path, identity)
+        end
+        assert_includes %w[final_response_changed final_response_oversize], error.code, attack
+      end
+    end
+  end
+
+  def test_codex_final_response_rejects_in_place_truncation_during_read
+    opened = Queue.new
+    resume = Queue.new
+    klass = Class.new(AdversarialReview::Adapters::Codex) do
+      define_method(:initialize) { |opened_queue, resume_queue| @opened_queue = opened_queue; @resume_queue = resume_queue }
+      define_method(:read_final_response_bytes) do |file|
+        @opened_queue << true
+        @resume_queue.pop
+        super(file)
+      end
+      private :read_final_response_bytes
+    end
+    adapter = klass.new(opened, resume)
+
+    Dir.mktmpdir("adversarial-review-final-race") do |directory|
+      path = File.join(directory, "final.json")
+      identity = adapter.send(:prepare_final_response, path)
+      File.open(path, File::WRONLY | File::TRUNC) { |file| file.write(JSON.generate("ok" => true)) }
+      reader = Thread.new do
+        adapter.send(:read_private_json, path, identity)
+      rescue StandardError => error
+        error
+      end
+      opened.pop
+      File.open(path, File::WRONLY | File::TRUNC) { |file| file.write(JSON.generate("no" => true)) }
+      resume << true
+
+      error = reader.value
+      assert_kind_of AdversarialReview::Runner::SecurityError, error
+      assert_equal "final_response_changed", error.code
+    end
+  end
+
+  def test_direct_adapter_serializes_overlapping_execute_calls
+    refute_includes AdversarialReview::Adapters::Base.public_instance_methods, :execute_serial
+    assert_includes AdversarialReview::Adapters::Base.private_instance_methods, :execute_serial
+
+    %w[codex claude].each do |provider|
+      with_direct_adapter(
+        provider, streams: Array.new(4, accepted_direct_stream(provider)),
+        session_ids: %w[preflight-one execution-one preflight-two execution-two],
+        payloads: [{"ok" => true}, direct_role_payload, {"ok" => true}, direct_role_payload],
+        run_delay: 0.15
+      ) do |adapter, log, _fake|
+        first = Thread.new do
+          adapter.execute(required_checks: ["assumption-coverage"], dispatch_capability: observed_dispatch)
+        end
+        wait_for_run_record(log)
+        second = Thread.new do
+          adapter.execute(required_checks: ["assumption-coverage"], dispatch_capability: observed_dispatch)
+        end
+        results = [first.value, second.value]
+
+        assert_equal [["complete", nil], ["complete", nil]],
+                     results.map { |result| [result.status, result.error_code] }, provider
+        assert_equal 4, fake_cli_records(log).count { |entry| entry.fetch("kind") == "run" }, provider
+      end
+    end
+  end
+
+  def test_serial_early_failure_cannot_expose_prior_execution_state
+    %w[codex claude].each do |provider|
+      with_direct_adapter(provider) do |adapter, _log, fake|
+        success = adapter.execute(
+          required_checks: ["assumption-coverage"], dispatch_capability: observed_dispatch
+        )
+        File.chmod(0o600, fake)
+        failure = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", success.status, provider
+        assert_equal "generic", failure.status, provider
+        assert_equal "runner_error", failure.error_code, provider
+        assert_nil failure.runtime_provenance, provider
+        assert_nil adapter.runtime_provenance, provider
+        assert_nil adapter.capability_probe, provider
+        assert failure.capabilities.values.all? { |entry| entry.fetch("status") == "unavailable" }, provider
       end
     end
   end
@@ -984,7 +1212,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                               observed_model: nil, observed_effort: nil,
                               observed_models: nil, observed_efforts: nil,
                               session_ids: nil, payloads: nil, cli_version: nil,
-                              version_text: nil)
+                              version_text: nil, dispatch_capability: :observed)
     selected_model = observed_model ||
       (provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8")
     selected_effort = observed_effort || (provider == "codex" ? "xhigh" : "high")
@@ -1011,11 +1239,58 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           prompt: "REVIEWED SECRET: inspect docs/spec.md", tier: tier,
           timeout_seconds: 2
         )
-        result = adapter.execute(required_checks: ["assumption-coverage"])
+        dispatch = dispatch_capability == :observed ? observed_dispatch : dispatch_capability
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"], dispatch_capability: dispatch
+        )
         captured = [result, fake_cli_records(log), adapter]
       end
     end
     captured
+  end
+
+  def with_direct_adapter(provider, stream: nil, streams: nil, session_ids: nil,
+                          payloads: nil, run_delay: 0)
+    selected_streams = streams || [stream || accepted_direct_stream(provider)]
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-#{provider}-instance") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        fake = write_direct_adapter_fake(
+          bin, provider: provider, log: log, payload: direct_role_payload,
+          stream: selected_streams.fetch(0), streams: selected_streams,
+          observed_model: provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8",
+          observed_effort: provider == "codex" ? "xhigh" : "high",
+          session_ids: session_ids, payloads: payloads, run_delay: run_delay
+        )
+        klass = provider == "codex" ?
+          AdversarialReview::Adapters::Codex : AdversarialReview::Adapters::Claude
+        adapter = klass.new(
+          executable: fake, repository: repository,
+          model: provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8",
+          effort: provider == "codex" ? "xhigh" : "high",
+          role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET: inspect docs/spec.md", tier: "high",
+          timeout_seconds: 2
+        )
+        yield adapter, log, fake
+      end
+    end
+  end
+
+  def wait_for_run_record(log)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 2
+    until File.exist?(log) && fake_cli_records(log).any? { |entry| entry.fetch("kind") == "run" }
+      raise "timed out waiting for fake run" if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      Thread.pass
+    end
+  end
+
+  def observed_dispatch
+    {
+      "status" => "behavioral",
+      "evidence" => "caller observed concurrent isolated role scheduling",
+      "source" => "test coordinator observation"
+    }
   end
 
   def adapter_fixture(provider, name)
@@ -1044,7 +1319,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                                 observed_model:, observed_effort:, streams: nil,
                                 observed_models: nil, observed_efforts: nil,
                                 session_ids: nil, payloads: nil, cli_version: nil,
-                                version_text: nil)
+                                version_text: nil, run_delay: 0)
     default_help = if provider == "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
     else
@@ -1094,10 +1369,16 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         out: File::NULL, err: File::NULL
       )
       schema_payload = nil
+      output_preexisting = nil
+      output_mode = nil
       if git_repository && provider == "codex" && (schema_index = ARGV.index("--output-schema"))
         schema_payload = JSON.parse(File.read(ARGV.fetch(schema_index + 1)))
         output_index = ARGV.index("--output-last-message")
-        File.open(ARGV.fetch(output_index + 1), "w", 0o600) { |file| file.write(payload) }
+        output_path = ARGV.fetch(output_index + 1)
+        output_preexisting = File.file?(output_path)
+        output_mode = File.stat(output_path).mode & 0o777 if output_preexisting
+        exit 79 unless output_preexisting && output_mode == 0o600
+        File.open(output_path, File::WRONLY | File::TRUNC) { |file| file.write(payload) }
       end
       relative_review_contents = begin
         File.read(File.join("docs", "spec.md"))
@@ -1108,7 +1389,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
         "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload,
         "relative_review_visible" => !relative_review_contents.nil?,
-        "git_repository" => git_repository
+        "git_repository" => git_repository,
+        "output_preexisting" => output_preexisting, "output_mode" => output_mode
       }
       File.open(log, "a", 0o600) { |file| file.puts(JSON.generate(record)) }
       if !git_repository
@@ -1118,6 +1400,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       elsif version_call
         puts version_text
       else
+        sleep #{run_delay.inspect}
         rendered = template.gsub("$CWD", Dir.pwd)
                            .gsub("$OBSERVED_MODEL", observed_model)
                            .gsub("$OBSERVED_EFFORT", observed_effort)

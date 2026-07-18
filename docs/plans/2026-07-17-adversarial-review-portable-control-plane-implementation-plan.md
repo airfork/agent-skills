@@ -819,6 +819,7 @@ fallback when any required capability is absent. Fakes must distinguish
 `--help`/version probes from execution and create the requested output file as
 the real CLI would. Fixtures are sanitized, labelled with CLI version and
 capture command, and include both accepted and missing-attestation streams.
+Direct execution requires a caller-supplied `dispatch_capability` observation; adapters never infer or fabricate parallel dispatch.
 Test `--tier ultra` with Claude explicitly: it may run only when the selected
 model/effort and independent-vote requirements are attested; otherwise it
 returns generic/degraded rather than silently running a lower tier.
@@ -863,6 +864,8 @@ role schema, and extract `turn.completed.usage`. Eligibility requires a
 machine-readable runtime/startup event attesting read-only sandbox, canonical
 workdir, exact model/effort, and fresh session; help text alone never marks
 these enforced.
+
+Codex final-message output must update the precreated `0600` file in place. Atomic replacement, symlinks, identity changes, and oversized output are rejected fail closed.
 
 - [ ] **Step 4: Run the Codex-focused tests and verify GREEN**
 

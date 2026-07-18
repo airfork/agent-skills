@@ -55,12 +55,8 @@ module AdversarialReview
         return nil unless result.is_a?(Runner::Result) && result.exit_status == 0 && !result.timed_out
 
         events = parse_json_line_objects(result.stdout, "Claude")
-        runtime = events.reverse.find do |event|
-          event["type"] == "system" && event["subtype"] == "init"
-        end
-        final = events.reverse.find do |event|
-          event["type"] == "result" && event["subtype"] == "success"
-        end
+        runtime, final = parse_protocol(events)
+        verify_event_bindings!(runtime, events.drop(1))
         payload = final.is_a?(Hash) ? final["structured_output"] : nil
         usage = final.is_a?(Hash) ? final["usage"] : nil
         terminal = runtime_terminal(runtime)
@@ -74,6 +70,46 @@ module AdversarialReview
         }
       rescue JSON::ParserError
         nil
+      end
+
+      def parse_protocol(events)
+        state = :startup
+        runtime = final = nil
+        events.each do |event|
+          case state
+          when :startup
+            unless event["type"] == "system" && event["subtype"] == "init"
+              raise JSON::ParserError, "Claude event arrived before system/init"
+            end
+            runtime = event
+            state = :running
+          when :running
+            if event["type"] == "system" && event["subtype"] == "init"
+              raise JSON::ParserError, "duplicate Claude system/init"
+            elsif event["type"] == "result"
+              unless event["subtype"] == "success"
+                raise JSON::ParserError, "Claude terminal result was not successful"
+              end
+              final = event
+              state = :terminal
+            end
+          when :terminal
+            raise JSON::ParserError, "Claude event arrived after result"
+          end
+        end
+        raise JSON::ParserError, "Claude result is missing" unless final
+        [runtime, final]
+      end
+
+      def verify_event_bindings!(runtime, events)
+        events.each do |event|
+          %w[session_id run_id thread_id].each do |field|
+            next unless event.key?(field)
+            unless nonempty_text?(event[field]) && runtime[field] == event[field]
+              raise JSON::ParserError, "Claude event #{field} does not match startup"
+            end
+          end
+        end
       end
 
       def runtime_terminal(runtime)

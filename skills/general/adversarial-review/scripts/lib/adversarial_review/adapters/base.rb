@@ -1,4 +1,5 @@
 require "json"
+require "thread"
 
 module AdversarialReview
   module Adapters
@@ -28,6 +29,10 @@ module AdversarialReview
         "properties" => {"ok" => {"const" => true}}
       }.freeze
       PREFLIGHT_PAYLOAD = {"ok" => true}.freeze
+      USAGE_FIELDS = %w[
+        input_tokens cached_input_tokens cache_read_input_tokens
+        cache_creation_input_tokens output_tokens reasoning_tokens total_tokens
+      ].freeze
 
       class << self
         def direct_contracts
@@ -134,19 +139,26 @@ module AdversarialReview
         @configured_config_root = config_root
         @runtime_provenance_records = nil
         @capability_probe = nil
+        @execution_mutex ||= Mutex.new
         self
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
              Errno::ELOOP
         raise ArgumentError, "direct adapter repository is unavailable"
       end
 
-      def execute(required_checks: [])
+      def execute(required_checks: [], dispatch_capability: nil)
+        (@execution_mutex ||= Mutex.new).synchronize do
+          execute_serial(
+            required_checks: required_checks,
+            dispatch_capability: dispatch_capability
+          )
+        end
+      end
+
+      def execute_serial(required_checks:, dispatch_capability:)
+        reset_execution_state!
         ensure_direct_configuration!
-        @runtime_provenance_records = nil
-        @direct_session_ids = nil
-        @last_normalized_capabilities = nil
-        @last_active_phase = nil
-        @last_active_attempt = nil
+        @dispatch_capability = normalize_dispatch_capability(dispatch_capability)
         support = self.class.runtime_decision(
           adapter: adapter_name, tier: tier,
           requested_model: @requested_model, requested_effort: @requested_effort,
@@ -189,9 +201,9 @@ module AdversarialReview
           probe_results << preflight_result if preflight_result
           record_runtime_observation(preflight_envelope)
           capture_envelope_capabilities(preflight_envelope)
+          @preflight_usage = trusted_envelope_usage(preflight_result, preflight_envelope)
           preflight_error = attestation_error(preflight_result, preflight_envelope)
           return direct_failure(preflight_error, probe_results) if preflight_error
-          preflight_usage = valid_usage(preflight_envelope["usage"])
 
           @preflight_mode = false
           @active_phase = "execution"
@@ -201,7 +213,7 @@ module AdversarialReview
             required_checks: required_checks
           )
           result.runner_results.unshift(*probe_results)
-          merge_usage!(result.usage, preflight_usage)
+          merge_usage!(result.usage, @preflight_usage)
           result
         ensure
           @schema_path = nil
@@ -221,6 +233,7 @@ module AdversarialReview
       rescue StandardError
         direct_failure("adapter_error")
       end
+      private :execute_serial
 
       def runtime_provenance
         provenance_snapshot
@@ -368,6 +381,31 @@ module AdversarialReview
 
       private
 
+      def reset_execution_state!
+        @runtime_provenance_records = nil
+        @direct_session_ids = nil
+        @last_normalized_capabilities = nil
+        @last_active_phase = nil
+        @last_active_attempt = nil
+        @active_phase = nil
+        @active_attempt = nil
+        @pinned_executable = nil
+        @preflight_mode = false
+        @schema_path = nil
+        @preflight_schema_path = nil
+        @preflight_repository = nil
+        @isolated_home = nil
+        @isolated_config_root = nil
+        @direct_root = nil
+        @cli_version = nil
+        @capability_probe = nil
+        @invocation_sequence = 0
+        @execution_requested_model = nil
+        @execution_requested_effort = nil
+        @dispatch_capability = nil
+        @preflight_usage = {}
+      end
+
       def ensure_direct_configuration!
         required = [@executable_candidate, @repository, @requested_model,
                     @requested_effort, @role_schema, @schema_name, @prompt]
@@ -485,11 +523,12 @@ module AdversarialReview
         "capability_attestation_invalid"
       end
 
-      def direct_failure(code, runner_results = [])
+      def direct_failure(code, runner_results = [], usage = nil)
         record_failure(code)
         normalized = result_capabilities(nil, code)
         ExecutionResult.new(
-          status: "generic", payload: nil, usage: {}, capabilities: normalized,
+          status: "generic", payload: nil, usage: (usage || @preflight_usage || {}).dup,
+          capabilities: normalized,
           attempts: 0, runner_results: runner_results,
           error_code: code, ordinary_result: false,
           runtime_provenance: provenance_snapshot
@@ -555,16 +594,14 @@ module AdversarialReview
       end
 
       def valid_usage(value)
-        return {} unless value.is_a?(Hash)
-        value.each_with_object({}) do |(key, amount), usage|
-          usage[key] = amount if key.is_a?(String) && amount.is_a?(Integer) && amount >= 0
-        end
+        return {} unless value.is_a?(Hash) &&
+                         value.keys.all? { |key| USAGE_FIELDS.include?(key) } &&
+                         value.values.all? { |amount| amount.is_a?(Integer) && amount >= 0 }
+        value.dup
       end
 
       def valid_usage?(usage)
-        usage.is_a?(Hash) && !usage.empty? && usage.all? do |key, amount|
-          key.is_a?(String) && amount.is_a?(Integer) && amount >= 0
-        end
+        usage.is_a?(Hash) && !usage.empty? && valid_usage(usage) == usage
       end
 
       def parse_json_line_objects(text, label)
@@ -603,9 +640,7 @@ module AdversarialReview
             condition.fetch(1), source
           ]
         end
-        observations["parallel_dispatch"] = [
-          "behavioral", "parent schedules isolated role processes", "adapter contract"
-        ]
+        observations["parallel_dispatch"] = @dispatch_capability
         capabilities(
           requested_model: @requested_model,
           requested_effort: @requested_effort,
@@ -636,6 +671,40 @@ module AdversarialReview
         @last_normalized_capabilities = unavailable_capabilities(
           "capability envelope was invalid"
         )
+      end
+
+      def normalize_dispatch_capability(observation)
+        if observation.nil?
+          return [
+            "unavailable", "caller did not report observed parallel dispatch",
+            "caller capability observation"
+          ]
+        end
+        unless observation.is_a?(Hash)
+          raise Capabilities::Error, "parallel dispatch capability must be an observation object"
+        end
+        record = if observation.keys.sort == Capabilities::FIELDS.sort
+                   Capabilities.normalize(
+                     observation,
+                     requested_model: @requested_model,
+                     requested_effort: @requested_effort
+                   )
+                 else
+                   Capabilities.normalize(
+                     {"parallel_dispatch" => observation},
+                     requested_model: @requested_model,
+                     requested_effort: @requested_effort
+                   )
+                 end
+        declaration = record.fetch("parallel_dispatch")
+        [declaration.fetch("status"), declaration.fetch("evidence"), declaration.fetch("source")]
+      end
+
+      def trusted_envelope_usage(runner_result, envelope)
+        return {} unless successful_process?(runner_result) &&
+                         !runner_result.stdout_truncated && !runner_result.stderr_truncated &&
+                         envelope.is_a?(Hash)
+        valid_usage(envelope["usage"])
       end
 
       def result_capabilities(candidate, code)
@@ -747,9 +816,8 @@ module AdversarialReview
       end
 
       def merge_usage!(aggregate, current)
-        return unless current.is_a?(Hash)
-        current.each do |key, value|
-          aggregate[key] += value if key.is_a?(String) && value.is_a?(Integer) && value >= 0
+        valid_usage(current).each do |key, value|
+          aggregate[key] += value
         end
       end
 
