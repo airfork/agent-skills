@@ -8,7 +8,8 @@ commands; agents should follow `AGENTS.md` about using `rtk` for shell execution
 |---------|---------|----------------|
 | `scripts/test` | Run every Ruby contract test in `test/` sequentially. | Read-only, except test-created temporary directories outside the repo. |
 | `scripts/test --list` | List the tests selected by the test wrapper. | Read-only. |
-| `scripts/verify` | Check Ruby/YAML/TOML/shell syntax, diff whitespace, then run `scripts/test`. | Read-only. |
+| `scripts/verify` | Check Ruby/YAML/TOML/shell syntax, the adversarial-review package, diff whitespace, then run `scripts/test`. | Read-only. |
+| `scripts/verify-adversarial-review --root PATH` | Check Ruby syntax and JSON parsing for the portable adversarial-review package beneath the canonical repository root. | Read-only. |
 | `scripts/clean --dry-run` | Preview removal of local caches, logs, screenshots, coverage, and planning scratch. | Read-only preview. |
 | `scripts/clean` | Remove only the named local generated paths. | Removes only untracked generated paths listed by the script. |
 | `scripts/archive-clean --dry-run` | Preview removal of build, distribution, release, and artifact output. | Read-only preview. |

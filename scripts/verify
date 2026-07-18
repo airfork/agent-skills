@@ -10,13 +10,16 @@ ruby -c scripts/sync-skills
 ruby -c scripts/run-codex-5.6-skill-review
 
 echo "==> Shell syntax"
-bash -n scripts/test scripts/verify scripts/clean scripts/archive-clean
+bash -n scripts/test scripts/verify scripts/verify-adversarial-review scripts/clean scripts/archive-clean
 
 echo "==> YAML syntax"
 ruby -ryaml -e 'ARGV.each { |path| YAML.load_file(path); puts "YAML: OK #{path}" }' skills.yaml orca.yaml
 
 echo "==> TOML syntax"
 python3 -c 'import sys, tomllib; [tomllib.load(open(path, "rb")) for path in sys.argv[1:]]; print("TOML: OK .conductor/settings.toml")' .conductor/settings.toml
+
+echo "==> Adversarial-review package"
+scripts/verify-adversarial-review --root "$ROOT"
 
 echo "==> Diff whitespace"
 git diff --check

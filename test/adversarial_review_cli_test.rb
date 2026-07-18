@@ -12,6 +12,8 @@ class AdversarialReviewCliTest < Minitest::Test
   include AdversarialReviewHelper
 
   CLI = File.join(SKILL, "scripts", "adversarial-review")
+  REPOSITORY_ROOT = File.expand_path("..", __dir__)
+  PACKAGE_VERIFIER = File.join(REPOSITORY_ROOT, "scripts", "verify-adversarial-review")
 
   def test_public_cli_help_and_unknown_subcommand_have_stable_output
     stdout, stderr, status = Open3.capture3(CLI, "--help")
@@ -28,6 +30,171 @@ class AdversarialReviewCliTest < Minitest::Test
     error = JSON.parse(stderr)
     assert_equal "invocation_error", error.fetch("code")
     refute_includes stderr, "backtrace"
+  end
+
+  def test_verification_accepts_a_valid_copied_package
+    with_copied_adversarial_review_package do |package_root|
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      assert status.success?, stdout + stderr
+      assert_empty stderr
+      assert_includes stdout, "adversarial-review"
+      assert_includes stdout, "attack.json"
+    end
+  end
+
+  def test_verification_rejects_malformed_ruby_and_names_the_file
+    with_copied_adversarial_review_package do |package_root|
+      bad_ruby = File.join(
+        package_root, "skills", "general", "adversarial-review", "scripts", "bad.rb"
+      )
+      File.write(bad_ruby, "def broken(\n")
+
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      refute status.success?
+      assert_includes stdout + stderr, "bad.rb"
+    end
+  end
+
+  def test_verification_rejects_malformed_json_and_names_the_schema
+    with_copied_adversarial_review_package do |package_root|
+      bad_schema = File.join(
+        package_root, "skills", "general", "adversarial-review",
+        "assets", "schemas", "attack.json"
+      )
+      File.write(bad_schema, "{\"type\":")
+
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      refute status.success?
+      assert_includes stdout + stderr, "attack.json"
+    end
+  end
+
+  def test_verification_rejects_a_package_subtree_that_escapes_the_root
+    with_copied_adversarial_review_package do |package_root|
+      Dir.mktmpdir("adversarial-review-escaped-scripts") do |outside|
+        scripts = File.join(
+          package_root, "skills", "general", "adversarial-review", "scripts"
+        )
+        FileUtils.rm_r(scripts)
+        File.symlink(outside, scripts)
+
+        stdout, stderr, status = Open3.capture3(
+          PACKAGE_VERIFIER, "--root", package_root
+        )
+
+        refute status.success?
+        assert_includes stdout + stderr, "escapes root"
+      end
+    end
+  end
+
+  def test_verification_rejects_a_nested_package_symlink
+    with_copied_adversarial_review_package do |package_root|
+      Dir.mktmpdir("adversarial-review-escaped-library") do |outside|
+        library = File.join(
+          package_root, "skills", "general", "adversarial-review", "scripts", "lib"
+        )
+        FileUtils.rm_r(library)
+        File.symlink(outside, library)
+
+        stdout, stderr, status = Open3.capture3(
+          PACKAGE_VERIFIER, "--root", package_root
+        )
+
+        refute status.success?
+        assert_includes stdout + stderr, "symlink"
+      end
+    end
+  end
+
+  def test_verification_rejects_a_missing_public_entrypoint
+    with_copied_adversarial_review_package do |package_root|
+      entrypoint = File.join(
+        package_root, "skills", "general", "adversarial-review",
+        "scripts", "adversarial-review"
+      )
+      FileUtils.rm(entrypoint)
+
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      refute status.success?
+      assert_includes stdout + stderr, "scripts/adversarial-review"
+    end
+  end
+
+  def test_verification_rejects_a_missing_library_entrypoint
+    with_copied_adversarial_review_package do |package_root|
+      entrypoint = File.join(
+        package_root, "skills", "general", "adversarial-review",
+        "scripts", "lib", "adversarial_review.rb"
+      )
+      FileUtils.rm(entrypoint)
+
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      refute status.success?
+      assert_includes stdout + stderr, "scripts/lib/adversarial_review.rb"
+    end
+  end
+
+  def test_verification_rejects_an_incomplete_required_schema_set
+    with_copied_adversarial_review_package do |package_root|
+      schema = File.join(
+        package_root, "skills", "general", "adversarial-review",
+        "assets", "schemas", "judge.json"
+      )
+      FileUtils.rm(schema)
+
+      stdout, stderr, status = Open3.capture3(
+        PACKAGE_VERIFIER, "--root", package_root
+      )
+
+      refute status.success?
+      assert_includes stdout + stderr, "assets/schemas/judge.json"
+    end
+  end
+
+  def test_verification_repository_gate_invokes_the_package_verifier
+    Dir.mktmpdir("adversarial-review-repository-verifier") do |root|
+      scripts = File.join(root, "scripts")
+      fake_bin = File.join(root, "bin")
+      FileUtils.mkdir_p([scripts, fake_bin])
+      FileUtils.cp(File.join(REPOSITORY_ROOT, "scripts", "verify"), scripts)
+
+      marker = File.join(root, "package-verifier-called")
+      write_shell_executable(
+        File.join(scripts, "verify-adversarial-review"),
+        "printf 'called\\n' > \"$VERIFY_HELPER_LOG\"\n"
+      )
+      write_shell_executable(File.join(scripts, "test"), "exit 0\n")
+      %w[ruby bash python3 git].each do |command|
+        write_shell_executable(File.join(fake_bin, command), "exit 0\n")
+      end
+
+      stdout, stderr, status = Open3.capture3(
+        {
+          "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
+          "VERIFY_HELPER_LOG" => marker
+        },
+        "/bin/bash", File.join(scripts, "verify")
+      )
+
+      assert status.success?, stdout + stderr
+      assert File.file?(marker), "repository verifier did not invoke package verifier"
+    end
   end
 
   def test_public_cli_generic_start_status_and_duplicate_run_refusal
@@ -2582,6 +2749,20 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   private
+
+  def with_copied_adversarial_review_package
+    Dir.mktmpdir("adversarial-review-package") do |package_root|
+      category = File.join(package_root, "skills", "general")
+      FileUtils.mkdir_p(category)
+      FileUtils.cp_r(SKILL, category)
+      yield package_root
+    end
+  end
+
+  def write_shell_executable(path, body)
+    File.write(path, "#!/bin/sh\nset -eu\n#{body}")
+    File.chmod(0o700, path)
+  end
 
   def run_public_cli(*arguments, env: {})
     Open3.capture3(env, CLI, *arguments)
