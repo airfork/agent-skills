@@ -1,0 +1,5 @@
+{
+  "cli": "Claude Code 2.1.212",
+  "capture_command": "claude -p --bare --no-session-persistence --permission-mode plan --tools Read,Grep,Glob --output-format stream-json --json-schema SCHEMA PROMPT",
+  "sanitized": true
+}

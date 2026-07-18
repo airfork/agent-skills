@@ -1,0 +1,5 @@
+{
+  "cli": "codex-cli 0.144.5",
+  "capture_command": "codex exec --ephemeral --sandbox read-only --json --output-schema SCHEMA --output-last-message OUTPUT -",
+  "sanitized": true
+}

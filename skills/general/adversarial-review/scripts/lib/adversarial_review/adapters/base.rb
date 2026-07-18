@@ -1,3 +1,5 @@
+require "json"
+
 module AdversarialReview
   module Adapters
     class Base
@@ -19,6 +21,13 @@ module AdversarialReview
         "gemini" => %w[default high]
       }.freeze
       TIERS = %w[default high ultra].freeze
+      PREFLIGHT_SCHEMA = {
+        "type" => "object",
+        "additionalProperties" => false,
+        "required" => ["ok"],
+        "properties" => {"ok" => {"const" => true}}
+      }.freeze
+      PREFLIGHT_PAYLOAD = {"ok" => true}.freeze
 
       class << self
         def direct_contracts
@@ -91,6 +100,122 @@ module AdversarialReview
 
       def credential_variables
         []
+      end
+
+      def configure_direct(executable:, repository:, model:, effort:, role_schema:,
+                           schema_name:, prompt:, tier: "default", timeout_seconds: 120,
+                           source_env: ENV, run_directory: nil, config_root: nil)
+        unless executable.is_a?(String) && !executable.empty? &&
+               model.is_a?(String) && !model.empty? &&
+               effort.is_a?(String) && !effort.empty? &&
+               role_schema.is_a?(Hash) && !role_schema.empty? &&
+               schema_name.is_a?(String) && !schema_name.empty? &&
+               prompt.is_a?(String) && !prompt.empty? &&
+               TIERS.include?(tier) && timeout_seconds.is_a?(Numeric) &&
+               timeout_seconds.positive?
+          raise ArgumentError, "direct adapter configuration is invalid"
+        end
+        canonical_repository = File.realpath(repository)
+        unless File.directory?(canonical_repository)
+          raise ArgumentError, "direct adapter repository must be a directory"
+        end
+
+        @executable_candidate = executable
+        @repository = canonical_repository
+        @requested_model = model
+        @requested_effort = effort
+        @role_schema = JSON.parse(JSON.generate(role_schema))
+        @schema_name = schema_name
+        @prompt = prompt
+        @tier = tier
+        @timeout_seconds = timeout_seconds
+        @source_env = source_env
+        @run_directory = run_directory
+        @configured_config_root = config_root
+        @runtime_provenance = nil
+        @capability_probe = nil
+        self
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+             Errno::ELOOP
+        raise ArgumentError, "direct adapter repository is unavailable"
+      end
+
+      def execute(required_checks: [])
+        ensure_direct_configuration!
+        support = self.class.runtime_decision(
+          adapter: adapter_name, tier: tier,
+          requested_model: @requested_model, requested_effort: @requested_effort,
+          observed_model: @requested_model, observed_effort: @requested_effort
+        )
+        return direct_failure("unsupported_tier") unless support.execution_allowed
+
+        @pinned_executable = Runner.resolve_executable(
+          @executable_candidate, repository: @repository,
+          run_directory: @run_directory, config_root: @configured_config_root
+        )
+        probe_results = []
+        help_result = run_probe(help_argv)
+        probe_results << help_result
+        unless successful_process?(help_result) && help_capabilities_present?(help_result.stdout)
+          return direct_failure("capability_probe_failed", probe_results)
+        end
+        version_result = run_probe([@pinned_executable.path, "--version"])
+        probe_results << version_result
+        unless successful_process?(version_result) && nonempty_text?(version_result.stdout)
+          return direct_failure("version_probe_failed", probe_results)
+        end
+        @cli_version = version_result.stdout.strip
+        @capability_probe = {
+          "help_argv" => help_argv.dup,
+          "version_argv" => [@pinned_executable.path, "--version"],
+          "cli_version" => @cli_version,
+          "executable" => @pinned_executable.path
+        }
+
+        Runner.with_isolated_directory(prefix: "adversarial-review-direct") do |root|
+          prepare_isolated_runtime(root)
+          @preflight_mode = true
+          preflight_result, preflight_envelope = invoke_prompt(preflight_prompt)
+          probe_results << preflight_result if preflight_result
+          preflight_error = attestation_error(preflight_result, preflight_envelope)
+          return direct_failure(preflight_error, probe_results) if preflight_error
+          if tier == "ultra" && preflight_envelope.dig("terminal", "independent_vote") != true
+            return direct_failure("independent_vote_unattested", probe_results)
+          end
+          @preflight_session_id = preflight_envelope.dig("terminal", "session_id")
+          preflight_usage = valid_usage(preflight_envelope["usage"])
+
+          @preflight_mode = false
+          result = execute_with_one_repair(
+            requested_model: @requested_model,
+            requested_effort: @requested_effort,
+            required_checks: required_checks
+          )
+          result.runner_results.unshift(*probe_results)
+          merge_usage!(result.usage, preflight_usage)
+          result
+        ensure
+          @schema_path = nil
+          @preflight_schema_path = nil
+          @isolated_home = nil
+          @isolated_config_root = nil
+          @direct_root = nil
+          @preflight_mode = false
+        end
+      rescue Runner::Error
+        direct_failure("runner_error")
+      rescue Capabilities::Error
+        direct_failure("capability_attestation_invalid")
+      rescue StandardError
+        direct_failure("adapter_error")
+      end
+
+      def runtime_provenance
+        @runtime_provenance && JSON.parse(JSON.generate(@runtime_provenance))
+      end
+
+      def capability_probe
+        @capability_probe && JSON.parse(JSON.generate(@capability_probe))
       end
 
       def child_environment(source_env: ENV, isolated_home: nil, isolated_config_root: nil)
@@ -172,8 +297,7 @@ module AdversarialReview
           payload = envelope["payload"]
           checks_present = required_checks.is_a?(Array) &&
                            required_checks.all? do |check|
-                             payload.is_a?(Hash) && payload["checks"].is_a?(Array) &&
-                               payload.fetch("checks").include?(check)
+                             payload_checks(payload).include?(check)
                            end
           if valid_payload?(payload) && checks_present
             return ExecutionResult.new(
@@ -204,10 +328,185 @@ module AdversarialReview
       end
 
       def tier
-        "default"
+        @tier || "default"
+      end
+
+      def help_argv
+        raise NotImplementedError, "direct adapters must define a capability help probe"
+      end
+
+      def required_help_tokens
+        raise NotImplementedError, "direct adapters must define required capability flags"
+      end
+
+      def invoke_prompt(_prompt)
+        raise NotImplementedError, "direct adapters must invoke one isolated role process"
       end
 
       private
+
+      def ensure_direct_configuration!
+        required = [@executable_candidate, @repository, @requested_model,
+                    @requested_effort, @role_schema, @schema_name, @prompt]
+        raise ArgumentError, "direct adapter is not configured" if required.any?(&:nil?)
+      end
+
+      def prepare_isolated_runtime(root)
+        @direct_root = File.realpath(root)
+        @isolated_home = File.join(@direct_root, "home")
+        @isolated_config_root = File.join(@direct_root, "config")
+        Dir.mkdir(@isolated_home, 0o700)
+        Dir.mkdir(@isolated_config_root, 0o700)
+        @schema_path = File.join(@direct_root, "role-schema.json")
+        Runner.write_private_file(@schema_path, JSON.generate(@role_schema))
+        @preflight_schema_path = File.join(@direct_root, "preflight-schema.json")
+        Runner.write_private_file(@preflight_schema_path, JSON.generate(PREFLIGHT_SCHEMA))
+      end
+
+      def run_probe(argv)
+        Runner.run(
+          argv: argv, stdin_data: "", timeout_seconds: @timeout_seconds,
+          env: child_environment(source_env: @source_env), chdir: @repository,
+          repository: @repository, run_directory: @run_directory,
+          config_root: @configured_config_root, executable: @pinned_executable
+        )
+      end
+
+      def run_direct(argv:, stdin_data:)
+        Runner.run(
+          argv: argv, stdin_data: stdin_data, timeout_seconds: @timeout_seconds,
+          env: child_environment(
+            source_env: @source_env, isolated_home: @isolated_home,
+            isolated_config_root: @isolated_config_root
+          ),
+          chdir: @repository, repository: @repository,
+          run_directory: @run_directory, config_root: @isolated_config_root,
+          executable: @pinned_executable
+        )
+      end
+
+      def help_capabilities_present?(stdout)
+        nonempty_text?(stdout) && required_help_tokens.all? do |token|
+          stdout.match?(/(?:\A|[\s,])#{Regexp.escape(token)}(?=\z|[\s,=])/)
+        end
+      end
+
+      def attestation_error(runner_result, envelope)
+        return "process_failed" unless successful_process?(runner_result)
+        return "process_output_truncated" if runner_result.stdout_truncated || runner_result.stderr_truncated
+        return "runtime_attestation_missing" unless envelope.is_a?(Hash)
+        terminal = envelope["terminal"]
+        return "runtime_attestation_missing" unless terminal.is_a?(Hash) && terminal["terminal"] == true
+        decision = self.class.runtime_decision(
+          adapter: adapter_name, tier: tier,
+          requested_model: @requested_model, requested_effort: @requested_effort,
+          observed_model: terminal["model"], observed_effort: terminal["effort"]
+        )
+        return "runtime_selection_mismatch" unless decision.execution_allowed
+        normalized = Capabilities.normalize(
+          envelope["capabilities"] || {},
+          requested_model: @requested_model,
+          requested_effort: @requested_effort
+        )
+        gate = Capabilities.gate(normalized, "PASS")
+        return "capabilities_degraded" unless gate.fetch("capability_status") == "CAPABILITIES SATISFIED"
+        nil
+      rescue Capabilities::Error
+        "capability_attestation_invalid"
+      end
+
+      def direct_failure(code, runner_results = [])
+        ExecutionResult.new(
+          status: "generic", payload: nil, usage: {}, capabilities: nil,
+          attempts: 0, runner_results: runner_results,
+          error_code: code, ordinary_result: false
+        )
+      end
+
+      def payload_checks(payload)
+        return [] unless payload.is_a?(Hash)
+        checks = payload["checks_completed"] || payload["checks"]
+        checks.is_a?(Array) ? checks : []
+      end
+
+      def valid_usage(value)
+        return {} unless value.is_a?(Hash)
+        value.each_with_object({}) do |(key, amount), usage|
+          usage[key] = amount if key.is_a?(String) && amount.is_a?(Integer) && amount >= 0
+        end
+      end
+
+      def valid_usage?(usage)
+        usage.is_a?(Hash) && !usage.empty? && usage.all? do |key, amount|
+          key.is_a?(String) && amount.is_a?(Integer) && amount >= 0
+        end
+      end
+
+      def parse_json_line_objects(text, label)
+        unless text.is_a?(String) && !text.empty?
+          raise JSON::ParserError, "empty #{label} event stream"
+        end
+        text.lines.reject { |line| line.strip.empty? }.map do |line|
+          event = JSON.parse(line)
+          unless event.is_a?(Hash)
+            raise JSON::ParserError, "#{label} event is not an object"
+          end
+          event
+        end
+      end
+
+      def direct_capabilities(source:, fresh_context:, repository_access:, read_only:,
+                              model_selection:, effort_selection:, structured_output:,
+                              usage_metrics:)
+        conditions = {
+          "fresh_context" => fresh_context,
+          "repository_access" => repository_access,
+          "read_only" => read_only,
+          "model_selection" => model_selection,
+          "effort_selection" => effort_selection,
+          "structured_output" => structured_output,
+          "usage_metrics" => usage_metrics
+        }
+        observations = conditions.each_with_object({}) do |(field, condition), record|
+          unless condition.is_a?(Array) && condition.length == 2 &&
+                 [true, false].include?(condition.fetch(0)) &&
+                 nonempty_text?(condition.fetch(1))
+            raise Capabilities::Error, "direct capability evidence is malformed"
+          end
+          record[field] = [
+            condition.fetch(0) ? "enforced" : "unavailable",
+            condition.fetch(1), source
+          ]
+        end
+        observations["parallel_dispatch"] = [
+          "behavioral", "parent schedules isolated role processes", "adapter contract"
+        ]
+        capabilities(
+          requested_model: @requested_model,
+          requested_effort: @requested_effort,
+          observations: observations
+        )
+      end
+
+      def preflight_prompt
+        "Return {\"ok\":true} only. Do not inspect repository content. This request only verifies the isolated runtime controls."
+      end
+
+      def active_schema
+        @preflight_mode ? PREFLIGHT_SCHEMA : @role_schema
+      end
+
+      def active_schema_path
+        @preflight_mode ? @preflight_schema_path : @schema_path
+      end
+
+      def direct_payload_valid?(payload)
+        @preflight_mode ? payload == PREFLIGHT_PAYLOAD : valid_payload?(payload)
+      end
+
+      def nonempty_text?(value)
+        value.is_a?(String) && !value.strip.empty?
+      end
 
       def environment_hash(source)
         pairs = if source.respond_to?(:each_pair)

@@ -513,7 +513,318 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     assert_equal false, bad_capabilities.ordinary_result
   end
 
+  def test_direct_adapter_fixtures_are_sanitized_and_labelled
+    %w[codex claude].each do |provider|
+      metadata = JSON.parse(File.read(adapter_fixture(provider, "metadata.json")))
+      assert_equal true, metadata.fetch("sanitized"), provider
+      assert_match(/\A(?:codex-cli|Claude Code) /, metadata.fetch("cli"), provider)
+      assert_includes metadata.fetch("capture_command"), provider, provider
+      %w[accepted.jsonl missing-attestation.jsonl].each do |fixture|
+        refute_empty File.read(adapter_fixture(provider, fixture)), "#{provider}/#{fixture}"
+      end
+    end
+  end
+
+  def test_codex_adapter_probes_then_runs_with_exact_argv_and_provenance
+    with_repository(files: {"docs/spec.md" => "# Reviewed secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-codex-bin") do |bin|
+        log = File.join(bin, "codex-calls.jsonl")
+        payload = direct_role_payload
+        fake = write_direct_adapter_fake(
+          bin, provider: "codex", log: log, payload: payload,
+          stream: File.read(adapter_fixture("codex", "accepted.jsonl"))
+        )
+        schema = attack_role_schema
+        prompt = "REVIEWED SECRET: inspect docs/spec.md"
+        adapter = AdversarialReview::Adapters::Codex.new(
+          executable: fake, repository: repository, model: "gpt-5.6-sol",
+          effort: "xhigh", role_schema: schema, schema_name: "attack",
+          prompt: prompt, tier: "high", timeout_seconds: 2,
+          source_env: {"LANG" => "C", "TOP_SECRET" => "must-not-leak"}
+        )
+
+        result = adapter.execute(required_checks: ["assumption-coverage"])
+
+        assert_equal "complete", result.status
+        assert_equal payload, result.payload
+        assert_equal 114, result.usage.fetch("total_tokens")
+        assert_equal "codex-cli 0.144.5", adapter.runtime_provenance.fetch("cli_version")
+        assert_equal "codex-session-2", adapter.runtime_provenance.fetch("session_id")
+        assert_equal File.realpath(fake), adapter.runtime_provenance.fetch("executable")
+        assert_equal File.realpath(repository), adapter.runtime_provenance.fetch("workdir")
+        assert_equal "gpt-5.6-sol", adapter.runtime_provenance.fetch("observed_model")
+        assert_equal "xhigh", adapter.runtime_provenance.fetch("observed_effort")
+
+        records = fake_cli_records(log)
+        assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+        preflight, execution = records.select { |record| record.fetch("kind") == "run" }
+        refute_includes preflight.fetch("stdin"), "REVIEWED SECRET"
+        assert_equal ["ok"], preflight.fetch("schema_payload").fetch("required")
+        refute_equal schema, preflight.fetch("schema_payload")
+        assert_equal prompt, execution.fetch("stdin")
+        assert_equal schema, execution.fetch("schema_payload")
+        refute execution.fetch("env").key?("TOP_SECRET")
+        refute execution.fetch("env").key?("PATH")
+        schema_path = execution.fetch("argv").fetch(15)
+        output_path = execution.fetch("argv").fetch(17)
+        assert_equal [
+          "exec", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+          "--strict-config", "--sandbox", "read-only", "--model", "gpt-5.6-sol",
+          "-c", 'model_reasoning_effort="xhigh"', "--cd", File.realpath(repository),
+          "--json", "--output-schema", schema_path, "--output-last-message", output_path, "-"
+        ], execution.fetch("argv")
+        assert_equal 1, execution.fetch("argv").count("--output-schema")
+      end
+    end
+  end
+
+  def test_codex_missing_runtime_attestation_falls_back_before_review_content
+    with_repository(files: {"docs/spec.md" => "# Secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-codex-bin") do |bin|
+        log = File.join(bin, "codex-calls.jsonl")
+        fake = write_direct_adapter_fake(
+          bin, provider: "codex", log: log, payload: direct_role_payload,
+          stream: File.read(adapter_fixture("codex", "missing-attestation.jsonl"))
+        )
+        adapter = AdversarialReview::Adapters::Codex.new(
+          executable: fake, repository: repository, model: "gpt-5.6-sol",
+          effort: "xhigh", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(required_checks: ["assumption-coverage"])
+
+        assert_equal "generic", result.status
+        assert_equal "runtime_attestation_missing", result.error_code
+        records = fake_cli_records(log)
+        assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
+        records.each do |record|
+          refute_includes record.fetch("stdin"), "REVIEWED SECRET"
+          refute_includes record.fetch("argv").join(" "), "REVIEWED SECRET"
+        end
+      end
+    end
+  end
+
+  def test_codex_missing_help_capability_falls_back_without_execution
+    with_repository(files: {"docs/spec.md" => "# Secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-codex-bin") do |bin|
+        log = File.join(bin, "codex-calls.jsonl")
+        fake = write_direct_adapter_fake(
+          bin, provider: "codex", log: log, payload: direct_role_payload,
+          stream: File.read(adapter_fixture("codex", "accepted.jsonl")),
+          help_text: "Usage: codex exec --ephemeral --json\n"
+        )
+        adapter = AdversarialReview::Adapters::Codex.new(
+          executable: fake, repository: repository, model: "gpt-5.6-sol",
+          effort: "xhigh", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute
+
+        assert_equal "generic", result.status
+        assert_equal "capability_probe_failed", result.error_code
+        assert_equal ["help"], fake_cli_records(log).map { |record| record.fetch("kind") }
+      end
+    end
+  end
+
+  def test_claude_ultra_adapter_uses_exact_argv_and_attested_independent_vote
+    with_repository(files: {"docs/spec.md" => "# Reviewed secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-claude-bin") do |bin|
+        log = File.join(bin, "claude-calls.jsonl")
+        payload = direct_role_payload
+        fake = write_direct_adapter_fake(
+          bin, provider: "claude", log: log, payload: payload,
+          stream: File.read(adapter_fixture("claude", "accepted.jsonl"))
+        )
+        schema = attack_role_schema
+        prompt = "REVIEWED SECRET: inspect docs/spec.md"
+        adapter = AdversarialReview::Adapters::Claude.new(
+          executable: fake, repository: repository, model: "claude-opus-4-8",
+          effort: "high", role_schema: schema, schema_name: "attack",
+          prompt: prompt, tier: "ultra", timeout_seconds: 2,
+          source_env: {"LC_ALL" => "C", "TOP_SECRET" => "must-not-leak"}
+        )
+
+        result = adapter.execute(required_checks: ["assumption-coverage"])
+
+        assert_equal "complete", result.status
+        assert_equal payload, result.payload
+        assert_equal 100, result.usage.fetch("total_tokens")
+        assert_equal "Claude Code 2.1.212", adapter.runtime_provenance.fetch("cli_version")
+        assert_equal true, adapter.runtime_provenance.fetch("independent_vote")
+        assert_equal "claude-session-2", adapter.runtime_provenance.fetch("session_id")
+
+        records = fake_cli_records(log)
+        assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+        preflight, execution = records.select { |record| record.fetch("kind") == "run" }
+        refute_includes preflight.fetch("argv").last, "REVIEWED SECRET"
+        preflight_schema = JSON.parse(preflight.fetch("argv").fetch(14))
+        assert_equal ["ok"], preflight_schema.fetch("required")
+        refute_equal schema, preflight_schema
+        assert_equal prompt, execution.fetch("argv").last
+        schema_json = JSON.generate(schema)
+        assert_equal [
+          "-p", "--bare", "--no-session-persistence", "--permission-mode", "plan",
+          "--tools", "Read,Grep,Glob", "--model", "claude-opus-4-8", "--effort", "high",
+          "--output-format", "stream-json", "--json-schema", schema_json, prompt
+        ], execution.fetch("argv")
+        assert_equal 1, execution.fetch("argv").count("--json-schema")
+        assert_equal schema_json, execution.fetch("argv").fetch(14)
+        assert_equal "", execution.fetch("stdin")
+        refute execution.fetch("env").key?("TOP_SECRET")
+      end
+    end
+  end
+
+  def test_claude_ultra_without_independent_vote_attestation_falls_back_before_content
+    with_repository(files: {"docs/spec.md" => "# Secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-claude-bin") do |bin|
+        log = File.join(bin, "claude-calls.jsonl")
+        stream = File.read(adapter_fixture("claude", "accepted.jsonl")).sub(
+          '"independent_vote":true', '"independent_vote":false'
+        )
+        fake = write_direct_adapter_fake(
+          bin, provider: "claude", log: log, payload: direct_role_payload,
+          stream: stream
+        )
+        adapter = AdversarialReview::Adapters::Claude.new(
+          executable: fake, repository: repository, model: "claude-opus-4-8",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "ultra", timeout_seconds: 2
+        )
+
+        result = adapter.execute
+
+        assert_equal "generic", result.status
+        assert_equal "independent_vote_unattested", result.error_code
+        records = fake_cli_records(log)
+        assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
+        records.each do |record|
+          refute_includes record.fetch("argv").join(" "), "REVIEWED SECRET"
+        end
+      end
+    end
+  end
+
+  def test_claude_missing_runtime_attestation_falls_back_before_review_content
+    with_repository(files: {"docs/spec.md" => "# Secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-claude-bin") do |bin|
+        log = File.join(bin, "claude-calls.jsonl")
+        fake = write_direct_adapter_fake(
+          bin, provider: "claude", log: log, payload: direct_role_payload,
+          stream: File.read(adapter_fixture("claude", "missing-attestation.jsonl"))
+        )
+        adapter = AdversarialReview::Adapters::Claude.new(
+          executable: fake, repository: repository, model: "claude-sonnet-4-8",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute
+
+        assert_equal "generic", result.status
+        assert_equal "runtime_attestation_missing", result.error_code
+        records = fake_cli_records(log)
+        assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
+        records.each do |record|
+          refute_includes record.fetch("argv").join(" "), "REVIEWED SECRET"
+        end
+      end
+    end
+  end
+
   private
+
+  def adapter_fixture(provider, name)
+    File.join(__dir__, "fixtures", "adversarial-review", provider, name)
+  end
+
+  def attack_role_schema
+    JSON.parse(File.read(File.join(SKILL, "assets", "schemas", "attack.json")))
+  end
+
+  def direct_role_payload
+    {
+      "schema_version" => 1,
+      "run_id" => "20260717T120000Z-a1b2c3d4",
+      "task_id" => "attack-tester-r1-a1",
+      "angle" => "tester",
+      "artifact_digests" => {"docs/spec.md" => "a" * 64},
+      "checks_completed" => ["assumption-coverage"],
+      "findings" => [],
+      "metrics" => {},
+      "notes" => []
+    }
+  end
+
+  def write_direct_adapter_fake(directory, provider:, log:, payload:, stream:, help_text: nil)
+    default_help = if provider == "codex"
+      "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
+    else
+      "  -p, --print\n  --bare\n  --no-session-persistence\n  --permission-mode\n  --tools\n  --model\n  --effort\n  --output-format\n  --json-schema\n"
+    end
+    version = provider == "codex" ? "codex-cli 0.144.5" : "Claude Code 2.1.212"
+    name = provider == "codex" ? "codex" : "claude"
+    body = <<~RUBY
+      \#!#{RbConfig.ruby}
+      require "json"
+      provider = #{provider.inspect}
+      log = #{log.inspect}
+      role_payload = #{JSON.generate(payload).inspect}
+      template = #{stream.inspect}
+      help_text = #{(help_text || default_help).inspect}
+      version_text = #{version.inspect}
+      help_call = (provider == "codex" && ARGV == ["exec", "--help"]) ||
+                  (provider == "claude" && ARGV == ["--help"])
+      version_call = ARGV == ["--version"]
+      kind = help_call ? "help" : (version_call ? "version" : "run")
+      stdin_text = STDIN.read
+      model_index = ARGV.index("--model")
+      model = model_index ? ARGV.fetch(model_index + 1) : ""
+      effort = if provider == "codex"
+        config_index = ARGV.index("-c")
+        raw = config_index ? ARGV.fetch(config_index + 1).sub("model_reasoning_effort=", "") : '""'
+        JSON.parse(raw)
+      else
+        effort_index = ARGV.index("--effort")
+        effort_index ? ARGV.fetch(effort_index + 1) : ""
+      end
+      prior_runs = if File.exist?(log)
+        File.readlines(log).count { |line| JSON.parse(line)["kind"] == "run" }
+      else
+        0
+      end
+      payload = prior_runs.zero? ? JSON.generate({"ok" => true}) : role_payload
+      session_id = "#{provider}-session-\#{prior_runs + 1}"
+      schema_payload = nil
+      if provider == "codex" && (schema_index = ARGV.index("--output-schema"))
+        schema_payload = JSON.parse(File.read(ARGV.fetch(schema_index + 1)))
+        output_index = ARGV.index("--output-last-message")
+        File.open(ARGV.fetch(output_index + 1), "w", 0o600) { |file| file.write(payload) }
+      end
+      record = {
+        "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
+        "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload
+      }
+      File.open(log, "a", 0o600) { |file| file.puts(JSON.generate(record)) }
+      if help_call
+        puts help_text
+      elsif version_call
+        puts version_text
+      else
+        rendered = template.gsub("$REPOSITORY", Dir.pwd)
+                           .gsub("$MODEL", model)
+                           .gsub("$EFFORT", effort)
+                           .gsub("$SESSION_ID", session_id)
+                           .gsub("$ROLE_RESPONSE", payload)
+        STDOUT.write(rendered)
+      end
+    RUBY
+    write_fake_executable(directory, name: name, body: body)
+  end
 
   def valid_payload
     {"checks" => ["assumption-coverage"], "findings" => [{"title" => "gap"}]}
