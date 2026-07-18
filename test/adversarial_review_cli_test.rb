@@ -287,6 +287,73 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_resume_before_first_call_falls_back_same_auto_task_to_exact_generic_roster
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      state, run_dir, first_task = interrupted_selection_state(repository, :after_intent)
+      calls = []
+      failure = lambda do |_state, task, selected, _env|
+        calls << [task.fetch("task_id"), selected]
+        direct_execution_failure("runtime_attestation_missing", "preflight")
+      end
+
+      payload = AdversarialReview::CLI.stub(:execute_direct, failure) do
+        AdversarialReview::CLI.continue_run(
+          ["--run-dir", run_dir],
+          env: {"ADVERSARIAL_REVIEW_HOST" => "gemini"}, program_path: CLI
+        )
+      end
+
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      manifest = state.manifest_snapshot
+      expected_ids = manifest.fetch("enabled_tasks").map do |angle|
+        AdversarialReview::Prompts.attack_task(
+          manifest, angle, 1, round: 1,
+          current_digests: snapshot.fetch("current_target_digests")
+        ).fetch("task_id")
+      end
+      assert_equal [[first_task.fetch("task_id"), "codex"]], calls
+      assert_equal "generic", payload.fetch("selected_executor")
+      assert_equal "attacking", payload.fetch("stage")
+      assert_equal expected_ids.sort, snapshot.fetch("emitted_tasks").keys.sort
+      assert_empty snapshot.fetch("ingested_results")
+      assert_equal "terminal", snapshot.dig("execution", "selection_intent", "status")
+      assert_equal "generic", snapshot.dig("execution", "selection_intent", "outcome_executor")
+      assert_equal "fallback", snapshot.dig("execution", "dispatch_attempts", 0, "status")
+      persisted = nil
+      AdversarialReview::State.load(run_dir).read_task_bundle(first_task.fetch("task_id")) do |_manifest, _data, task|
+        persisted = task
+      end
+      assert_equal first_task, persisted
+    end
+  end
+
+  def test_resume_after_prior_call_or_content_keeps_direct_executor_and_blocks_fallback
+    [[:during_call, "preflight"], [:after_intent, "execution"]].each do |boundary, phase|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        _state, run_dir, first_task = interrupted_selection_state(repository, boundary)
+        failure = lambda do |_state, _task, _selected, _env|
+          direct_execution_failure("runtime_attestation_missing", phase)
+        end
+
+        error = assert_raises(AdversarialReview::CLI::Error, "#{boundary}/#{phase}") do
+          AdversarialReview::CLI.stub(:execute_direct, failure) do
+            AdversarialReview::CLI.continue_run(
+              ["--run-dir", run_dir],
+              env: {"ADVERSARIAL_REVIEW_HOST" => "gemini"}, program_path: CLI
+            )
+          end
+        end
+
+        snapshot = AdversarialReview::State.load(run_dir).to_h
+        assert_equal "capability_blocked", error.code
+        assert_equal "codex", snapshot.dig("execution", "selected_executor")
+        assert_equal "codex", snapshot.dig("execution", "selection_intent", "outcome_executor")
+        assert_equal "failed", snapshot.dig("execution", "dispatch_attempts", 0, "status")
+        assert_equal [first_task.fetch("task_id")], snapshot.fetch("emitted_tasks").keys
+      end
+    end
+  end
+
   def test_attacking_with_zero_tasks_dispatches_exact_roster_instead_of_advancing
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = AdversarialReview::Manifest.build(

@@ -204,8 +204,7 @@ module AdversarialReview
       manifest = state.manifest_snapshot
       snapshot = state.to_h
       selected = snapshot.dig("execution", "selected_executor")
-      fallback_generic = manifest.fetch("requested_executor") == "auto" &&
-        snapshot.dig("execution", "tasks").empty?
+      fallback_generic = generic_fallback_available?(manifest, snapshot)
       unless pending_task_ids(snapshot).empty?
         reviewer_pending = pending_task_ids(snapshot).reject do |task_id|
           snapshot.dig("emitted_tasks", task_id, "authority") == "parent"
@@ -214,7 +213,9 @@ module AdversarialReview
           reviewer_pending.each do |task_id|
             task = nil
             state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
-            dispatch_task(state, task, selected, env, fallback_generic: false)
+            selected = dispatch_task(
+              state, task, selected, env, fallback_generic: fallback_generic
+            )
           end
           resume_stage_dispatch(state, selected, env)
         end
@@ -454,6 +455,8 @@ module AdversarialReview
         intent = snapshot.dig("execution", "selection_intent")
       end
       pinned = snapshot.dig("execution", "executor_pinned")
+      fallback_before_call = fallback_generic && intent["status"] == "active" &&
+        intent["requested_executor"] == "auto" && intent["external_attempts"].zero?
       state.create_task_bundle(task.fetch("task_id")) { task } unless already_emitted
       if intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
         state.mark_selection_call_started!(task.fetch("task_id"))
@@ -464,7 +467,7 @@ module AdversarialReview
       selecting = intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
       unless result.status == "complete" && result.payload
         eligible = Adapters::Base.eligibility_error?(result.error_code)
-        if fallback_generic && eligible && phase != "execution" && selecting && !pinned
+        if fallback_before_call && eligible && phase != "execution" && selecting && !pinned
           state.finalize_selection_intent!(
             task_id: task.fetch("task_id"), executor: selected, status: "fallback",
             error_code: result.error_code, phase: phase, content_sent: false,
@@ -535,6 +538,15 @@ module AdversarialReview
       when "arbitrating"
         dispatch_role_task(state, "arbiter", selected, env, fallback_generic: fallback)
       end
+    end
+
+    def generic_fallback_available?(manifest, snapshot)
+      return false unless manifest.fetch("requested_executor") == "auto" &&
+                          snapshot.dig("execution", "tasks").empty?
+
+      intent = snapshot.dig("execution", "selection_intent")
+      intent.nil? || (intent["status"] == "active" &&
+        intent["requested_executor"] == "auto" && intent["external_attempts"].zero?)
     end
 
     def recover_selection_intent!(state)

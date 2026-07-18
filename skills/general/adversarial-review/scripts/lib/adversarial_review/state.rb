@@ -948,7 +948,9 @@ module AdversarialReview
         unless intent["status"] == "active" &&
                [executor, "generic"].include?(selected_executor) &&
                (selected_executor != "generic" ||
-                (status == "fallback" && !content_sent && %w[probe preflight].include?(phase)))
+                (intent["requested_executor"] == "auto" &&
+                 intent["external_attempts"] == 1 && status == "fallback" &&
+                 !content_sent && %w[probe preflight].include?(phase)))
           raise Error.new("invalid_selection_outcome", "selection outcome is not eligible", {}, 3)
         end
         if execution.fetch("executor_pinned") && execution.fetch("selected_executor") != selected_executor
