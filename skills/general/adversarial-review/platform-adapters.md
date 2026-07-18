@@ -54,6 +54,13 @@ identity, current target digests, capability evidence, and state transitions.
 Generic mode can preserve full review semantics even when a host cannot expose
 direct CLI telemetry; disclose missing runtime or token observations.
 
+The task bundle is the complete worker handoff. It carries canonical
+`repository_root`, absolute canonical `schema_path`, `schema_sha256`, and the
+authoritative `required_checks`. Start the worker with its working directory set to `repository_root` and verify `schema_sha256` before using `schema_path`.
+Do not resolve the schema relative to the reviewed repository. Return every and
+only required check in `checks_completed`; the control plane permits one
+durably recorded repair for missing or invented checks, then fails closed.
+
 ## Codex Adapter
 
 On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; direct execution still requires the exact requested model and effort to match runtime evidence.

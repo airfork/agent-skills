@@ -77,6 +77,10 @@ The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
 | `--chat-only` | alias | Exactly `--output chat`. |
 | `--ultra` | alias | Exactly `--tier ultra`. |
 
+Alias normalization is order-independent. Contradictory explicit values are
+rejected; in particular, `--report-only` never permits `--mode revise` and
+cannot be combined with `--chat-only`.
+
 There is no quick/low tier and no silent model, effort, tier, or vendor
 downgrade. The public CLI declares `parallel_dispatch` unavailable, so its
 required gate makes direct adapter results ineligible before reviewed content. Direct adapter classes
@@ -91,10 +95,14 @@ the result to Generic bundles. No post-content failure changes vendor.
 
 ### Lifecycle
 
-1. Run `start`; retain the returned `run_dir` and task paths.
+1. Run `start`; retain the returned `run_dir` and task paths. Every generic task
+   supplies canonical `repository_root`, absolute `schema_path`,
+   `schema_sha256`, and authoritative `required_checks`. Dispatch with the
+   worker cwd set to `repository_root` and verify the schema digest first.
 2. For each generic reviewer task, return its closed-schema result and capability
    declaration with `ingest --run-dir RUN --task ID --result RESULT.json
-   --capabilities CAPABILITIES.json`.
+   --capabilities CAPABILITIES.json`. Return exactly the assigned
+   `checks_completed`; one missing-check repair is permitted and recorded.
 3. Run `continue --run-dir RUN` until more results or parent actions are needed.
    Submit parent-only `FIXED|REJECTED` actions with `continue --actions
    ACTIONS.json`; reviewers never edit targets.

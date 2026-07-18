@@ -108,14 +108,16 @@ module AdversarialReview
         repository: Dir.pwd, tier: "default", mode: "revise", output: "both",
         executor: "auto", model: "inherit", effort: "inherit", context: [], jobs: 1
       }
+      aliases = {report_only: false, chat_only: false, ultra: false}
+      supplied = {tier: [], mode: [], output: []}
       parser = OptionParser.new do |opts|
-        opts.banner = "Usage: adversarial-review start --spec PATH [options]"
+        opts.banner = "Usage: adversarial-review start [options]\n(one of --spec PATH or --plan PATH is required)"
         opts.on("--repository PATH") { |value| options[:repository] = value }
         opts.on("--spec PATH") { |value| options[:spec] = value }
         opts.on("--plan PATH") { |value| options[:plan] = value }
-        opts.on("--tier TIER", Manifest::TIERS, "default|high|ultra") { |value| options[:tier] = value }
-        opts.on("--mode MODE", Manifest::MODES, "critique|revise") { |value| options[:mode] = value }
-        opts.on("--output OUTPUT", Manifest::OUTPUTS, "chat|file|both") { |value| options[:output] = value }
+        opts.on("--tier TIER", Manifest::TIERS, "default|high|ultra") { |value| supplied[:tier] << value }
+        opts.on("--mode MODE", Manifest::MODES, "critique|revise") { |value| supplied[:mode] << value }
+        opts.on("--output OUTPUT", Manifest::OUTPUTS, "chat|file|both") { |value| supplied[:output] << value }
         opts.on("--executor EXECUTOR", Manifest::EXECUTORS,
                 "auto|codex|claude|cursor|gemini|generic") { |value| options[:executor] = value }
         opts.on("--model MODEL") { |value| options[:model] = value }
@@ -124,15 +126,13 @@ module AdversarialReview
         opts.on("--context PATH") { |value| options[:context] << value }
         opts.on("--run-dir PATH") { |value| options[:run_dir] = value }
         opts.on("--report PATH") { |value| options[:report] = value }
-        opts.on("--report-only") do
-          options[:mode] = "critique"
-          options[:output] = "both"
-        end
-        opts.on("--chat-only") { options[:output] = "chat" }
-        opts.on("--ultra") { options[:tier] = "ultra" }
+        opts.on("--report-only") { aliases[:report_only] = true }
+        opts.on("--chat-only") { aliases[:chat_only] = true }
+        opts.on("--ultra") { aliases[:ultra] = true }
         opts.on("-h", "--help") { raise Error.new("help", opts.to_s, 0) }
       end
       parse!(parser, argv)
+      normalize_start_options!(options, supplied, aliases)
       unless options.fetch(:jobs).positive?
         raise OptionParser::InvalidArgument, "--jobs must be a positive integer"
       end
@@ -183,7 +183,6 @@ module AdversarialReview
         opts.banner = "Usage: adversarial-review continue --run-dir PATH [options]"
         opts.on("--run-dir PATH") { |value| options[:run_dir] = value }
         opts.on("--actions PATH") { |value| options[:actions] = value }
-        opts.on("--capabilities PATH") { |value| options[:capabilities] = value }
         opts.on("--report PATH") { |value| options[:report] = value }
         opts.on("-h", "--help") { raise Error.new("help", opts.to_s, 0) }
       end
@@ -342,10 +341,22 @@ module AdversarialReview
         read_json_file(options.fetch(:capabilities)), task, options.fetch(:run_dir)
       )
       declaration = attestation.fetch("capabilities")
+      result_payload = read_json_file(options.fetch(:result))
+      schema_name = task.fetch("schema").sub(%r{\Aassets/schemas/}, "").sub(/\.json\z/, "")
+      schema_errors = Schema.validate(schema_name, result_payload)
+      if schema_errors.empty? && !required_check_coverage?(task, result_payload)
+        state.record_result_repair!(task.fetch("task_id"), reason: "missing_required_checks")
+        raise Error.new(
+          "missing_required_checks", "result did not complete the authoritative required checks", 3,
+          {"task_id" => task.fetch("task_id"), "required_checks" => task.fetch("required_checks")}
+        )
+      end
+      repair_count = state.to_h.fetch("result_repairs").fetch(task.fetch("task_id"), {})
+                          .fetch("count", 0)
       summary = state.accept_result(
-        task.fetch("task_id"), read_json_file(options.fetch(:result)),
+        task.fetch("task_id"), result_payload,
         authority: "reviewer", capabilities: declaration,
-        usage: {"prompt_bytes" => task_bytes.bytesize}, attempts: task.fetch("attempt"),
+        usage: {"prompt_bytes" => task_bytes.bytesize}, attempts: 1 + repair_count,
         runtime_provenance: {
           "adapter" => "generic", "capability_gate" => attestation.reject { |key, _| key == "capabilities" }
         }
@@ -386,6 +397,44 @@ module AdversarialReview
 
     def unresolved?(model, effort)
       [model, effort].any? { |value| value.nil? || value.strip.empty? || value == "inherit" }
+    end
+
+    def normalize_start_options!(options, supplied, aliases)
+      supplied.each do |name, values|
+        if values.uniq.length > 1
+          raise OptionParser::InvalidArgument, "conflicting --#{name} values"
+        end
+      end
+      if aliases.fetch(:report_only) &&
+         (supplied.fetch(:mode).any? { |value| value != "critique" } ||
+          supplied.fetch(:output).any? { |value| value != "both" } || aliases.fetch(:chat_only))
+        raise OptionParser::InvalidArgument,
+              "--report-only conflicts with revise mode, non-both output, or --chat-only"
+      end
+      if aliases.fetch(:chat_only) && supplied.fetch(:output).any? { |value| value != "chat" }
+        raise OptionParser::InvalidArgument, "--chat-only conflicts with non-chat output"
+      end
+      if aliases.fetch(:ultra) && supplied.fetch(:tier).any? { |value| value != "ultra" }
+        raise OptionParser::InvalidArgument, "--ultra conflicts with another tier"
+      end
+      options[:tier] = aliases.fetch(:ultra) ? "ultra" : supplied.fetch(:tier).last || options[:tier]
+      options[:mode] = aliases.fetch(:report_only) ? "critique" : supplied.fetch(:mode).last || options[:mode]
+      options[:output] = if aliases.fetch(:report_only)
+                           "both"
+                         elsif aliases.fetch(:chat_only)
+                           "chat"
+                         else
+                           supplied.fetch(:output).last || options[:output]
+                         end
+    end
+
+    def required_check_coverage?(task, payload)
+      required = task.fetch("required_checks")
+      return true if required.empty?
+
+      completed = payload["checks_completed"]
+      completed.is_a?(Array) && completed.uniq.length == completed.length &&
+        completed.sort == required.sort
     end
 
     def report_path_for(manifest, requested, run_dir:)
@@ -838,7 +887,7 @@ module AdversarialReview
         source_env: env
       )
       adapter.execute(
-        required_checks: [],
+        required_checks: task.fetch("required_checks"),
         dispatch_capability: {
           "status" => "unavailable",
           "evidence" => "portable CLI dispatch is serial and does not provide parallel role execution",
@@ -856,6 +905,17 @@ module AdversarialReview
       manifest = state.manifest_snapshot
       pending = pending_task_ids(snapshot).map do |task_id|
         File.join(state_run_dir(state), "tasks", "#{task_id}.json")
+      end
+      pending_task_handoffs = pending.map do |task_path|
+        task_id = File.basename(task_path, ".json")
+        task = nil
+        state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+        {
+          "task_path" => task_path,
+          "cwd" => task.fetch("repository_root"),
+          "schema_path" => task.fetch("schema_path"),
+          "schema_sha256" => task.fetch("schema_sha256")
+        }
       end
       parent_pending = pending.any? do |path|
         task_id = File.basename(path, ".json")
@@ -875,6 +935,7 @@ module AdversarialReview
         "stage" => snapshot.fetch("stage"),
         "next_action" => next_action,
         "pending_tasks" => pending.sort,
+        "pending_task_handoffs" => pending_task_handoffs.sort_by { |entry| entry.fetch("task_path") },
         "pending_batch_size" => pending.length,
         "requested_executor" => manifest.fetch("requested_executor"),
         "selected_executor" => snapshot.dig("execution", "selected_executor"),

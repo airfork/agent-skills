@@ -101,6 +101,44 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_includes stdout, "Usage:", command
       assert_includes stdout, "--run-dir", command unless command == "start"
     end
+
+    start_help, = run_public_cli("start", "--help")
+    assert_includes start_help, "one of --spec PATH or --plan PATH is required"
+    continue_help, = run_public_cli("continue", "--help")
+    refute_includes continue_help, "--capabilities"
+    ingest_help, = run_public_cli("ingest", "--help")
+    assert_includes ingest_help, "--capabilities"
+  end
+
+  def test_report_only_normalization_is_order_independent_and_never_authorizes_revise
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      [["--report-only", "--mode", "revise"],
+       ["--mode", "revise", "--report-only"],
+       ["--report-only", "--chat-only"],
+       ["--chat-only", "--report-only"]].each_with_index do |flags, index|
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          *flags, "--executor", "generic", "--run-dir",
+          File.join(repository, ".git", "normalization-rejected-#{index}")
+        )
+        assert_equal 2, status.exitstatus, flags.inspect
+        assert_empty stdout, flags.inspect
+        assert_equal "invocation_error", JSON.parse(stderr).fetch("code"), flags.inspect
+      end
+
+      [["--report-only", "--mode", "critique", "--output", "both"],
+       ["--output", "both", "--mode", "critique", "--report-only"]].each_with_index do |flags, index|
+        run_dir = File.join(repository, ".git", "normalization-accepted-#{index}")
+        _stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          *flags, "--executor", "generic", "--run-dir", run_dir
+        )
+        assert status.success?, stderr
+        manifest = AdversarialReview::State.load(run_dir).manifest_snapshot
+        assert_equal "critique", manifest.fetch("mode")
+        assert_equal "both", manifest.fetch("output")
+      end
+    end
   end
 
   def test_auto_never_selects_another_installed_vendor_and_falls_back_before_content
@@ -256,7 +294,7 @@ class AdversarialReviewCliTest < Minitest::Test
     %i[after_intent after_task during_call orphan_completion].each do |boundary|
       with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
         state, run_dir, first_task = interrupted_selection_state(repository, boundary)
-        assert_equal 7, state.manifest_snapshot.fetch("enabled_tasks").length
+        assert_equal 5, state.manifest_snapshot.fetch("enabled_tasks").length
         calls = []
         resume = lambda do |_state, task, selected, _env|
           calls << [task.fetch("task_id"), selected]
@@ -275,13 +313,13 @@ class AdversarialReviewCliTest < Minitest::Test
         assert_equal "codex", payload.fetch("selected_executor"), boundary
         assert_equal "codex", snapshot.dig("execution", "selection_intent", "vendor"), boundary
         assert_equal "terminal", snapshot.dig("execution", "selection_intent", "status"), boundary
-        assert_equal 7, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }, boundary
-        assert_equal 7, snapshot.fetch("ingested_results").length, boundary
+        assert_equal 5, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }, boundary
+        assert_equal 5, snapshot.fetch("ingested_results").length, boundary
         assert_equal snapshot.fetch("emitted_tasks").keys.sort,
                      snapshot.fetch("ingested_results").keys.sort, boundary
         assert_equal first_task.fetch("task_id"),
                      snapshot.dig("execution", "selection_intent", "task_id"), boundary
-        expected_calls = boundary == :orphan_completion ? 6 : 7
+        expected_calls = boundary == :orphan_completion ? 4 : 5
         assert_equal expected_calls, calls.length, boundary
         assert calls.all? { |_task_id, selected| selected == "codex" }, boundary
       end
@@ -371,8 +409,8 @@ class AdversarialReviewCliTest < Minitest::Test
 
       snapshot = AdversarialReview::State.load(run_dir).to_h
       assert_equal "attacking", payload.fetch("stage")
-      assert_equal 7, payload.fetch("pending_batch_size")
-      assert_equal 7, snapshot.fetch("emitted_tasks").length
+      assert_equal 5, payload.fetch("pending_batch_size")
+      assert_equal 5, snapshot.fetch("emitted_tasks").length
       assert_empty snapshot.fetch("ingested_results")
     end
   end
@@ -385,7 +423,7 @@ class AdversarialReviewCliTest < Minitest::Test
       ["awaiting-author", "revise", "default", "author-actions", 1],
       ["resolving", "revise", "default", "resolution", 1],
       ["arbitrating", "revise", "default", "arbiter", 1],
-      ["fresh-sweep", "revise", "default", "attack", 7],
+      ["fresh-sweep", "revise", "default", "attack", 5],
       ["culling-new-findings", "revise", "default", "judge", 1]
     ]
     cases.each do |stage, mode, tier, kind, expected_count|
@@ -545,8 +583,8 @@ class AdversarialReviewCliTest < Minitest::Test
 
       snapshot = AdversarialReview::State.load(run_dir).to_h
       assert_equal "attacking", payload.fetch("stage")
-      assert_equal 7, payload.fetch("pending_batch_size")
-      assert_equal 7, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }
+      assert_equal 5, payload.fetch("pending_batch_size")
+      assert_equal 5, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }
     end
   end
 
@@ -564,6 +602,38 @@ class AdversarialReviewCliTest < Minitest::Test
       end
 
       assert_equal "selection_call_not_authorized", error.code
+    end
+  end
+
+  def test_direct_adapter_receives_the_task_authoritative_required_checks
+    with_repository(files: {"docs/spec.md" => "# Internal protocol\n"}) do |repository|
+      state = direct_dispatch_state(repository, "required-check-direct", "codex")
+      manifest = state.manifest_snapshot
+      task = AdversarialReview::Prompts.attack_task(
+        manifest, manifest.fetch("enabled_tasks").first, 1,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+      state.begin_selection_intent!(
+        task_id: task.fetch("task_id"), requested_executor: "codex",
+        candidate_executor: "codex", vendor: "codex", model: "codex-review",
+        effort: "high", stage: "attacking"
+      )
+      state.create_task_bundle(task.fetch("task_id")) { task }
+      state.mark_selection_call_started!(task.fetch("task_id"))
+      observed = nil
+      adapter = Object.new
+      adapter.define_singleton_method(:execute) do |required_checks:, dispatch_capability:|
+        observed = required_checks
+        raise "missing dispatch capability" unless dispatch_capability
+        :result
+      end
+
+      result = AdversarialReview::Adapters::Codex.stub(:new, adapter) do
+        AdversarialReview::CLI.execute_direct(state, task, "codex", {})
+      end
+
+      assert_equal :result, result
+      assert_equal task.fetch("required_checks"), observed
     end
   end
 
@@ -676,7 +746,7 @@ class AdversarialReviewCliTest < Minitest::Test
       File.write(result_path, JSON.generate(
         "schema_version" => 1, "run_id" => task.fetch("run_id"),
         "task_id" => task.fetch("task_id"), "artifact_digests" => task.fetch("artifact_digests"),
-        "angle" => task.fetch("angle"), "checks_completed" => ["assigned checks"],
+        "angle" => task.fetch("angle"), "checks_completed" => task.fetch("required_checks"),
         "findings" => [], "metrics" => {}, "notes" => []
       ) + "\n")
       first_capabilities = File.join(repository, ".git", "first-capabilities.json")
@@ -699,6 +769,77 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_generic_ingest_allows_exactly_one_durable_required_check_repair
+    with_repository(files: {"docs/spec.md" => "# Internal protocol\n"}) do |repository|
+      capabilities = File.join(repository, ".git", "repair-capabilities.json")
+      File.write(capabilities, "{}\n")
+      run_dir = File.join(repository, ".git", "required-check-repair")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "generic", "--output", "chat", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      task = JSON.parse(File.binread(JSON.parse(stdout).fetch("pending_tasks").first))
+      refute_empty task.fetch("required_checks")
+      result_path = File.join(repository, ".git", "repair-result.json")
+      invalid = empty_result_for(task).merge("checks_completed" => ["invented check"])
+      File.write(result_path, JSON.generate(invalid) + "\n")
+
+      stdout, stderr, status = run_public_cli(
+        "ingest", "--run-dir", run_dir, "--task", task.fetch("task_id"),
+        "--result", result_path, "--capabilities", capabilities
+      )
+      assert_equal 3, status.exitstatus
+      assert_empty stdout
+      assert_equal "missing_required_checks", JSON.parse(stderr).fetch("code")
+      assert_equal 1, AdversarialReview::State.load(run_dir).to_h
+        .fetch("result_repairs").fetch(task.fetch("task_id")).fetch("count")
+
+      valid = empty_result_for(task).merge("checks_completed" => task.fetch("required_checks"))
+      File.write(result_path, JSON.generate(valid) + "\n")
+      stdout, stderr, status = run_public_cli(
+        "ingest", "--run-dir", run_dir, "--task", task.fetch("task_id"),
+        "--result", result_path, "--capabilities", capabilities
+      )
+      assert status.success?, stderr
+      assert_empty stderr
+      execution = AdversarialReview::State.load(run_dir).to_h
+        .dig("execution", "tasks", task.fetch("task_id"))
+      assert_equal 2, execution.fetch("attempts")
+    end
+  end
+
+  def test_generic_ingest_rejects_a_second_missing_required_check_repair
+    with_repository(files: {"docs/spec.md" => "# Internal protocol\n"}) do |repository|
+      capabilities = File.join(repository, ".git", "exhausted-capabilities.json")
+      File.write(capabilities, "{}\n")
+      run_dir = File.join(repository, ".git", "required-check-exhausted")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "generic", "--output", "chat", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      task = JSON.parse(File.binread(JSON.parse(stdout).fetch("pending_tasks").first))
+      result_path = File.join(repository, ".git", "exhausted-result.json")
+      invalid = empty_result_for(task).merge("checks_completed" => ["invented check"])
+      File.write(result_path, JSON.generate(invalid) + "\n")
+
+      2.times do |attempt|
+        stdout, stderr, status = run_public_cli(
+          "ingest", "--run-dir", run_dir, "--task", task.fetch("task_id"),
+          "--result", result_path, "--capabilities", capabilities
+        )
+        assert_equal 3, status.exitstatus
+        assert_empty stdout
+        expected = attempt.zero? ? "missing_required_checks" : "repair_exhausted"
+        assert_equal expected, JSON.parse(stderr).fetch("code")
+      end
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      assert_equal 1, snapshot.fetch("result_repairs").fetch(task.fetch("task_id")).fetch("count")
+      refute snapshot.fetch("ingested_results").key?(task.fetch("task_id"))
+    end
+  end
+
   def test_generic_execution_records_exact_emitted_task_bytes_once
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "generic-prompt-bytes")
@@ -709,7 +850,13 @@ class AdversarialReviewCliTest < Minitest::Test
         "--executor", "generic", "--output", "chat", "--run-dir", run_dir
       )
       assert status.success?, stderr
-      task_path = JSON.parse(stdout).fetch("pending_tasks").first
+      started = JSON.parse(stdout)
+      task_path = started.fetch("pending_tasks").first
+      handoff_metadata = started.fetch("pending_task_handoffs").first
+      assert_equal task_path, handoff_metadata.fetch("task_path")
+      assert_equal File.realpath(repository), handoff_metadata.fetch("cwd")
+      assert_equal Digest::SHA256.file(handoff_metadata.fetch("schema_path")).hexdigest,
+                   handoff_metadata.fetch("schema_sha256")
       task = JSON.parse(File.read(task_path))
 
       ingest_task_result(run_dir, capabilities, task, empty_result_for(task))
@@ -1095,7 +1242,7 @@ class AdversarialReviewCliTest < Minitest::Test
           state.transition_to(stage)
         end
         report = File.join(repository, "#{output}-review.md")
-        arguments = ["continue", "--run-dir", run_dir, "--capabilities", capability_path]
+        arguments = ["continue", "--run-dir", run_dir]
         arguments.concat(["--report", report]) if writes_file
         stdout, stderr, status = run_public_cli(*arguments)
         assert status.success?, stderr
@@ -1135,7 +1282,7 @@ class AdversarialReviewCliTest < Minitest::Test
             "schema_version" => 1, "run_id" => task.fetch("run_id"),
             "task_id" => task.fetch("task_id"),
             "artifact_digests" => task.fetch("artifact_digests"),
-            "angle" => task.fetch("angle"), "checks_completed" => ["assigned checks"],
+            "angle" => task.fetch("angle"), "checks_completed" => task.fetch("required_checks"),
             "findings" => [], "metrics" => {}, "notes" => []
           }
         else
@@ -1154,7 +1301,7 @@ class AdversarialReviewCliTest < Minitest::Test
           assert_equal "awaiting-author", JSON.parse(action_stdout).fetch("stage")
           actions_path = nil
         end
-        arguments = ["continue", "--run-dir", run_dir, "--capabilities", capability_path]
+        arguments = ["continue", "--run-dir", run_dir]
         arguments.concat(["--report", report]) if expected_stage == "complete"
         stdout, stderr, status = run_public_cli(*arguments)
         assert status.success?, stderr
@@ -1529,7 +1676,8 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal %w[
         angle applicable_guidance artifact_digests capability_declaration_template
         context_pointers inventory mutation_restrictions prompt role role_contract round
-        run_id schema schema_version targets task_id tool_restrictions attempt
+        run_id schema schema_path schema_sha256 schema_version repository_root
+        required_checks targets task_id tool_restrictions attempt
       ].sort, task.keys.sort
       assert_equal 1, task.fetch("schema_version")
       assert_equal manifest.fetch("run_id"), task.fetch("run_id")
@@ -1542,6 +1690,44 @@ class AdversarialReviewCliTest < Minitest::Test
                    task.fetch("artifact_digests"))
       assert_equal manifest.fetch("targets"), task.fetch("targets")
       assert_equal "assets/schemas/attack.json", task.fetch("schema")
+      assert_equal File.realpath(repository), task.fetch("repository_root")
+      assert_equal File.realpath(File.join(SKILL, "assets/schemas/attack.json")),
+                   task.fetch("schema_path")
+      assert_equal Digest::SHA256.file(task.fetch("schema_path")).hexdigest,
+                   task.fetch("schema_sha256")
+      refute_empty task.fetch("required_checks")
+    end
+  end
+
+  def test_generic_handoff_is_self_sufficient_to_a_fresh_worker_with_only_the_task_path
+    with_repository(files: {"docs/spec.md" => "# Internal protocol\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "fresh-worker-handoff")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--mode", "critique", "--output", "chat", "--executor", "generic",
+        "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      task_path = JSON.parse(stdout).fetch("pending_tasks").first
+      worker = <<~'RUBY'
+        require "digest"
+        require "json"
+        task = JSON.parse(File.binread(ARGV.fetch(0)))
+        abort "repository unavailable" unless File.realpath(task.fetch("repository_root")) == task.fetch("repository_root")
+        abort "schema unavailable" unless File.realpath(task.fetch("schema_path")) == task.fetch("schema_path")
+        abort "schema digest mismatch" unless Digest::SHA256.file(task.fetch("schema_path")).hexdigest == task.fetch("schema_sha256")
+        Dir.chdir(task.fetch("repository_root"))
+        JSON.parse(File.binread(task.fetch("schema_path")))
+        puts JSON.generate({"cwd" => Dir.pwd, "schema" => task.fetch("schema_path")})
+      RUBY
+      worker_stdout, worker_stderr, worker_status = Open3.capture3(
+        RbConfig.ruby, "-e", worker, task_path
+      )
+      assert worker_status.success?, worker_stderr
+      handoff = JSON.parse(worker_stdout)
+      assert_equal File.realpath(repository), handoff.fetch("cwd")
+      assert_equal File.realpath(File.join(SKILL, "assets/schemas/attack.json")),
+                   handoff.fetch("schema")
     end
   end
 
@@ -1561,6 +1747,12 @@ class AdversarialReviewCliTest < Minitest::Test
         task = AdversarialReview::Prompts.role_task(manifest, state_data, kind)
         assert_equal kind, task.fetch("kind")
         assert_equal "assets/schemas/#{kind}.json", task.fetch("schema")
+        assert_equal File.realpath(repository), task.fetch("repository_root")
+        assert_equal File.realpath(File.join(SKILL, "assets/schemas/#{kind}.json")),
+                     task.fetch("schema_path")
+        assert_equal Digest::SHA256.file(task.fetch("schema_path")).hexdigest,
+                     task.fetch("schema_sha256")
+        assert_kind_of Array, task.fetch("required_checks")
         assert_equal state_data.fetch("current_target_digests"), task.fetch("artifact_digests")
         assert_equal manifest.fetch("targets").map { |target| target.fetch("path") },
                      task.fetch("targets").map { |target| target.fetch("path") }
@@ -1576,13 +1768,15 @@ class AdversarialReviewCliTest < Minitest::Test
 
       author = AdversarialReview::Prompts.parent_action_task(manifest, state_data)
       assert_equal "parent", author.fetch("authority")
+      assert_equal File.realpath(repository), author.fetch("repository_root")
+      assert_equal [], author.fetch("required_checks")
       refute author.key?("capability_declaration_template")
     end
   end
 
   def test_attack_tasks_isolate_the_exact_assigned_markdown_sections
     files = {
-      "docs/spec.md" => "# Product spec\n",
+      "docs/spec.md" => "# Product spec\nThe operator reviews errors.\n",
       "docs/plan.md" => "# Delivery plan\n"
     }
     mapping = {
@@ -2081,7 +2275,13 @@ class AdversarialReviewCliTest < Minitest::Test
       tampered = task.merge(
         "angle" => "divergence-probe-1",
         "task_id" => "attack-divergence-probe-1-r1-a1",
-        "schema" => "assets/schemas/divergence.json"
+        "schema" => "assets/schemas/divergence.json",
+        "schema_path" => File.realpath(File.join(SKILL, "assets/schemas/divergence.json")),
+        "schema_sha256" => Digest::SHA256.file(
+          File.join(SKILL, "assets/schemas/divergence.json")
+        ).hexdigest,
+        "required_checks" => AdversarialReview::Prompts::REQUIRED_CHECKS
+          .fetch("divergence-probe")
       )
       Dir.mktmpdir("adversarial-review-authoritative-schema") do |directory|
         run_dir = File.join(directory, "run")
@@ -2397,7 +2597,7 @@ class AdversarialReviewCliTest < Minitest::Test
     case kind
     when "attack"
       result = base.merge(
-        "angle" => task.fetch("angle"), "checks_completed" => ["assigned checks"],
+        "angle" => task.fetch("angle"), "checks_completed" => task.fetch("required_checks"),
         "findings" => [], "metrics" => {}
       )
       if task.fetch("schema") == "assets/schemas/divergence.json"

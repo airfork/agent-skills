@@ -334,10 +334,13 @@ module AdversarialReview
           end
 
           payload = envelope["payload"]
+          completed_checks = payload_checks(payload)
           checks_present = required_checks.is_a?(Array) &&
-                           required_checks.all? do |check|
-                             payload_checks(payload).include?(check)
-                           end
+                           required_checks.uniq.length == required_checks.length &&
+                           (required_checks.empty? ||
+                            (completed_checks.is_a?(Array) &&
+                             completed_checks.uniq.length == completed_checks.length &&
+                             completed_checks.sort == required_checks.sort))
           if valid_payload?(payload) && checks_present
             return ExecutionResult.new(
               status: "complete", payload: payload, usage: usage.to_h,

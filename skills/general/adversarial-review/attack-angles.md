@@ -30,7 +30,11 @@ Common output:
 }
 ```
 
-The `attack` schema in `assets/schemas/attack.json` is the closed, executable contract. Do not add metadata or substitute prose locations. Record only checks that were actually performed; a missing required check may be retried by the control plane.
+The `attack` schema in `assets/schemas/attack.json` is the closed, executable contract. Do not add metadata or substitute prose locations. The control plane emits the exact authoritative `required_checks` array in every task. Return every and only those labels once in `checks_completed`; a missing, duplicate, or invented label may consume the single repair before the task fails closed.
+
+Routing is deterministic. Implementer is enabled only when a spec is present;
+Feasibility is enabled only when a plan is present; Tester is enabled for either;
+and traceability requires both. User is enabled only when a bounded scan of authoritative target prose detects explicit user or operator behavior. Code fences and inline-code identifiers do not enable User.
 
 The control plane assigns a candidate ID at ingestion. Candidate IDs remain immutable through dedupe, cull, arbitration, author action, resolution, and reporting; later roles must return the supplied ID rather than renumbering findings.
 

@@ -31,11 +31,43 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
-  def test_plan_only_uses_the_base_task_roster
+  def test_plan_only_uses_only_plan_applicable_tasks
     with_repository(files: {"docs/plan.md" => "# Delivery plan\n"}) do |repository|
       manifest = build_manifest(repository, plan: "docs/plan.md")
 
-      assert_equal base_tasks, manifest.fetch("enabled_tasks")
+      assert_equal plan_tasks, manifest.fetch("enabled_tasks")
+    end
+  end
+
+  def test_spec_only_uses_only_spec_applicable_tasks
+    with_repository(files: {"docs/spec.md" => "# Internal protocol\n"}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+
+      assert_equal spec_tasks, manifest.fetch("enabled_tasks")
+    end
+  end
+
+  def test_user_task_is_enabled_only_for_bounded_user_or_operator_scope
+    user_facing = <<~MARKDOWN
+      # Command behavior
+      ## Overview
+      The operator runs `review start` and sees an actionable error message.
+    MARKDOWN
+    with_repository(files: {"docs/spec.md" => user_facing}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+
+      assert_equal spec_tasks.insert(2, "user"), manifest.fetch("enabled_tasks")
+    end
+
+    non_user = <<~MARKDOWN
+      # Storage engine
+      The internal scheduler stores cursor offsets. A code example says
+      `user_id = record.fetch("user_id")`. This is internal storage state only.
+    MARKDOWN
+    with_repository(files: {"docs/spec.md" => non_user}) do |repository|
+      manifest = build_manifest(repository, spec: "docs/spec.md")
+
+      assert_equal spec_tasks, manifest.fetch("enabled_tasks")
     end
   end
 
@@ -52,7 +84,7 @@ class AdversarialReviewManifestTest < Minitest::Test
         tier: "high"
       )
 
-      assert_equal base_tasks + %w[
+      assert_equal combined_tasks + %w[
         traceability divergence-probe-1 divergence-probe-2 divergence-probe-3
       ], manifest.fetch("enabled_tasks")
       assert_equal %w[spec plan], manifest.fetch("targets").map { |target| target.fetch("role") }
@@ -63,7 +95,7 @@ class AdversarialReviewManifestTest < Minitest::Test
     with_repository(files: {"docs/plan.md" => "# Plan\n"}) do |repository|
       manifest = build_manifest(repository, plan: "docs/plan.md", tier: "high")
 
-      assert_equal base_tasks, manifest.fetch("enabled_tasks")
+      assert_equal plan_tasks, manifest.fetch("enabled_tasks")
     end
   end
 
@@ -71,7 +103,7 @@ class AdversarialReviewManifestTest < Minitest::Test
     with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md", tier: "ultra")
 
-      assert_equal base_tasks + %w[
+      assert_equal spec_tasks + %w[
         divergence-probe-1 divergence-probe-2 divergence-probe-3
       ], manifest.fetch("enabled_tasks")
     end
@@ -652,11 +684,18 @@ class AdversarialReviewManifestTest < Minitest::Test
     )
   end
 
-  def base_tasks
+  def spec_tasks
     %w[
-      implementer tester user assumptions-checker pre-mortem
-      consistency-smells feasibility
+      implementer tester assumptions-checker pre-mortem consistency-smells
     ]
+  end
+
+  def plan_tasks
+    %w[tester assumptions-checker pre-mortem consistency-smells feasibility]
+  end
+
+  def combined_tasks
+    %w[implementer tester assumptions-checker pre-mortem consistency-smells feasibility]
   end
 
   def manifest_with_git_results(repository, head_success: true, status_success: true)

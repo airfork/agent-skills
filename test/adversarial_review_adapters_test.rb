@@ -369,6 +369,24 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     assert_equal 2, result.attempts
   end
 
+  def test_one_repair_for_an_invented_extra_check
+    first = valid_payload.merge(
+      "checks" => ["assumption-coverage", "invented-unassigned-check"]
+    )
+    adapter = harness_adapter([
+      {"payload" => first, "terminal" => runtime_event, "usage" => {}},
+      {"payload" => valid_payload, "terminal" => runtime_event, "usage" => {}}
+    ])
+
+    result = adapter.execute_with_one_repair(
+      requested_model: "model-x", requested_effort: "high",
+      required_checks: ["assumption-coverage"]
+    )
+
+    assert_equal "complete", result.status
+    assert_equal 2, result.attempts
+  end
+
   def test_valid_low_finding_result_is_not_repaired
     payload = valid_payload.merge("findings" => [])
     adapter = harness_adapter([

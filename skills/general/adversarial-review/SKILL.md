@@ -9,9 +9,8 @@ description: >-
 
 # Adversarial Review
 
-Require Ruby 2.6 or newer and repository spec/plan files. Load details from
-[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
-[platform-adapters.md](platform-adapters.md).
+Require Ruby 2.6 or newer and repository spec/plan files. Load `platform-adapters.md` only for executor selection or adapter troubleshooting.
+Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging.
 
 ## Invoke
 
@@ -33,7 +32,10 @@ Map host invocations: `--high` maps to `--tier high`; `--ultra` maps to `--tier 
 executable or subcommand with `--help` for other options.
 
 For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file.
-Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation.
+Repository writes require an explicit request to revise or fix the documents,
+or an explicit `$adversarial-review` invocation whose chosen mode is `revise`.
+`--report-only` never authorizes revision. Contradictory aliases and explicit
+mode/output values are rejected regardless of argument order.
 
 ## Non-Negotiables
 
@@ -48,7 +50,8 @@ Repository writes require an explicit `--report-only`, an explicit request to re
 ## Run
 
 1. Start; retain `run_dir` and tasks. The public CLI uses Generic bundles for
-   fresh read-only host-native parallel work.
+   fresh read-only host-native parallel work. Each bundle carries its canonical
+   repository root, absolute schema path, schema digest, and required checks.
 2. `ingest` each result/declaration. `continue` until results, actions, or
    terminal state; submit decisions only via `continue --actions ACTIONS.json`.
 3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.

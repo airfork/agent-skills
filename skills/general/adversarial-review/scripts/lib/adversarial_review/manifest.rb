@@ -11,10 +11,9 @@ module AdversarialReview
     EXECUTORS = %w[auto codex claude cursor gemini generic].freeze
     ULTRA_INCOMPATIBLE_EXECUTORS = %w[codex cursor gemini].freeze
 
-    BASE_TASKS = %w[
-      implementer tester user assumptions-checker pre-mortem
-      consistency-smells feasibility
-    ].freeze
+    COMMON_TASKS = %w[tester assumptions-checker pre-mortem consistency-smells].freeze
+    USER_SCOPE_BYTES = 65_536
+    USER_SCOPE = /(?:\b(?:the|a|an|each)\s+(?:end[- ]?user|user|operator|customer|administrator|admin)\b|\b(?:end[- ]?user|user|operator|customer|administrator|admin)[- ](?:facing|visible|workflow|journey|experience|action|error|recovery|setup)\b)/i.freeze
 
     class Error < StandardError
       attr_reader :code, :details, :exit_status
@@ -281,7 +280,7 @@ module AdversarialReview
         "requested_executor" => @executor,
         "requested_model" => @model,
         "requested_effort" => @effort,
-        "enabled_tasks" => enabled_tasks,
+        "enabled_tasks" => enabled_tasks(snapshots),
         "inventory" => built_inventory,
         "context_paths" => resolved_context_paths(built_targets, built_inventory),
         "starting_metrics" => starting_metrics(built_inventory)
@@ -408,6 +407,7 @@ module AdversarialReview
               "sha256" => Digest::SHA256.hexdigest(contents)
             },
             "inventory" => Inventory.build(role, relative_path, contents),
+            "user_or_operator_scope" => user_or_operator_scope_text?(contents),
             "identity" => [opened_stat.dev, opened_stat.ino]
           }
         end
@@ -472,13 +472,42 @@ module AdversarialReview
       path == @root || path.start_with?(@root + File::SEPARATOR)
     end
 
-    def enabled_tasks
-      tasks = BASE_TASKS.dup
+    def enabled_tasks(snapshots)
+      tasks = []
+      tasks << "implementer" if @spec
+      tasks << "tester"
+      tasks << "user" if snapshots.any? { |snapshot| snapshot.fetch("user_or_operator_scope") }
+      tasks.concat(%w[assumptions-checker pre-mortem consistency-smells])
+      tasks << "feasibility" if @plan
       tasks << "traceability" if @spec && @plan
       if @spec && %w[high ultra].include?(@tier)
         tasks.concat(%w[divergence-probe-1 divergence-probe-2 divergence-probe-3])
       end
       tasks
+    end
+
+    def user_or_operator_scope_text?(contents)
+      bounded = contents.byteslice(0, USER_SCOPE_BYTES).to_s
+      visible = []
+      fence_character = nil
+      fence_length = nil
+      bounded.lines.each do |line|
+        if fence_character
+          if line.match?(/\A {0,3}#{Regexp.escape(fence_character)}{#{fence_length},}[ \t]*\r?\n?\z/)
+            fence_character = nil
+            fence_length = nil
+          end
+          next
+        end
+        opening = line.match(/\A {0,3}(`{3,}|~{3,})/)
+        if opening
+          fence_character = opening[1][0]
+          fence_length = opening[1].length
+          next
+        end
+        visible << line.gsub(/`[^`\n]*`/, " ")
+      end
+      visible.join.match?(USER_SCOPE)
     end
 
     def resolved_context_paths(built_targets, built_inventory)

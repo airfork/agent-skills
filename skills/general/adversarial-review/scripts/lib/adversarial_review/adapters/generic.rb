@@ -32,6 +32,11 @@ module AdversarialReview
         {
           "status" => "awaiting-results",
           "task_path" => task_path,
+          "dispatch" => {
+            "cwd" => task.fetch("repository_root"),
+            "schema_path" => task.fetch("schema_path"),
+            "schema_sha256" => task.fetch("schema_sha256")
+          },
           "capability_declaration_template" => task.fetch("capability_declaration_template"),
           "next_action" => "Return a schema-shaped result and parent capability declaration."
         }
@@ -90,9 +95,23 @@ module AdversarialReview
           raise Error.new("invalid_task_identity", "task fields do not form its canonical identity")
         end
         schema = task.fetch("schema")
-        schema_path = File.join(AdversarialReview.root, schema)
-        unless File.file?(schema_path) && File.realpath(schema_path).start_with?(AdversarialReview.root + File::SEPARATOR)
+        skill_root = File.realpath(AdversarialReview.root)
+        schema_path = File.realpath(File.join(skill_root, schema))
+        declared_schema_path = task.fetch("schema_path")
+        unless File.file?(schema_path) && schema_path.start_with?(skill_root + File::SEPARATOR) &&
+               declared_schema_path == schema_path && File.realpath(declared_schema_path) == schema_path &&
+               task.fetch("schema_sha256") == Digest::SHA256.file(schema_path).hexdigest
           raise Error.new("invalid_task_schema", "task schema path is unavailable")
+        end
+        repository_root = manifest.fetch("repository").fetch("root")
+        unless task.fetch("repository_root") == repository_root &&
+               File.realpath(task.fetch("repository_root")) == repository_root
+          raise Error.new("invalid_task", "task repository root is not authoritative")
+        end
+        checks = task.fetch("required_checks")
+        unless checks.is_a?(Array) && checks.uniq.length == checks.length &&
+               checks.all? { |check| check.is_a?(String) && !check.empty? }
+          raise Error.new("invalid_task", "task required checks are malformed")
         end
         targets = task.fetch("targets")
         digests = task.fetch("artifact_digests")
@@ -119,6 +138,8 @@ module AdversarialReview
         expected_task
       rescue KeyError => error
         raise Error.new("invalid_task", "task is missing #{error.key.inspect}")
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM
+        raise Error.new("invalid_task_schema", "task handoff path is unavailable")
       rescue Prompts::Error => error
         raise Error.new("invalid_task", "authoritative task could not be rebuilt: #{error.message}")
       end

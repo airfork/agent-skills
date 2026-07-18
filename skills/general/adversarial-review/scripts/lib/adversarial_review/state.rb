@@ -68,7 +68,7 @@ module AdversarialReview
       dispute_kind subject_ids subject_mappings mapped_candidate_ids allow_new_findings
       targets inventory context_pointers applicable_guidance role_contract
       capability_declaration_template mutation_restrictions tool_restrictions prompt
-      authority review_evidence
+      authority review_evidence repository_root schema_path schema_sha256 required_checks
     ].freeze
     INGEST_STAGES = {
       "attack" => %w[attacking fresh-sweep].freeze,
@@ -144,6 +144,7 @@ module AdversarialReview
         "stage" => "prepared",
         "revise_round" => 1,
         "task_attempts" => {},
+        "result_repairs" => {},
         "emitted_tasks" => {},
         "ingested_results" => {},
         "exact_duplicate_map" => {},
@@ -1070,6 +1071,28 @@ module AdversarialReview
       raise Error.new("invalid_execution_record", error.message, {}, 3)
     end
 
+    def record_result_repair!(task_id, reason:)
+      validate_task_id!(task_id)
+      unless reason == "missing_required_checks"
+        raise Error.new("invalid_repair", "result repair reason is unsupported", {}, 3)
+      end
+      mutate! do |data|
+        unless data.fetch("emitted_tasks").key?(task_id) &&
+               !data.fetch("ingested_results").key?(task_id)
+          raise Error.new("unknown_task", "result repair requires a pending emitted task",
+                          {"task_id" => task_id}, 3)
+        end
+        if data.fetch("result_repairs").key?(task_id)
+          raise Error.new("repair_exhausted", "task already consumed its one result repair",
+                          {"task_id" => task_id}, 3)
+        end
+        data.fetch("result_repairs")[task_id] = {
+          "count" => 1, "reason" => reason
+        }
+      end
+      1
+    end
+
     def refresh_targets_after_actions!
       result = nil
       mutate! do |data, manifest|
@@ -1188,6 +1211,7 @@ module AdversarialReview
       end
       required = %w[
         schema_version run_id mode stage revise_round task_attempts emitted_tasks candidates findings
+        result_repairs
         ingested_results exact_duplicate_map exact_duplicate_sources semantic_groups
         judge_votes evidence_gaps overflow overflow_evidence_gaps
         author_actions resolution_checks pending_arbiter_subjects target_digest_history
@@ -1229,6 +1253,7 @@ module AdversarialReview
       end
       unless data["candidates"].is_a?(Array) && data["findings"].is_a?(Array) &&
              data["task_attempts"].is_a?(Hash) && data["emitted_tasks"].is_a?(Hash) &&
+             data["result_repairs"].is_a?(Hash) &&
              data["author_actions"].is_a?(Hash) &&
              data["ingested_results"].is_a?(Hash) && data["exact_duplicate_map"].is_a?(Hash) &&
              data["exact_duplicate_sources"].is_a?(Hash) && data["semantic_groups"].is_a?(Hash) &&
@@ -1242,11 +1267,20 @@ module AdversarialReview
       end
       bounded_collections = %w[
         candidates findings task_attempts emitted_tasks ingested_results exact_duplicate_map
+        result_repairs
         exact_duplicate_sources semantic_groups judge_votes evidence_gaps overflow_evidence_gaps
         author_actions resolution_checks pending_arbiter_subjects degraded_capabilities events
       ]
       unless bounded_collections.all? { |key| data.fetch(key).length <= MAX_STATE_ITEMS }
         raise Error.new("state_limit_exceeded", "persisted state collection exceeds its bound", {}, 3)
+      end
+      valid_repairs = data.fetch("result_repairs").all? do |task_id, repair|
+        data.fetch("emitted_tasks").key?(task_id) && repair.is_a?(Hash) &&
+          repair.keys.sort == %w[count reason] && repair["count"] == 1 &&
+          repair["reason"] == "missing_required_checks"
+      end
+      unless valid_repairs
+        raise Error.new("invalid_state", "persisted result repairs are invalid", {}, 3)
       end
       execution = data.fetch("execution")
       unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts dispatch_claims executor_pinned jobs metadata_required report_path selected_executor selection_intent tasks] &&

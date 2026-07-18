@@ -49,6 +49,17 @@ module AdversarialReview
       "resolution" => ["Resolution Check"].freeze,
       "arbiter" => ["Arbiter"].freeze
     }.freeze
+    REQUIRED_CHECKS = {
+      "implementer" => %w[implementation-sketch interface-dependencies unsupported-assumptions repository-claims].freeze,
+      "tester" => %w[concrete-test-plan testability-gaps repository-test-conventions failure-path-coverage].freeze,
+      "user" => %w[end-to-end-scenario error-recovery-path repeated-use affordance-verification].freeze,
+      "assumptions-checker" => %w[stated-assumptions unstated-assumptions failure-conditions repository-evidence].freeze,
+      "pre-mortem" => %w[failure-narrative document-commitments root-causes evidence-filter].freeze,
+      "consistency-smells" => %w[contradictions terminology-ordering tier-one-smells contextual-smells].freeze,
+      "feasibility" => %w[repository-references dependency-sequencing verification-validity buildability].freeze,
+      "traceability" => %w[requirement-to-task task-to-requirement missing-coverage scope-drift].freeze,
+      "divergence-probe" => %w[implementation-outline state-model api-sequencing verification-path].freeze
+    }.freeze
 
     module_function
 
@@ -89,7 +100,7 @@ module AdversarialReview
       inventory = canonical_inventory(manifest, targets)
       context_pointers = context_records(manifest)
 
-      {
+      task_contract_fields(manifest, schema_for(angle), required_checks_for(angle)).merge(
         "schema_version" => 1,
         "run_id" => manifest.fetch("run_id"),
         "task_id" => "attack-#{angle}-r#{round}-a#{attempt}",
@@ -103,7 +114,6 @@ module AdversarialReview
         "context_pointers" => context_pointers,
         "applicable_guidance" => guidance_records(context_pointers),
         "role_contract" => role_contract_for(angle, attack_angles_path),
-        "schema" => schema_for(angle),
         "capability_declaration_template" => Capabilities.template(
           requested_model: manifest.fetch("requested_model"),
           requested_effort: manifest.fetch("requested_effort")
@@ -111,7 +121,7 @@ module AdversarialReview
         "mutation_restrictions" => MUTATION_RESTRICTIONS.map(&:dup),
         "tool_restrictions" => TOOL_RESTRICTIONS.map(&:dup),
         "prompt" => CANONICAL_PROMPT
-      }
+      )
     rescue KeyError => error
       raise Error, "manifest is missing #{error.key.inspect}"
     end
@@ -126,13 +136,13 @@ module AdversarialReview
       digests = state_data.fetch("current_target_digests")
       targets, inventory = current_targets_and_inventory(manifest, digests)
       suffix = kind == "judge" && voter_id ? "-#{voter_id}" : ""
-      task = {
+      schema = "assets/schemas/#{kind}.json"
+      task = task_contract_fields(manifest, schema, []).merge(
         "schema_version" => 1,
         "run_id" => manifest.fetch("run_id"),
         "task_id" => "#{kind}-batch#{suffix}-r#{round}-a#{attempt}",
         "role" => REVIEW_ROLES.fetch(kind),
         "kind" => kind,
-        "schema" => "assets/schemas/#{kind}.json",
         "artifact_digests" => JSON.parse(JSON.generate(digests)),
         "round" => round,
         "attempt" => attempt,
@@ -149,7 +159,7 @@ module AdversarialReview
         "mutation_restrictions" => MUTATION_RESTRICTIONS.map(&:dup),
         "tool_restrictions" => TOOL_RESTRICTIONS.map(&:dup),
         "prompt" => CANONICAL_PROMPT
-      }
+      )
       if kind == "judge" && voter_id
         ids = Array(voter_ids)
         unless voter_id.is_a?(String) && ids.length == 3 && ids.uniq.length == 3 && ids.include?(voter_id) &&
@@ -170,14 +180,13 @@ module AdversarialReview
       round = state_data.fetch("revise_round")
       digests = state_data.fetch("current_target_digests")
       targets, inventory = current_targets_and_inventory(manifest, digests)
-      {
+      task_contract_fields(manifest, "assets/schemas/author-actions.json", []).merge(
         "schema_version" => 1,
         "run_id" => manifest.fetch("run_id"),
         "task_id" => "author-actions-parent-r#{round}-a#{attempt}",
         "role" => "author",
         "kind" => "author-actions",
         "authority" => "parent",
-        "schema" => "assets/schemas/author-actions.json",
         "artifact_digests" => JSON.parse(JSON.generate(digests)),
         "round" => round,
         "attempt" => attempt,
@@ -185,7 +194,7 @@ module AdversarialReview
         "inventory" => inventory,
         "review_evidence" => JSON.parse(JSON.generate(state_data.fetch("findings"))),
         "prompt" => "Parent-only author disposition bundle. Do not dispatch this task to a reviewer."
-      }
+      )
     end
 
     def canonical_task(manifest, state_data, task)
@@ -327,6 +336,37 @@ module AdversarialReview
         "assets/schemas/divergence.json" : "assets/schemas/attack.json"
     end
     private_class_method :schema_for
+
+    def required_checks_for(angle)
+      key = angle.start_with?("divergence-probe-") ? "divergence-probe" : angle
+      REQUIRED_CHECKS.fetch(key).map(&:dup)
+    rescue KeyError
+      raise Error, "required checks are not defined for the assigned angle"
+    end
+    private_class_method :required_checks_for
+
+    def task_contract_fields(manifest, schema, required_checks)
+      repository_root = manifest.fetch("repository").fetch("root")
+      canonical_repository = File.realpath(repository_root)
+      unless canonical_repository == repository_root && File.directory?(canonical_repository)
+        raise Error, "invalid repository root"
+      end
+      schema_path = File.realpath(File.join(AdversarialReview.root, schema))
+      skill_root = File.realpath(AdversarialReview.root)
+      unless schema_path.start_with?(skill_root + File::SEPARATOR) && File.file?(schema_path)
+        raise Error, "task schema escapes the loaded skill"
+      end
+      {
+        "repository_root" => canonical_repository,
+        "schema" => schema,
+        "schema_path" => schema_path,
+        "schema_sha256" => Digest::SHA256.file(schema_path).hexdigest,
+        "required_checks" => required_checks.map(&:dup)
+      }
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM
+      raise Error, "task handoff paths could not be resolved"
+    end
+    private_class_method :task_contract_fields
 
     def canonical_inventory(manifest, targets)
       inventory = manifest.fetch("inventory")

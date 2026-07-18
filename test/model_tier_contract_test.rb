@@ -152,6 +152,28 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adversarial_skill, "Critique mode never edits targets."
   end
 
+  def test_adversarial_skill_uses_progressive_disclosure_and_documents_generic_handoff
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+    angles = read("skills/general/adversarial-review/attack-angles.md")
+
+    refute_includes skill,
+                    "Load details from\n[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and\n[platform-adapters.md](platform-adapters.md)."
+    assert_includes skill,
+                    "Load `platform-adapters.md` only for executor selection or adapter troubleshooting."
+    assert_includes skill,
+                    "Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging."
+    assert_includes adapters, "repository_root"
+    assert_includes adapters, "schema_path"
+    assert_includes adapters, "schema_sha256"
+    assert_includes adapters, "Start the worker with its working directory set to `repository_root`"
+    assert_includes adapters, "verify `schema_sha256` before using `schema_path`"
+    assert_includes angles, "The control plane emits the exact authoritative `required_checks` array"
+    assert_includes angles, "Implementer is enabled only when a spec is present"
+    assert_includes angles, "Feasibility is enabled only when a plan is present"
+    assert_includes angles, "bounded scan of authoritative target prose"
+  end
+
   def test_limited_capacity_and_terminal_verdicts_are_deterministic
     code_skill = read("skills/codex-cursor/code-review/SKILL.md")
     code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
@@ -279,7 +301,8 @@ class ModelTierContractTest < Minitest::Test
     policy = "For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file."
 
     assert_includes skill, policy
-    assert_includes skill, "Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation."
+    assert_includes skill, "`--report-only` never authorizes revision."
+    refute_includes skill, "Repository writes require an explicit `--report-only`"
   end
 
   def test_adversarial_role_payload_contracts_are_normative
