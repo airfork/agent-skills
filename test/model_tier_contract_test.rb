@@ -399,6 +399,15 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adapters, "fixture-conformant"
     assert_includes adapters, "caller-supplied real dispatch evidence"
     assert_includes adapters, "Generic bundles are intended for host-native parallelism."
+    assert_includes adapters, "`pending_task_handoffs` is the normative dispatch surface"
+    assert_match(/verify `task_sha256`.*before parsing JSON.*before using.*cwd.*schema.*prompt/im, adapters)
+    assert_match(/read the task bytes exactly once/i, adapters)
+    assert_match(/schema.*installed skill root.*read.*once.*verify.*same.*bytes/im, adapters)
+    assert_match(/use the returned in-memory task and schema/i, adapters)
+    assert_match(/`pending_tasks`.*path inventory.*not.*dispatch/im, adapters)
+    assert_includes usage, "`pending_task_handoffs` is the normative dispatch surface"
+    assert_match(/verify `task_sha256`.*before parsing JSON/im, usage)
+    assert_includes skill, "`pending_task_handoffs`"
     refute_match(/public CLI.*direct.*serial/i, adapters)
     refute_includes usage, "Direct adapters dispatch validated tasks serially."
   end

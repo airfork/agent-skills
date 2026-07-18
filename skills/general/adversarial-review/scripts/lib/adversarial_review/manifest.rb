@@ -13,7 +13,15 @@ module AdversarialReview
 
     COMMON_TASKS = %w[tester assumptions-checker pre-mortem consistency-smells].freeze
     USER_SCOPE_BYTES = 65_536
-    USER_SCOPE = /(?:\b(?:the|a|an|each)\s+(?:end[- ]?user|user|operator|customer|administrator|admin)\b|\b(?:end[- ]?user|user|operator|customer|administrator|admin)[- ](?:facing|visible|workflow|journey|experience|action|error|recovery|setup)\b)/i.freeze
+    USER_ACTOR = /(?:end[- ]?users?|users?|operators?|customers?|administrators?|admins?)/i.freeze
+    USER_BEHAVIOR = /(?:
+      can|may|must|shall|should|will|
+      receives?|sees?|runs?|uses?|opens?|views?|reviews?|gets?|experiences?|recovers?|
+      configures?|submits?|creates?|updates?|deletes?|downloads?|uploads?|
+      navigates?|completes?|starts?|stops?|retries?|chooses?|selects?|enters?|
+      (?:is|are)\s+(?:shown|given|prompted|redirected|notified|warned|blocked|allowed)
+    )/ix.freeze
+    USER_BEHAVIOR_QUALIFIER = /(?:facing|visible|workflow|journey|experience|actions?|errors?|recovery|setup)/i.freeze
 
     class Error < StandardError
       attr_reader :code, :details, :exit_status
@@ -487,7 +495,7 @@ module AdversarialReview
     end
 
     def user_or_operator_scope_text?(contents)
-      bounded = contents.byteslice(0, USER_SCOPE_BYTES).to_s
+      bounded = contents.byteslice(0, USER_SCOPE_BYTES).to_s.scrub
       visible = []
       fence_character = nil
       fence_length = nil
@@ -499,15 +507,21 @@ module AdversarialReview
           end
           next
         end
+        next if line.start_with?("\t") || line.match?(/\A {4}/)
+
         opening = line.match(/\A {0,3}(`{3,}|~{3,})/)
         if opening
           fence_character = opening[1][0]
           fence_length = opening[1].length
           next
         end
-        visible << line.gsub(/`[^`\n]*`/, " ")
+        visible << line.gsub(/(`+)[^`\n]*\1/, " ")
       end
-      visible.join.match?(USER_SCOPE)
+      prose = visible.join
+      actor_behavior = /\b(?:the|a|an|each|every)?\s*#{USER_ACTOR.source}\b\s+#{USER_BEHAVIOR.source}\b/ix
+      qualified_behavior = /\b#{USER_ACTOR.source}[- ]#{USER_BEHAVIOR_QUALIFIER.source}\b/i
+      explicit_behavior = /\b(?:genuine|actual|real|concrete|expected|documented)\s+#{USER_ACTOR.source}[- ]?#{USER_BEHAVIOR_QUALIFIER.source}\b/i
+      prose.match?(actor_behavior) || prose.match?(qualified_behavior) || prose.match?(explicit_behavior)
     end
 
     def resolved_context_paths(built_targets, built_inventory)

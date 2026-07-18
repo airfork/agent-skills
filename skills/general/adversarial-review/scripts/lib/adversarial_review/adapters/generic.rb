@@ -4,6 +4,7 @@ module AdversarialReview
   module Adapters
     class Generic
       TASK_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/.freeze
+      HANDOFF_KEYS = %w[cwd schema_path schema_sha256 task_path task_sha256].freeze
 
       class Error < StandardError
         attr_reader :code
@@ -13,6 +14,103 @@ module AdversarialReview
           super(message)
         end
       end
+
+      def self.handoff_metadata(task_path, task, task_bytes)
+        {
+          "task_path" => task_path,
+          "task_sha256" => Digest::SHA256.hexdigest(task_bytes),
+          "cwd" => task.fetch("repository_root"),
+          "schema_path" => task.fetch("schema_path"),
+          "schema_sha256" => task.fetch("schema_sha256")
+        }
+      end
+
+      def self.read_authenticated_handoff(handoff)
+        unless handoff.is_a?(Hash) && handoff.keys.sort == HANDOFF_KEYS &&
+               handoff["task_path"].is_a?(String) && !handoff.fetch("task_path").empty? &&
+               handoff["task_sha256"].is_a?(String) &&
+               handoff.fetch("task_sha256").match?(/\A[0-9a-f]{64}\z/)
+          raise Error.new("invalid_handoff", "trusted task handoff metadata is malformed")
+        end
+
+        task_bytes = read_task_bytes_once(handoff.fetch("task_path"))
+        unless Digest::SHA256.hexdigest(task_bytes) == handoff.fetch("task_sha256")
+          raise Error.new("task_digest_mismatch", "task bytes do not match the trusted handoff digest")
+        end
+
+        task = begin
+          JSON.parse(task_bytes)
+        rescue JSON::ParserError => error
+          raise Error.new("invalid_task_json", "authenticated task JSON is invalid: #{error.message}")
+        end
+        unless task.is_a?(Hash) &&
+               task["repository_root"] == handoff["cwd"] &&
+               task["schema_path"] == handoff["schema_path"] &&
+               task["schema_sha256"] == handoff["schema_sha256"]
+          raise Error.new("invalid_handoff", "authenticated task fields do not match trusted handoff metadata")
+        end
+        schema = read_authenticated_schema!(handoff)
+        {"task" => task, "schema" => schema}
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM => error
+        raise Error.new("task_unavailable", "task handoff is unavailable: #{error.class.name}")
+      end
+
+      def self.read_task_bytes_once(task_path)
+        unless File.absolute_path(task_path) == task_path
+          raise Error.new("invalid_handoff", "task handoff path must be absolute")
+        end
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(task_path, flags) do |file|
+          stat = file.stat
+          unless stat.file?
+            raise Error.new("task_unavailable", "task handoff is not a regular file")
+          end
+          if stat.size > Atomic::MAX_JSON_BYTES
+            raise Error.new("task_too_large", "task handoff exceeds the JSON size limit")
+          end
+          bytes = file.read(Atomic::MAX_JSON_BYTES + 1)
+          if bytes.bytesize > Atomic::MAX_JSON_BYTES
+            raise Error.new("task_too_large", "task handoff exceeds the JSON size limit")
+          end
+          bytes
+        end
+      end
+      private_class_method :read_task_bytes_once
+
+      def self.read_authenticated_schema!(handoff)
+        cwd = File.realpath(handoff.fetch("cwd"))
+        skill_root = File.realpath(AdversarialReview.root)
+        schema_path = File.realpath(handoff.fetch("schema_path"))
+        unless cwd == handoff.fetch("cwd") && File.directory?(cwd) &&
+               schema_path == handoff.fetch("schema_path") && File.file?(schema_path) &&
+               schema_path.start_with?(skill_root + File::SEPARATOR)
+          raise Error.new("invalid_handoff", "authenticated handoff paths are not canonical")
+        end
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        schema_bytes = File.open(schema_path, flags) do |file|
+          stat = file.stat
+          unless stat.file?
+            raise Error.new("schema_unavailable", "schema handoff is not a regular file")
+          end
+          if stat.size > Atomic::MAX_JSON_BYTES
+            raise Error.new("schema_too_large", "schema handoff exceeds the JSON size limit")
+          end
+          bytes = file.read(Atomic::MAX_JSON_BYTES + 1)
+          if bytes.bytesize > Atomic::MAX_JSON_BYTES
+            raise Error.new("schema_too_large", "schema handoff exceeds the JSON size limit")
+          end
+          bytes
+        end
+        unless Digest::SHA256.hexdigest(schema_bytes) == handoff.fetch("schema_sha256")
+          raise Error.new("schema_digest_mismatch", "schema bytes do not match the trusted handoff digest")
+        end
+        JSON.parse(schema_bytes)
+      rescue JSON::ParserError => error
+        raise Error.new("invalid_schema_json", "authenticated schema JSON is invalid: #{error.message}")
+      end
+      private_class_method :read_authenticated_schema!
 
       def run(task, run_dir)
         state = State.load(run_dir)
@@ -29,14 +127,13 @@ module AdversarialReview
           end
           canonical_task
         end
+        dispatch = state.read_task_bundle(task.fetch("task_id")) do |_manifest, _state_data, emitted, task_bytes|
+          self.class.handoff_metadata(task_path, emitted, task_bytes)
+        end
         {
           "status" => "awaiting-results",
           "task_path" => task_path,
-          "dispatch" => {
-            "cwd" => task.fetch("repository_root"),
-            "schema_path" => task.fetch("schema_path"),
-            "schema_sha256" => task.fetch("schema_sha256")
-          },
+          "dispatch" => dispatch,
           "capability_declaration_template" => task.fetch("capability_declaration_template"),
           "next_action" => "Return a schema-shaped result and parent capability declaration."
         }

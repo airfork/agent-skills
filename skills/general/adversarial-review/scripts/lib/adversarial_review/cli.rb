@@ -908,14 +908,9 @@ module AdversarialReview
       end
       pending_task_handoffs = pending.map do |task_path|
         task_id = File.basename(task_path, ".json")
-        task = nil
-        state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
-        {
-          "task_path" => task_path,
-          "cwd" => task.fetch("repository_root"),
-          "schema_path" => task.fetch("schema_path"),
-          "schema_sha256" => task.fetch("schema_sha256")
-        }
+        state.read_task_bundle(task_id) do |_manifest, _data, task, task_bytes|
+          Adapters::Generic.handoff_metadata(task_path, task, task_bytes)
+        end
       end
       parent_pending = pending.any? do |path|
         task_id = File.basename(path, ".json")

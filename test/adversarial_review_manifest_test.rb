@@ -47,27 +47,39 @@ class AdversarialReviewManifestTest < Minitest::Test
     end
   end
 
-  def test_user_task_is_enabled_only_for_bounded_user_or_operator_scope
-    user_facing = <<~MARKDOWN
-      # Command behavior
-      ## Overview
-      The operator runs `review start` and sees an actionable error message.
-    MARKDOWN
-    with_repository(files: {"docs/spec.md" => user_facing}) do |repository|
-      manifest = build_manifest(repository, spec: "docs/spec.md")
+  def test_user_task_recognizes_plural_and_qualified_behavioral_prose
+    examples = [
+      "Users receive an actionable error message.",
+      "Operators see the retry control after a failed request.",
+      "The recovery flow covers genuine user actions.",
+      "A customer can retry without losing entered data."
+    ]
 
-      assert_equal spec_tasks.insert(2, "user"), manifest.fetch("enabled_tasks")
+    examples.each_with_index do |behavior, index|
+      with_repository(files: {"docs/spec-#{index}.md" => "# Behavior\n#{behavior}\n"}) do |repository|
+        manifest = build_manifest(repository, spec: "docs/spec-#{index}.md")
+
+        assert_equal spec_tasks.insert(2, "user"), manifest.fetch("enabled_tasks"), behavior
+      end
     end
+  end
 
-    non_user = <<~MARKDOWN
-      # Storage engine
-      The internal scheduler stores cursor offsets. A code example says
-      `user_id = record.fetch("user_id")`. This is internal storage state only.
-    MARKDOWN
-    with_repository(files: {"docs/spec.md" => non_user}) do |repository|
-      manifest = build_manifest(repository, spec: "docs/spec.md")
+  def test_user_task_rejects_internal_nouns_and_every_markdown_code_form
+    examples = {
+      "user-table" => "The user table stores opaque identifiers.",
+      "operator-module" => "The operator module normalizes internal state.",
+      "fenced" => "```text\nUsers receive an actionable error message.\n```",
+      "inline" => "`Operators see the retry control.`",
+      "space-indented" => "    Users receive an actionable error message.",
+      "tab-indented" => "\tOperators see the retry control."
+    }
 
-      assert_equal spec_tasks, manifest.fetch("enabled_tasks")
+    examples.each do |name, prose|
+      with_repository(files: {"docs/#{name}.md" => "# Internal design\n#{prose}\n"}) do |repository|
+        manifest = build_manifest(repository, spec: "docs/#{name}.md")
+
+        assert_equal spec_tasks, manifest.fetch("enabled_tasks"), name
+      end
     end
   end
 

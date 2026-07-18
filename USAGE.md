@@ -95,10 +95,14 @@ the result to Generic bundles. No post-content failure changes vendor.
 
 ### Lifecycle
 
-1. Run `start`; retain the returned `run_dir` and task paths. Every generic task
-   supplies canonical `repository_root`, absolute `schema_path`,
-   `schema_sha256`, and authoritative `required_checks`. Dispatch with the
-   worker cwd set to `repository_root` and verify the schema digest first.
+1. Run `start`; retain `run_dir`. `pending_task_handoffs` is the normative dispatch surface;
+   `pending_tasks` is path inventory for compatibility, not dispatch authority.
+   Read each task's bytes exactly once and verify `task_sha256` before parsing JSON
+   or using task-controlled fields. Then match cwd/schema metadata to the trusted
+   handoff and set the worker cwd. Keep the schema under the installed skill root;
+   read it once, verify `schema_sha256`, and parse/use those same in-memory bytes.
+   Never reopen task/schema paths for dispatch. A task mismatch fails as
+   `task_digest_mismatch`.
 2. For each generic reviewer task, return its closed-schema result and capability
    declaration with `ingest --run-dir RUN --task ID --result RESULT.json
    --capabilities CAPABILITIES.json`. Return exactly the assigned

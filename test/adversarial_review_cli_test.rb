@@ -235,6 +235,48 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_public_start_routes_only_visible_behavioral_prose_to_the_user_angle
+    cases = {
+      "behavior" => [
+        <<~MARKDOWN,
+          # Product behavior
+          Users receive a recovery link. Operators see an audit-safe explanation.
+          The workflow documents genuine user actions.
+        MARKDOWN
+        true
+      ],
+      "internal-and-code" => [
+        <<~MARKDOWN,
+          # Internal design
+          The user table joins the operator module.
+          `Users receive a recovery link.`
+          ```text
+          Operators see an audit-safe explanation.
+          ```
+              Users receive a recovery link.
+          \tOperators see an audit-safe explanation.
+        MARKDOWN
+        false
+      ]
+    }
+
+    cases.each do |name, (spec, expected_user_task)|
+      with_repository(files: {"docs/spec.md" => spec}) do |repository|
+        run_dir = File.join(repository, ".git", "public-user-routing-#{name}")
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--executor", "generic", "--run-dir", run_dir
+        )
+        assert status.success?, stderr
+        task_ids = JSON.parse(stdout).fetch("pending_task_handoffs").map do |handoff|
+          File.basename(handoff.fetch("task_path"), ".json")
+        end
+
+        assert_equal expected_user_task, task_ids.any? { |task_id| task_id.start_with?("attack-user-") }, name
+      end
+    end
+  end
+
   def test_public_cli_aliases_and_direct_inherit_refusal
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "alias-run")
@@ -1024,6 +1066,8 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal File.realpath(repository), handoff_metadata.fetch("cwd")
       assert_equal Digest::SHA256.file(handoff_metadata.fetch("schema_path")).hexdigest,
                    handoff_metadata.fetch("schema_sha256")
+      assert_equal Digest::SHA256.file(task_path).hexdigest,
+                   handoff_metadata.fetch("task_sha256")
       task = JSON.parse(File.read(task_path))
 
       ingest_task_result(run_dir, capabilities, task, empty_result_for(task))
@@ -1032,6 +1076,67 @@ class AdversarialReviewCliTest < Minitest::Test
         .dig("execution", "tasks", task.fetch("task_id"))
       assert_equal File.binread(task_path).bytesize, execution.dig("usage", "prompt_bytes")
       assert_equal 1, execution.fetch("attempts")
+    end
+  end
+
+  def test_generic_dispatch_rejects_task_tampering_before_json_parse_or_field_use
+    with_repository(files: {"docs/spec.md" => "# Product spec\nUsers receive a result.\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "generic-dispatch-tamper")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "generic", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      handoff = JSON.parse(stdout).fetch("pending_task_handoffs").first
+      File.write(handoff.fetch("task_path"), '{"repository_root":"/tmp/attacker"')
+
+      error = assert_raises(AdversarialReview::Adapters::Generic::Error) do
+        AdversarialReview::Adapters::Generic.read_authenticated_handoff(handoff)
+      end
+
+      assert_equal "task_digest_mismatch", error.code
+    end
+  end
+
+  def test_generic_dispatch_uses_one_authenticated_schema_read_under_the_skill_root
+    Dir.mktmpdir("generic-authenticated-schema") do |root|
+      repository = File.join(root, "repository")
+      skill_root = File.join(root, "adversarial-review")
+      schema_path = File.join(skill_root, "assets", "schemas", "attack.json")
+      task_path = File.join(root, "task.json")
+      FileUtils.mkdir_p(repository)
+      FileUtils.mkdir_p(File.dirname(schema_path))
+      File.write(schema_path, JSON.generate("type" => "object") + "\n")
+      task = {
+        "repository_root" => File.realpath(repository),
+        "schema_path" => File.realpath(schema_path),
+        "schema_sha256" => Digest::SHA256.file(schema_path).hexdigest,
+        "prompt" => "Inspect the repository."
+      }
+      File.write(task_path, JSON.generate(task) + "\n")
+      handoff = {
+        "task_path" => File.realpath(task_path),
+        "task_sha256" => Digest::SHA256.file(task_path).hexdigest,
+        "cwd" => task.fetch("repository_root"),
+        "schema_path" => task.fetch("schema_path"),
+        "schema_sha256" => task.fetch("schema_sha256")
+      }
+      loaded = AdversarialReview.stub(:root, skill_root) do
+        AdversarialReview::Adapters::Generic.read_authenticated_handoff(handoff)
+      end
+
+      assert_equal task, loaded.fetch("task")
+      assert_equal({"type" => "object"}, loaded.fetch("schema"))
+
+      File.write(schema_path, '{"type":')
+      assert_equal({"type" => "object"}, loaded.fetch("schema"),
+                   "the authenticated in-memory schema must not reopen the changed path")
+      error = AdversarialReview.stub(:root, skill_root) do
+        assert_raises(AdversarialReview::Adapters::Generic::Error) do
+          AdversarialReview::Adapters::Generic.read_authenticated_handoff(handoff)
+        end
+      end
+      assert_equal "schema_digest_mismatch", error.code
     end
   end
 
@@ -2170,6 +2275,8 @@ class AdversarialReviewCliTest < Minitest::Test
         task_path = File.join(File.realpath(run_dir), "tasks", "#{task.fetch("task_id")}.json")
         assert_equal "awaiting-results", result.fetch("status")
         assert_equal task_path, result.fetch("task_path")
+        assert_equal Digest::SHA256.file(task_path).hexdigest,
+                     result.dig("dispatch", "task_sha256")
         assert_equal task.fetch("capability_declaration_template"),
                      result.fetch("capability_declaration_template")
         refute_empty result.fetch("next_action")

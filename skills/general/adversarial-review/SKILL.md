@@ -49,9 +49,10 @@ mode/output values are rejected regardless of argument order.
 
 ## Run
 
-1. Start; retain `run_dir` and tasks. The public CLI uses Generic bundles for
-   fresh read-only host-native parallel work. Each bundle carries its canonical
-   repository root, absolute schema path, schema digest, and required checks.
+1. Start and retain `run_dir`. Dispatch only `pending_task_handoffs`; legacy
+   `pending_tasks` is path inventory. Read task bytes once, verify the trusted
+   `task_sha256` before parsing or using task fields. Read the skill-contained
+   schema once, verify its digest, and use the returned in-memory task/schema.
 2. `ingest` each result/declaration. `continue` until results, actions, or
    terminal state; submit decisions only via `continue --actions ACTIONS.json`.
 3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
@@ -62,8 +63,8 @@ mode/output values are rejected regardless of argument order.
 
 When Ruby is unavailable, do not invent durable state. Manually follow
 [attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
-`assets/schemas/`; preserve immutable IDs, `UNPROVEN` evidence gaps,
-and parent-only decisions. State: `Scripting unavailable; capabilities degraded.`
+`assets/schemas/`; preserve immutable IDs,
+`UNPROVEN` evidence gaps, and parent-only decisions. State: `Scripting unavailable; capabilities degraded.`
 Disclose missing automation, never switch to a weaker direct executor, and
 never claim scripted crash recovery or resumability.
 

@@ -54,12 +54,22 @@ identity, current target digests, capability evidence, and state transitions.
 Generic mode can preserve full review semantics even when a host cannot expose
 direct CLI telemetry; disclose missing runtime or token observations.
 
-The task bundle is the complete worker handoff. It carries canonical
-`repository_root`, absolute canonical `schema_path`, `schema_sha256`, and the
-authoritative `required_checks`. Start the worker with its working directory set to `repository_root` and verify `schema_sha256` before using `schema_path`.
-Do not resolve the schema relative to the reviewed repository. Return every and
-only required check in `checks_completed`; the control plane permits one
-durably recorded repair for missing or invented checks, then fails closed.
+`pending_task_handoffs` is the normative dispatch surface. Its trusted
+`task_sha256` is computed from the exact task bytes while State holds its lock.
+`pending_tasks` is a compatibility path inventory, not a dispatch authorization.
+Read the task bytes exactly once, verify `task_sha256` before parsing JSON and
+before using task-controlled cwd, schema, or prompt fields. Reject a mismatch as
+`task_digest_mismatch`; never take the expected digest from the task file.
+
+After authentication, require the parsed `repository_root`, `schema_path`, and
+`schema_sha256` to equal the trusted handoff metadata. The schema must stay under
+the installed skill root: read it once, verify its digest, then parse and use
+those same bytes. Use the returned in-memory task and schema; do not reopen their
+paths for dispatch. Start the worker with its working directory set to `repository_root`.
+Within that authenticated read, verify `schema_sha256` before using `schema_path`.
+Do not resolve the schema relative to the reviewed repository.
+Return every and only authoritative `required_checks` in `checks_completed`;
+the control plane permits one durable repair, then fails closed.
 
 ## Codex Adapter
 
