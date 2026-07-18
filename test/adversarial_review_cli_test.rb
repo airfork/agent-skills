@@ -10,6 +10,303 @@ require_relative "support/adversarial_review_helper"
 class AdversarialReviewCliTest < Minitest::Test
   include AdversarialReviewHelper
 
+  CLI = File.join(SKILL, "scripts", "adversarial-review")
+
+  def test_public_cli_help_and_unknown_subcommand_have_stable_output
+    stdout, stderr, status = Open3.capture3(CLI, "--help")
+    assert status.success?, stderr
+    assert_empty stderr
+    assert_includes stdout, "start"
+    assert_includes stdout, "continue"
+    assert_includes stdout, "ingest"
+    assert_includes stdout, "status"
+
+    stdout, stderr, status = Open3.capture3(CLI, "unknown")
+    assert_equal 2, status.exitstatus
+    assert_empty stdout
+    error = JSON.parse(stderr)
+    assert_equal "invocation_error", error.fetch("code")
+    refute_includes stderr, "backtrace"
+  end
+
+  def test_public_cli_generic_start_status_and_duplicate_run_refusal
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "cli-run")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--tier", "default", "--mode", "critique", "--output", "chat",
+        "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+        "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      assert_empty stderr
+      started = JSON.parse(stdout)
+      assert_equal "generic", started.fetch("selected_executor")
+      assert_equal "attacking", started.fetch("stage")
+      assert_equal "awaiting-results", started.fetch("next_action")
+      refute_empty started.fetch("pending_tasks")
+
+      stdout, stderr, status = run_public_cli("status", "--run-dir", run_dir, "--json")
+      assert status.success?, stderr
+      assert_empty stderr
+      state = JSON.parse(stdout)
+      assert_equal started.fetch("run_id"), state.fetch("run_id")
+      assert_equal "attacking", state.fetch("stage")
+      assert_equal started.fetch("pending_tasks").sort,
+                   state.fetch("pending_tasks").sort
+
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "generic", "--run-dir", run_dir
+      )
+      assert_equal 3, status.exitstatus
+      assert_empty stdout
+      assert_equal "run_exists", JSON.parse(stderr).fetch("code")
+      assert_equal started.fetch("run_id"),
+                   AdversarialReview::State.load(run_dir).to_h.fetch("run_id")
+    end
+  end
+
+  def test_public_cli_aliases_and_direct_inherit_refusal
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "alias-run")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--report-only", "--executor", "generic", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      manifest = AdversarialReview::State.load(run_dir).manifest_snapshot
+      assert_equal "critique", manifest.fetch("mode")
+      assert_equal "both", manifest.fetch("output")
+
+      %w[codex claude cursor gemini].each do |executor|
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--executor", executor, "--model", "inherit", "--effort", "inherit",
+          "--run-dir", File.join(repository, ".git", "blocked-#{executor}-run")
+        )
+        assert_equal 4, status.exitstatus, executor
+        assert_empty stdout, executor
+        assert_equal "capability_blocked", JSON.parse(stderr).fetch("code"), executor
+      end
+    end
+  end
+
+  def test_public_cli_subcommand_help_uses_stdout_without_progress_noise
+    %w[start continue ingest status].each do |command|
+      stdout, stderr, status = run_public_cli(command, "--help")
+      assert status.success?, command
+      assert_empty stderr, command
+      assert_includes stdout, "Usage:", command
+      assert_includes stdout, "--run-dir", command unless command == "start"
+    end
+  end
+
+  def test_auto_never_selects_another_installed_vendor_and_falls_back_before_content
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-auto") do |directory|
+        log = File.join(directory, "claude.log")
+        claude = write_fake_executable(directory, name: "claude-fake", body: <<~RUBY)
+          \#!#{RbConfig.ruby}
+          File.write(ENV.fetch("CROSS_VENDOR_LOG"), "executed")
+          exit 0
+        RUBY
+        env = {
+          "ADVERSARIAL_REVIEW_HOST" => "gemini",
+          "ADVERSARIAL_REVIEW_GEMINI_CLI" => File.join(directory, "missing-gemini"),
+          "ADVERSARIAL_REVIEW_CLAUDE_CLI" => claude,
+          "CROSS_VENDOR_LOG" => log
+        }
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--executor", "auto", "--model", "gemini-review", "--effort", "high",
+          "--run-dir", File.join(repository, ".git", "auto-run"), env: env
+        )
+        assert status.success?, stderr
+        assert_empty stderr
+        assert_equal "generic", JSON.parse(stdout).fetch("selected_executor")
+        refute File.exist?(log), "auto selection executed a different vendor"
+      end
+    end
+  end
+
+  def test_public_cli_invalid_result_and_explicit_adapter_failure_exit_codes
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "invalid-ingest-run")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "generic", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      task_path = JSON.parse(stdout).fetch("pending_tasks").first
+      task = JSON.parse(File.read(task_path))
+      result_path = File.join(repository, ".git", "invalid-result.json")
+      capabilities = File.join(repository, ".git", "capabilities.json")
+      File.write(result_path, "{}\n")
+      File.write(capabilities, "{}\n")
+
+      stdout, stderr, status = run_public_cli(
+        "ingest", "--run-dir", run_dir, "--task", task.fetch("task_id"),
+        "--result", result_path, "--capabilities", capabilities
+      )
+      assert_equal 3, status.exitstatus
+      assert_empty stdout
+      assert_equal "invalid_result", JSON.parse(stderr).fetch("code")
+
+      missing = File.join(repository, ".git", "missing-codex")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--executor", "codex", "--model", "codex-review", "--effort", "high",
+        "--run-dir", File.join(repository, ".git", "adapter-failure-run"),
+        env: {"ADVERSARIAL_REVIEW_CODEX_CLI" => missing}
+      )
+      assert_equal 4, status.exitstatus
+      assert_empty stdout
+      error = JSON.parse(stderr)
+      assert_equal "capability_blocked", error.fetch("code")
+      refute_includes stderr, "OPENAI_API_KEY"
+      refute_includes stderr, "backtrace"
+
+      Dir.mktmpdir("adversarial-review-exit-five") do |directory|
+        fake = write_invalid_role_codex(directory)
+        failed_run_dir = File.join(repository, ".git", "invalid-role-run")
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--executor", "codex", "--model", "codex-review", "--effort", "high",
+          "--run-dir", failed_run_dir,
+          env: {"ADVERSARIAL_REVIEW_CODEX_CLI" => fake}
+        )
+        assert_equal 5, status.exitstatus
+        assert_empty stdout
+        assert_equal "adapter_execution_failed", JSON.parse(stderr).fetch("code")
+        failed_state = AdversarialReview::State.load(failed_run_dir).to_h
+        assert_equal 1, failed_state.fetch("emitted_tasks").length
+        assert_empty failed_state.fetch("ingested_results")
+      end
+    end
+  end
+
+  def test_terminal_output_policy_separates_chat_and_file_destinations
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      capability_path = File.join(repository, ".git", "capabilities-output.json")
+      File.write(capability_path, "{}\n")
+      {"chat" => false, "file" => true}.each do |output, writes_file|
+        manifest = AdversarialReview::Manifest.build(
+          repository: repository, spec: "docs/spec.md", tier: "default",
+          mode: "revise", output: output, executor: "generic",
+          model: "inherit", effort: "inherit"
+        )
+        run_dir = File.join(repository, ".git", "output-#{output}")
+        state = AdversarialReview::State.create(run_dir, manifest)
+        %w[attacking deduplicating culling awaiting-author resolving complete].each do |stage|
+          state.transition_to(stage)
+        end
+        report = File.join(repository, "#{output}-review.md")
+        arguments = ["continue", "--run-dir", run_dir, "--capabilities", capability_path]
+        arguments.concat(["--report", report]) if writes_file
+        stdout, stderr, status = run_public_cli(*arguments)
+        assert status.success?, stderr
+        payload = JSON.parse(stdout)
+        if writes_file
+          refute payload.key?("summary")
+          assert_equal report, payload.fetch("report_path")
+          assert File.file?(report)
+        else
+          assert payload.key?("summary")
+          refute File.exist?(report)
+          refute payload.key?("report_path")
+        end
+      end
+    end
+  end
+
+  def test_public_cli_complete_generic_zero_finding_lifecycle
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "lifecycle-run")
+      report = File.join(repository, "review.md")
+      capability_path = File.join(repository, ".git", "capabilities.json")
+      File.write(capability_path, "{}\n")
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--tier", "default", "--mode", "revise", "--output", "both",
+        "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+        "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      response = JSON.parse(stdout)
+
+      ingest_pending_tasks(run_dir, capability_path) do |task|
+        case task.fetch("kind", task.fetch("role") == "attacker" ? "attack" : nil)
+        when "attack"
+          {
+            "schema_version" => 1, "run_id" => task.fetch("run_id"),
+            "task_id" => task.fetch("task_id"),
+            "artifact_digests" => task.fetch("artifact_digests"),
+            "angle" => task.fetch("angle"), "checks_completed" => ["assigned checks"],
+            "findings" => [], "metrics" => {}, "notes" => []
+          }
+        else
+          raise "unexpected initial task"
+        end
+      end
+
+      expected_stages = %w[deduplicating culling awaiting-author resolving complete]
+      actions_path = nil
+      expected_stages.each do |expected_stage|
+        arguments = ["continue", "--run-dir", run_dir, "--capabilities", capability_path]
+        arguments.concat(["--actions", actions_path]) if actions_path
+        arguments.concat(["--report", report]) if expected_stage == "complete"
+        stdout, stderr, status = run_public_cli(*arguments)
+        assert status.success?, stderr
+        response = JSON.parse(stdout)
+        assert_equal expected_stage, response.fetch("stage")
+        break if expected_stage == "complete"
+
+        if expected_stage == "awaiting-author"
+          state = AdversarialReview::State.load(run_dir)
+          snapshot = state.to_h
+          task_id = snapshot.fetch("emitted_tasks").find do |_id, record|
+            record.fetch("kind") == "author-actions"
+          end.fetch(0)
+          task = nil
+          state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+          actions_path = File.join(repository, ".git", "author-actions.json")
+          File.write(actions_path, JSON.generate(
+            "schema_version" => 1, "run_id" => task.fetch("run_id"),
+            "task_id" => task.fetch("task_id"),
+            "artifact_digests" => task.fetch("artifact_digests"),
+            "actions" => [], "notes" => []
+          ) + "\n")
+          next
+        end
+        actions_path = nil
+        ingest_pending_tasks(run_dir, capability_path) do |task|
+          base = {
+            "schema_version" => 1, "run_id" => task.fetch("run_id"),
+            "task_id" => task.fetch("task_id"),
+            "artifact_digests" => task.fetch("artifact_digests"), "notes" => []
+          }
+          case task.fetch("kind")
+          when "dedupe" then base.merge("groups" => [])
+          when "judge" then base.merge("verdicts" => [], "metrics" => {})
+          when "author-actions" then base.merge("actions" => [])
+          when "resolution"
+            base.merge("checks" => [], "new_findings" => [], "metrics" => {})
+          else raise "unexpected task #{task.fetch("kind")}"
+          end
+        end
+      end
+
+      assert_equal "DEGRADED CAPABILITIES", response.dig("summary", "verdict")
+      assert_includes response.dig("summary", "degraded_capabilities"), "fresh_context"
+      assert_operator response.dig("summary", "provenance", "usage", "prompt_bytes"), :>, 0
+      assert_nil response.dig("summary", "provenance", "usage", "input_tokens")
+      assert File.file?(report)
+      assert_includes File.read(report), response.dig("summary", "run_id")
+      assert_equal "complete", AdversarialReview::State.load(run_dir).to_h.fetch("stage")
+    end
+  end
+
   def test_judge_schema_rejects_duplicate_subjects_and_whitespace_refutation_evidence
     verdict = {
       "candidate_id" => "C-tester-1-1",
@@ -865,6 +1162,68 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   private
+
+  def run_public_cli(*arguments, env: {})
+    Open3.capture3(env, CLI, *arguments)
+  end
+
+  def write_invalid_role_codex(directory)
+    counter = File.join(directory, "runs")
+    body = <<~RUBY
+      \#!#{RbConfig.ruby}
+      require "json"
+      if ARGV == ["exec", "--help"]
+        puts "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
+        exit 0
+      end
+      if ARGV == ["--version"]
+        puts "codex-cli contract-vNext"
+        exit 0
+      end
+      counter = #{counter.inspect}
+      sequence = File.file?(counter) ? Integer(File.read(counter)) : 0
+      File.write(counter, String(sequence + 1))
+      model = ARGV.fetch(ARGV.index("--model") + 1)
+      effort_flag = ARGV.find { |value| value.start_with?("model_reasoning_effort=") }
+      effort = effort_flag.split("=", 2).last.delete('"')
+      output_path = ARGV.fetch(ARGV.index("--output-last-message") + 1)
+      payload = sequence.zero? ? {"ok" => true} : {}
+      File.open(output_path, File::WRONLY | File::TRUNC) do |file|
+        file.write(JSON.generate(payload))
+      end
+      puts JSON.generate({
+        "type" => "runtime.start", "session_id" => "fake-" + String(sequence),
+        "fresh" => true, "sandbox" => "read-only", "workdir" => Dir.pwd,
+        "model" => model, "effort" => effort
+      })
+      puts JSON.generate({
+        "type" => "turn.completed",
+        "usage" => {"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
+      })
+    RUBY
+    write_fake_executable(directory, name: "codex-invalid-role", body: body)
+  end
+
+  def ingest_pending_tasks(run_dir, capability_path)
+    state = AdversarialReview::State.load(run_dir)
+    snapshot = state.to_h
+    pending = snapshot.fetch("emitted_tasks").keys.reject do |task_id|
+      snapshot.fetch("ingested_results").key?(task_id)
+    end
+    pending.sort.each do |task_id|
+      task = nil
+      state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+      result_path = File.join(File.dirname(run_dir), "#{task_id}.result.json")
+      File.write(result_path, JSON.generate(yield(task)) + "\n")
+      stdout, stderr, status = run_public_cli(
+        "ingest", "--run-dir", run_dir, "--task", task_id,
+        "--result", result_path, "--capabilities", capability_path
+      )
+      assert status.success?, "#{task_id}: #{stderr}"
+      assert_empty stderr
+      assert_equal task_id, JSON.parse(stdout).fetch("task_id")
+    end
+  end
 
   def build_manifest(repository, spec: nil, plan: nil, context_paths: [], tier: "default")
     AdversarialReview::Manifest.build(
