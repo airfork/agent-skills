@@ -425,7 +425,6 @@ module AdversarialReview
           record["cli_version"] = @cli_version
           if (contract_error = version_contract_error)
             error_code = contract_error
-            fatal = true
             return candidate_attempt_result(selected, fatal, error_code, results, usage)
           end
           @capability_probe = {

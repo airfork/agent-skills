@@ -1025,6 +1025,138 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def test_cursor_can_reject_primary_version_contract_then_select_supported_alias
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-version-fallback") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        File.rename(alias_path, File.join(bin, "cursor-agent"))
+        write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high", cli_version: "cursor-agent unsupported-primary"
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", result.status
+        records = fake_cli_records(log)
+        assert_equal %w[help version help version run run],
+                     records.map { |record| record.fetch("kind") }
+        assert_equal 1, records.count { |record| record.fetch("argv").include?("REVIEWED SECRET") }
+        attempts = result.runtime_provenance.fetch("candidate_attempts")
+        assert_equal ["unsupported_version_contract", nil],
+                     attempts.map { |attempt| attempt["error_code"] }
+        assert_equal ["rejected", "selected"], attempts.map { |attempt| attempt.fetch("status") }
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_cursor_can_reject_primary_effort_contract_then_select_supported_alias
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-effort-fallback") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        File.rename(alias_path, File.join(bin, "cursor-agent"))
+        write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        klass = Class.new(AdversarialReview::Adapters::Cursor) do
+          private
+
+          def adapter_name
+            "cursor"
+          end
+
+          def version_contract_error
+            return "unsupported_effort_contract" if File.basename(@pinned_executable.path) == "agent"
+            super
+          end
+        end
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = klass.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", result.status
+        assert_equal %w[help version help version run run],
+                     fake_cli_records(log).map { |record| record.fetch("kind") }
+        attempt_errors = result.runtime_provenance.fetch("candidate_attempts").map do |attempt|
+          attempt["error_code"]
+        end
+        assert_equal ["unsupported_effort_contract", nil], attempt_errors
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_cursor_all_unsupported_candidates_return_bounded_generic_provenance
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-all-unsupported") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high", cli_version: "cursor-agent unsupported-alias"
+        )
+        File.rename(alias_path, File.join(bin, "cursor-agent"))
+        write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high", cli_version: "cursor-agent unsupported-primary"
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "generic", result.status
+        assert_equal "unsupported_version_contract", result.error_code
+        assert_normalized_capabilities(result.capabilities, "all Cursor candidates unsupported")
+        assert_equal %w[help version help version],
+                     fake_cli_records(log).map { |record| record.fetch("kind") }
+        attempts = result.runtime_provenance.fetch("candidate_attempts")
+        assert_equal 2, attempts.length
+        assert attempts.all? { |attempt| attempt.fetch("status") == "rejected" }
+        assert attempts.all? do |attempt|
+          attempt.fetch("error_code") == "unsupported_version_contract"
+        end
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
   def test_cursor_and_gemini_never_downgrade_ultra_to_high
     %w[cursor gemini].each do |provider|
       result, records = run_direct_adapter_case(provider, tier: "ultra")
