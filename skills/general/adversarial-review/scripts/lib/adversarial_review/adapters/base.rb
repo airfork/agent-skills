@@ -40,8 +40,20 @@ module AdversarialReview
         cache_creation_input_tokens output_tokens reasoning_tokens total_tokens
       ].freeze
       MAX_EXECUTABLE_CANDIDATES = 2
+      ELIGIBILITY_ERROR_CODES = %w[
+        capability_probe_failed version_probe_failed unsupported_tier
+        unsupported_version_contract unsupported_effort_contract capabilities_degraded
+        runtime_selection_mismatch structured_output_unattested
+        capability_attestation_invalid independent_vote_unattested
+        runner_error preflight_failed preflight_attestation_invalid
+        runtime_model_mismatch runtime_effort_mismatch dispatch_capability_invalid
+      ].freeze
 
       class << self
+        def eligibility_error?(code)
+          ELIGIBILITY_ERROR_CODES.include?(code)
+        end
+
         def direct_contracts
           DIRECT_SUPPORT.keys.sort.flat_map do |adapter|
             TIERS.map do |tier|

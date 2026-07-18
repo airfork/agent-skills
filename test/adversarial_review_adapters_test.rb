@@ -11,6 +11,19 @@ require_relative "support/adversarial_review_helper"
 class AdversarialReviewAdaptersTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_adapter_base_owns_shared_eligibility_error_vocabulary
+    %w[
+      capability_probe_failed version_probe_failed unsupported_tier
+      unsupported_version_contract unsupported_effort_contract capabilities_degraded
+      runtime_selection_mismatch structured_output_unattested
+    ].each do |code|
+      assert AdversarialReview::Adapters::Base.eligibility_error?(code), code
+    end
+    %w[invalid_result process_failed process_output_truncated adapter_error].each do |code|
+      refute AdversarialReview::Adapters::Base.eligibility_error?(code), code
+    end
+  end
+
   def test_cursor_adapter_constant_is_loaded
     assert_equal "AdversarialReview::Adapters::Cursor",
                  AdversarialReview::Adapters::Cursor.name

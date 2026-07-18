@@ -33,11 +33,11 @@ module AdversarialReview
     TRANSITIONS = {
       "prepared" => %w[attacking].freeze,
       "attacking" => %w[deduplicating].freeze,
-      "deduplicating" => %w[culling].freeze,
+      "deduplicating" => %w[culling culling-new-findings].freeze,
       "culling" => %w[awaiting-author complete].freeze,
       "awaiting-author" => %w[resolving].freeze,
       "resolving" => %w[fresh-sweep arbitrating complete did-not-converge].freeze,
-      "fresh-sweep" => %w[culling-new-findings].freeze,
+      "fresh-sweep" => %w[deduplicating culling-new-findings].freeze,
       "culling-new-findings" => %w[awaiting-author arbitrating complete did-not-converge].freeze,
       "arbitrating" => %w[awaiting-author complete did-not-converge].freeze
     }.freeze
@@ -67,6 +67,7 @@ module AdversarialReview
       dispute_kind subject_ids subject_mappings mapped_candidate_ids allow_new_findings
       targets inventory context_pointers applicable_guidance role_contract
       capability_declaration_template mutation_restrictions tool_restrictions prompt
+      authority review_evidence
     ].freeze
     INGEST_STAGES = {
       "attack" => %w[attacking fresh-sweep].freeze,
@@ -161,6 +162,16 @@ module AdversarialReview
         "fresh_sweep_required" => false,
         "fresh_sweep_completed" => false,
         "degraded_capabilities" => [],
+        "execution" => {
+          "selected_executor" => manifest["selected_executor"] ||
+            (manifest.fetch("requested_executor", "generic") == "auto" ? "generic" :
+              manifest.fetch("requested_executor", "generic")),
+          "jobs" => manifest.fetch("jobs", 1),
+          "metadata_required" => manifest.fetch("execution_metadata_required", false),
+          "report_path" => manifest["report_path"],
+          "tasks" => {}
+        },
+        "summary" => nil,
         "events" => [],
         "next_action" => "attack"
       }
@@ -595,7 +606,7 @@ module AdversarialReview
           data["revise_round"] += 1
           data["fresh_sweep_required"] = true
           data["fresh_sweep_completed"] = false
-        elsif current == "fresh-sweep" && next_stage == "culling-new-findings"
+        elsif next_stage == "culling-new-findings" && %w[fresh-sweep deduplicating].include?(current)
           data["fresh_sweep_completed"] = true
         end
         if next_stage == "complete"
@@ -835,6 +846,112 @@ module AdversarialReview
       self
     end
 
+    def pin_executor!(executor)
+      unless Manifest::EXECUTORS.include?(executor) && executor != "auto"
+        raise Error.new("invalid_executor", "selected executor is invalid", {"executor" => executor}, 3)
+      end
+      mutate! do |data|
+        selected = data.fetch("execution").fetch("selected_executor")
+        next if selected == executor
+        unless executor == "generic" && data.fetch("ingested_results").empty?
+          raise Error.new(
+            "executor_already_pinned", "selected executor cannot change after it is pinned",
+            {"selected_executor" => selected, "requested" => executor}, 3
+          )
+        end
+        data.fetch("execution")["selected_executor"] = executor
+      end
+      self
+    end
+
+    def record_task_execution(task_id, authority:, capabilities:, usage:, attempts:,
+                              runtime_provenance:)
+      validate_task_id!(task_id)
+      valid_usage = usage.is_a?(Hash) && usage.all? do |key, value|
+        key.is_a?(String) && value.is_a?(Integer) && value >= 0
+      end
+      unless %w[reviewer parent].include?(authority) && attempts.is_a?(Integer) && attempts >= 0 &&
+             valid_usage && runtime_provenance.is_a?(Hash)
+        raise Error.new("invalid_execution_record", "task execution record is malformed", {}, 3)
+      end
+      if authority == "reviewer"
+        Capabilities.gate(capabilities, "PASS")
+      elsif !capabilities.nil?
+        raise Error.new("invalid_execution_record", "parent authority must not claim reviewer capabilities", {}, 3)
+      end
+      mutate! do |data|
+        unless data.fetch("emitted_tasks").key?(task_id)
+          raise Error.new("unknown_task", "execution record task was not emitted", {"task_id" => task_id}, 3)
+        end
+        record = {
+          "authority" => authority,
+          "capabilities" => deep_copy(capabilities),
+          "usage" => deep_copy(usage),
+          "attempts" => attempts,
+          "runtime_provenance" => deep_copy(runtime_provenance)
+        }
+        existing = data.fetch("execution").fetch("tasks")[task_id]
+        if existing && existing != record
+          raise Error.new("execution_record_conflict", "task execution evidence is immutable", {"task_id" => task_id}, 3)
+        end
+        data.fetch("execution").fetch("tasks")[task_id] = record
+      end
+      self
+    rescue Capabilities::Error => error
+      raise Error.new("invalid_execution_record", error.message, {}, 3)
+    end
+
+    def refresh_targets_after_actions!
+      result = nil
+      mutate! do |data, manifest|
+        unless data.fetch("stage") == "awaiting-author"
+          raise Error.new("invalid_stage", "target refresh requires awaiting-author", {"stage" => data.fetch("stage")}, 3)
+        end
+        actionable_ids = data.fetch("findings").select { |finding| finding.fetch("reported") }
+                             .map { |finding| finding.fetch("id") }
+        missing = actionable_ids.reject { |finding_id| data.fetch("author_actions").key?(finding_id) }
+        unless missing.empty?
+          raise Error.new("missing_author_actions", "target refresh requires complete parent actions", {"finding_ids" => missing}, 3)
+        end
+        target_paths = manifest.fetch("targets").map { |target| target.fetch("path") }
+        declared = data.fetch("author_actions").values.flat_map do |action|
+          action.is_a?(Hash) && action.fetch("status") == "fixed" ? action.fetch("changed_paths", []) : []
+        end.uniq.sort
+        live = live_target_digests!(manifest)
+        changed = target_paths.select do |path|
+          live.fetch(path) != data.fetch("current_target_digests").fetch(path)
+        end.sort
+        declared_targets = (declared & target_paths).sort
+        unless changed == declared_targets && !changed.empty?
+          raise Error.new(
+            "author_change_mismatch", "live target changes do not match declared parent action paths",
+            {"changed_targets" => changed, "declared_target_paths" => declared_targets}, 3
+          )
+        end
+        data["current_target_digests"] = deep_copy(live)
+        data.fetch("target_digest_history") << deep_copy(live)
+        data["fresh_sweep_required"] = true
+        data["fresh_sweep_completed"] = false
+        data.fetch("events") << {"type" => "target-refresh", "changed_targets" => changed}
+        result = {"changed_targets" => changed, "current_target_digests" => deep_copy(live)}
+      end
+      deep_freeze(deep_copy(result))
+    end
+
+    def persist_summary!(summary)
+      Reporting.chat_payload(summary)
+      mutate! do |data|
+        existing = data.fetch("summary")
+        if existing && existing != summary
+          raise Error.new("summary_conflict", "terminal summary is immutable", {}, 3)
+        end
+        data["summary"] = deep_copy(summary)
+      end
+      self
+    rescue Reporting::Error => error
+      raise Error.new(error.code, error.message, error.details, error.exit_status)
+    end
+
     def check_current_digests!(digests)
       validate_digest_set!(digests)
       refresh!
@@ -904,7 +1021,7 @@ module AdversarialReview
         judge_votes evidence_gaps overflow overflow_evidence_gaps
         author_actions resolution_checks pending_arbiter_subjects target_digest_history
         current_target_digests fresh_sweep_required fresh_sweep_completed
-        degraded_capabilities events next_action
+        degraded_capabilities execution summary events next_action
       ]
       missing = required.reject { |key| data.key?(key) }
       unless missing.empty?
@@ -951,6 +1068,38 @@ module AdversarialReview
              [true, false].include?(data["fresh_sweep_required"]) &&
              [true, false].include?(data["fresh_sweep_completed"])
         raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
+      end
+      execution = data.fetch("execution")
+      unless execution.is_a?(Hash) && execution.keys.sort == %w[jobs metadata_required report_path selected_executor tasks] &&
+             Manifest::EXECUTORS.include?(execution["selected_executor"]) && execution["selected_executor"] != "auto" &&
+             execution["jobs"].is_a?(Integer) && execution["jobs"].positive? &&
+             [true, false].include?(execution["metadata_required"]) &&
+             (execution["report_path"].nil? || execution["report_path"].is_a?(String)) &&
+             execution["tasks"].is_a?(Hash) &&
+             (data["summary"].nil? || data["summary"].is_a?(Hash))
+        raise Error.new("invalid_state", "persisted execution metadata is invalid", {}, 3)
+      end
+      valid_execution_tasks = execution.fetch("tasks").all? do |task_id, record|
+        next false unless data.fetch("emitted_tasks").key?(task_id) && record.is_a?(Hash) &&
+                          record.keys.sort == %w[attempts authority capabilities runtime_provenance usage]
+        authority = record["authority"]
+        valid_capabilities = if authority == "reviewer"
+                               begin
+                                 Capabilities.gate(record["capabilities"], "PASS")
+                                 true
+                               rescue Capabilities::Error
+                                 false
+                               end
+                             else
+                               authority == "parent" && record["capabilities"].nil?
+                             end
+        valid_capabilities && record["attempts"].is_a?(Integer) && record["attempts"] >= 0 &&
+          record["usage"].is_a?(Hash) && record["usage"].all? do |key, value|
+            key.is_a?(String) && value.is_a?(Integer) && value >= 0
+          end && record["runtime_provenance"].is_a?(Hash)
+      end
+      unless valid_execution_tasks
+        raise Error.new("invalid_state", "persisted task execution evidence is invalid", {}, 3)
       end
       valid_attempts = data.fetch("task_attempts").all? do |task_id, attempt|
         task_id.is_a?(String) && !task_id.empty? && attempt.is_a?(Integer) && !attempt.negative?
@@ -1320,6 +1469,14 @@ module AdversarialReview
 
     def self.completion_blockers(data, from_stage:)
       blockers = []
+      if data.dig("execution", "metadata_required")
+        data.fetch("ingested_results").each_key do |task_id|
+          record = data.dig("execution", "tasks", task_id)
+          expected_authority = data.dig("emitted_tasks", task_id, "kind") == "author-actions" ?
+            "parent" : "reviewer"
+          blockers << "execution-metadata:#{task_id}" unless record && record["authority"] == expected_authority
+        end
+      end
       unless data.fetch("current_target_digests") == data.fetch("target_digest_history").last
         blockers << "target-digest-mismatch"
       end

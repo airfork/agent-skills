@@ -12,6 +12,72 @@ require "adversarial_review"
 class AdversarialReviewStateTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_execution_policy_and_task_attestations_are_locked_and_persisted
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      built["selected_executor"] = "generic"
+      built["jobs"] = 3
+      built["report_path"] = File.join(repository, "spec-review.md")
+      run_dir = File.join(repository, ".git", "execution-metadata")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      task = AdversarialReview::Prompts.attack_task(built, "tester", 1)
+      state.create_task_bundle(task.fetch("task_id")) { task }
+      capabilities = AdversarialReview::Capabilities.normalize(
+        {}, requested_model: built.fetch("requested_model"),
+        requested_effort: built.fetch("requested_effort")
+      )
+
+      state.record_task_execution(
+        task.fetch("task_id"), authority: "reviewer", capabilities: capabilities,
+        usage: {"prompt_bytes" => 20}, attempts: 1,
+        runtime_provenance: {"adapter" => "generic"}
+      )
+
+      execution = AdversarialReview::State.load(run_dir).to_h.fetch("execution")
+      assert_equal "generic", execution.fetch("selected_executor")
+      assert_equal 3, execution.fetch("jobs")
+      assert_equal built.fetch("report_path"), execution.fetch("report_path")
+      record = execution.fetch("tasks").fetch(task.fetch("task_id"))
+      assert_equal "reviewer", record.fetch("authority")
+      assert_equal capabilities, record.fetch("capabilities")
+      assert_equal 1, record.fetch("attempts")
+      assert_raises(AdversarialReview::State::Error) do
+        state.pin_executor!("claude")
+      end
+    end
+  end
+
+  def test_refresh_after_parent_actions_binds_declared_paths_and_live_target_digest
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "digest-refresh")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      candidate = state.ingest_candidate("tester", 1, result_finding("Missing rollback owner"))
+      advance(state, %w[deduplicating culling])
+      state.promote([promotion_group("G-001", candidate.fetch("id"), "HIGH", 0.9,
+                                     "docs/spec.md", 2)])
+      state.transition_to("awaiting-author")
+      finding_id = state.findings.first.fetch("id")
+      state.record_author_action(
+        finding_id,
+        {"status" => "fixed", "rationale" => "Add owner", "changed_paths" => ["docs/spec.md"]}
+      )
+      File.write(File.join(repository, "docs/spec.md"), "# Product spec\nOwner: release manager\n")
+
+      refreshed = state.refresh_targets_after_actions!
+
+      assert_equal ["docs/spec.md"], refreshed.fetch("changed_targets")
+      snapshot = state.to_h
+      assert_equal 2, snapshot.fetch("target_digest_history").length
+      refute_equal snapshot.fetch("target_digest_history").first,
+                   snapshot.fetch("current_target_digests")
+      assert_equal true, snapshot.fetch("fresh_sweep_required")
+      assert_raises(AdversarialReview::State::Error) { state.refresh_targets_after_actions! }
+    end
+  end
+
   def test_ingest_validates_schema_before_mutating_state_or_results
     with_ingest_state(stage: "attacking") do |state, run_dir, task|
       payload = attack_payload(task)
@@ -2134,11 +2200,11 @@ class AdversarialReviewStateTest < Minitest::Test
     expected = {
       "prepared" => %w[attacking],
       "attacking" => %w[deduplicating],
-      "deduplicating" => %w[culling],
+      "deduplicating" => %w[culling culling-new-findings],
       "culling" => %w[awaiting-author complete],
       "awaiting-author" => %w[resolving],
       "resolving" => %w[fresh-sweep arbitrating complete did-not-converge],
-      "fresh-sweep" => %w[culling-new-findings],
+      "fresh-sweep" => %w[deduplicating culling-new-findings],
       "culling-new-findings" => %w[awaiting-author arbitrating complete did-not-converge],
       "arbitrating" => %w[awaiting-author complete did-not-converge]
     }

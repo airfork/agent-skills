@@ -4,12 +4,6 @@ module AdversarialReview
   module Adapters
     class Generic
       TASK_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/.freeze
-      TASK_KEYS = %w[
-        schema_version run_id task_id role angle round attempt artifact_digests
-        targets inventory context_pointers applicable_guidance role_contract schema
-        capability_declaration_template mutation_restrictions tool_restrictions prompt
-      ].freeze
-      SCHEMAS = %w[assets/schemas/attack.json assets/schemas/divergence.json].freeze
 
       class Error < StandardError
         attr_reader :code
@@ -24,7 +18,7 @@ module AdversarialReview
         state = State.load(run_dir)
         task_path = state.create_task_bundle(task.fetch("task_id")) do |manifest, state_data|
           current_digests = state_data.fetch("current_target_digests")
-          canonical_task = validate_task!(task, manifest, current_digests)
+          canonical_task = validate_task!(task, manifest, state_data)
           live_digests = live_target_digests(manifest)
           unless live_digests == current_digests &&
                  task.fetch("artifact_digests") == current_digests
@@ -56,7 +50,7 @@ module AdversarialReview
         state = State.load(run_dir)
         state.read_task_bundle(task.fetch("task_id")) do |manifest, state_data, emitted|
           current_digests = state_data.fetch("current_target_digests")
-          validate_task!(emitted, manifest, current_digests)
+          validate_task!(emitted, manifest, state_data)
           unless emitted == task && live_target_digests(manifest) == current_digests &&
                  emitted.fetch("artifact_digests") == current_digests
             raise Error.new("invalid_task", "capability declaration task is not authoritative")
@@ -77,9 +71,9 @@ module AdversarialReview
 
       private
 
-      def validate_task!(task, manifest, current_digests)
-        unless task.is_a?(Hash) && task.keys.sort == TASK_KEYS.sort
-          raise Error.new("invalid_task", "task bundle is not a closed object")
+      def validate_task!(task, manifest, state_data)
+        unless task.is_a?(Hash)
+          raise Error.new("invalid_task", "task bundle must be an object")
         end
         unless task.fetch("schema_version") == 1 &&
                task.fetch("run_id") == manifest.fetch("run_id")
@@ -89,22 +83,13 @@ module AdversarialReview
         unless task_id.is_a?(String) && task_id.match?(TASK_ID)
           raise Error.new("invalid_task_id", "task ID contains unsafe characters")
         end
-        angle = task.fetch("angle")
         round = task.fetch("round")
         attempt = task.fetch("attempt")
-        expected_task_id = "attack-#{angle}-r#{round}-a#{attempt}"
-        unless angle.is_a?(String) && !angle.empty? &&
-               round.is_a?(Integer) && round.positive? &&
-               attempt.is_a?(Integer) && attempt.positive? &&
-               task.fetch("role") == "attacker" && task_id == expected_task_id
+        unless round.is_a?(Integer) && round.positive? &&
+               attempt.is_a?(Integer) && attempt.positive?
           raise Error.new("invalid_task_identity", "task fields do not form its canonical identity")
         end
         schema = task.fetch("schema")
-        expected_schema = angle.start_with?("divergence-probe-") ?
-          "assets/schemas/divergence.json" : "assets/schemas/attack.json"
-        unless SCHEMAS.include?(schema) && schema == expected_schema
-          raise Error.new("invalid_task_schema", "task schema does not match its role")
-        end
         schema_path = File.join(AdversarialReview.root, schema)
         unless File.file?(schema_path) && File.realpath(schema_path).start_with?(AdversarialReview.root + File::SEPARATOR)
           raise Error.new("invalid_task_schema", "task schema path is unavailable")
@@ -127,12 +112,7 @@ module AdversarialReview
         unless expected_digests.length == targets.length && expected_digests == digests
           raise Error.new("invalid_task_digests", "task artifact digests do not match targets")
         end
-        unless manifest.fetch("enabled_tasks").include?(angle)
-          raise Error.new("invalid_task", "task angle is not enabled by the run manifest")
-        end
-        expected_task = Prompts.attack_task(
-          manifest, angle, attempt, round: round, current_digests: current_digests
-        )
+        expected_task = Prompts.canonical_task(manifest, state_data, task)
         unless task == expected_task
           raise Error.new("invalid_task", "task does not match the authoritative run manifest")
         end

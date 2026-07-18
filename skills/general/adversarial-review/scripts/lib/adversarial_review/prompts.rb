@@ -38,6 +38,16 @@ module AdversarialReview
       role path markdown word_count line_count placeholder_count
       unresolved_placeholders referenced_paths entry_counts
     ].freeze
+    REVIEW_ROLES = {
+      "dedupe" => "deduplicator", "judge" => "judge",
+      "resolution" => "resolver", "arbiter" => "arbiter"
+    }.freeze
+    REVIEW_SECTIONS = {
+      "dedupe" => ["Cull Task"].freeze,
+      "judge" => ["Cull Task", "Categories", "Severity Gates", "Stable IDs And Caps"].freeze,
+      "resolution" => ["Resolution Check"].freeze,
+      "arbiter" => ["Arbiter"].freeze
+    }.freeze
 
     module_function
 
@@ -104,6 +114,141 @@ module AdversarialReview
     rescue KeyError => error
       raise Error, "manifest is missing #{error.key.inspect}"
     end
+
+    def role_task(manifest, state_data, kind, attempt: 1, voter_id: nil,
+                  voter_ids: nil, vote_group_id: nil,
+                  judge_rubric_path: File.join(AdversarialReview.root, "judge-rubric.md"))
+      unless REVIEW_ROLES.key?(kind) && state_data.is_a?(Hash)
+        raise Error, "unsupported portable review role"
+      end
+      round = state_data.fetch("revise_round")
+      digests = state_data.fetch("current_target_digests")
+      targets, inventory = current_targets_and_inventory(manifest, digests)
+      suffix = kind == "judge" && voter_id ? "-#{voter_id}" : ""
+      task = {
+        "schema_version" => 1,
+        "run_id" => manifest.fetch("run_id"),
+        "task_id" => "#{kind}-batch#{suffix}-r#{round}-a#{attempt}",
+        "role" => REVIEW_ROLES.fetch(kind),
+        "kind" => kind,
+        "schema" => "assets/schemas/#{kind}.json",
+        "artifact_digests" => JSON.parse(JSON.generate(digests)),
+        "round" => round,
+        "attempt" => attempt,
+        "targets" => targets,
+        "inventory" => inventory,
+        "context_pointers" => context_records(manifest),
+        "applicable_guidance" => guidance_records(context_records(manifest)),
+        "role_contract" => extract_named_sections(judge_rubric_path, REVIEW_SECTIONS.fetch(kind)).join("\n\n"),
+        "capability_declaration_template" => Capabilities.template(
+          requested_model: manifest.fetch("requested_model"),
+          requested_effort: manifest.fetch("requested_effort")
+        ),
+        "review_evidence" => review_evidence(state_data, kind),
+        "mutation_restrictions" => MUTATION_RESTRICTIONS.map(&:dup),
+        "tool_restrictions" => TOOL_RESTRICTIONS.map(&:dup),
+        "prompt" => CANONICAL_PROMPT
+      }
+      if kind == "judge" && voter_id
+        ids = Array(voter_ids)
+        unless voter_id.is_a?(String) && ids.length == 3 && ids.uniq.length == 3 && ids.include?(voter_id) &&
+               vote_group_id.is_a?(String) && !vote_group_id.empty?
+          raise Error, "ultra judge voter identity is invalid"
+        end
+        task["vote_group_id"] = vote_group_id
+        task["voter_id"] = voter_id
+        task["voter_ids"] = ids
+        task["expected_voters"] = ids.length
+      end
+      task
+    rescue KeyError => error
+      raise Error, "review state is missing #{error.key.inspect}"
+    end
+
+    def parent_action_task(manifest, state_data, attempt: 1)
+      round = state_data.fetch("revise_round")
+      digests = state_data.fetch("current_target_digests")
+      targets, inventory = current_targets_and_inventory(manifest, digests)
+      {
+        "schema_version" => 1,
+        "run_id" => manifest.fetch("run_id"),
+        "task_id" => "author-actions-parent-r#{round}-a#{attempt}",
+        "role" => "author",
+        "kind" => "author-actions",
+        "authority" => "parent",
+        "schema" => "assets/schemas/author-actions.json",
+        "artifact_digests" => JSON.parse(JSON.generate(digests)),
+        "round" => round,
+        "attempt" => attempt,
+        "targets" => targets,
+        "inventory" => inventory,
+        "review_evidence" => JSON.parse(JSON.generate(state_data.fetch("findings"))),
+        "prompt" => "Parent-only author disposition bundle. Do not dispatch this task to a reviewer."
+      }
+    end
+
+    def canonical_task(manifest, state_data, task)
+      return attack_task(
+        manifest, task.fetch("angle"), task.fetch("attempt"), round: task.fetch("round"),
+        current_digests: state_data.fetch("current_target_digests")
+      ) if task.fetch("role") == "attacker"
+      return parent_action_task(manifest, state_data, attempt: task.fetch("attempt")) if task["authority"] == "parent"
+
+      role_task(
+        manifest, state_data, task.fetch("kind"), attempt: task.fetch("attempt"),
+        voter_id: task["voter_id"], voter_ids: task["voter_ids"],
+        vote_group_id: task["vote_group_id"]
+      )
+    rescue KeyError => error
+      raise Error, "task is missing #{error.key.inspect}"
+    end
+
+    def review_evidence(state_data, kind)
+      round_candidates = state_data.fetch("candidates").select do |candidate|
+        candidate.fetch("round") == state_data.fetch("revise_round") && candidate.fetch("state") == "candidate"
+      end
+      value = case kind
+              when "dedupe" then {"candidates" => round_candidates}
+              when "judge" then {
+                "candidates" => round_candidates,
+                "semantic_groups" => state_data.fetch("semantic_groups").select do |_id, group|
+                  group.fetch("round") == state_data.fetch("revise_round")
+                end
+              }
+              when "resolution" then {
+                "findings" => state_data.fetch("findings"),
+                "author_actions" => state_data.fetch("author_actions")
+              }
+              when "arbiter" then {
+                "findings" => state_data.fetch("findings"),
+                "pending_subjects" => state_data.fetch("pending_arbiter_subjects")
+              }
+              end
+      JSON.parse(JSON.generate(value))
+    end
+    private_class_method :review_evidence
+
+    def current_targets_and_inventory(manifest, digests)
+      root = manifest.fetch("repository").fetch("root")
+      targets = manifest.fetch("targets").map do |target|
+        path = target.fetch("path")
+        expected = digests.fetch(path)
+        absolute = File.join(root, path)
+        bytes = File.binread(absolute)
+        unless Digest::SHA256.hexdigest(bytes) == expected
+          raise Error, "current target digest does not match live bytes"
+        end
+        target.merge("sha256" => expected)
+      end
+      inventory = targets.map do |target|
+        path = target.fetch("path")
+        Manifest::Inventory.build(target.fetch("role"), path, File.binread(File.join(root, path)))
+      end
+      [JSON.parse(JSON.generate(targets)), inventory]
+    rescue Errno::ENOENT, Errno::EACCES, Errno::EPERM, Errno::ELOOP => error
+      raise Error, "current target could not be read: #{error.class}"
+    end
+    private_class_method :current_targets_and_inventory
 
 
     def extract_named_sections(path, names)
