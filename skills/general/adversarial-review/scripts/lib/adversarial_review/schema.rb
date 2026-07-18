@@ -51,6 +51,12 @@ module AdversarialReview
       if schema.key?("minLength") && value.length < schema.fetch("minLength")
         add_error("min_length", path, "string is shorter than the minimum length")
       end
+      if schema.key?("maxLength") && value.length > schema.fetch("maxLength")
+        add_error("max_length", path, "string is longer than the maximum length")
+      end
+      if schema.key?("maxItems") && value.length > schema.fetch("maxItems")
+        add_error("max_items", path, "array contains too many items")
+      end
       if schema.key?("pattern") && !schema_pattern(schema.fetch("pattern")).match?(value)
         add_error("pattern", path, "string does not match the required pattern")
       end

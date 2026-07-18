@@ -5,12 +5,38 @@ $LOAD_PATH.unshift(File.join(SKILL, "scripts", "lib"))
 require "adversarial_review"
 
 class AdversarialReviewSchemaTest < Minitest::Test
+  MAX_MODEL_STRING = 8192
+  MAX_MODEL_ITEMS = 256
+
   def test_public_entrypoint_exposes_skill_root
     assert_equal SKILL, AdversarialReview.root
   end
 
   def test_attack_schema_accepts_complete_candidate
     assert_empty AdversarialReview::Schema.validate("attack", valid_attack)
+  end
+
+  def test_all_role_schemas_bound_every_model_controlled_string_and_array
+    %w[attack divergence dedupe judge author-actions resolution arbiter].each do |name|
+      schema = JSON.parse(File.read(File.join(SKILL, "assets", "schemas", "#{name}.json")))
+      assert_schema_nodes_bounded(schema, name)
+    end
+  end
+
+  def test_schema_string_and_collection_bounds_accept_limit_and_reject_limit_plus_one
+    at_limit = valid_attack.merge(
+      "notes" => Array.new(MAX_MODEL_ITEMS, "n"),
+      "checks_completed" => ["x" * MAX_MODEL_STRING]
+    )
+    assert_empty AdversarialReview::Schema.validate("attack", at_limit)
+
+    too_many = at_limit.merge("notes" => Array.new(MAX_MODEL_ITEMS + 1, "n"))
+    errors = AdversarialReview::Schema.validate("attack", too_many)
+    assert_includes errors.map { |error| error.fetch("code") }, "max_items"
+
+    too_long = at_limit.merge("checks_completed" => ["x" * (MAX_MODEL_STRING + 1)])
+    errors = AdversarialReview::Schema.validate("attack", too_long)
+    assert_includes errors.map { |error| error.fetch("code") }, "max_length"
   end
 
   def test_attack_schema_accepts_optional_role_metrics
@@ -286,6 +312,22 @@ class AdversarialReviewSchemaTest < Minitest::Test
   end
 
   private
+
+  def assert_schema_nodes_bounded(node, path)
+    return unless node.is_a?(Hash)
+
+    assert node.key?("maxLength"), "#{path} string lacks maxLength" if node["type"] == "string"
+    assert node.key?("maxItems"), "#{path} array lacks maxItems" if node["type"] == "array"
+    node.each do |key, value|
+      if value.is_a?(Hash)
+        assert_schema_nodes_bounded(value, "#{path}/#{key}")
+      elsif value.is_a?(Array) && key != "required" && key != "enum"
+        value.each_with_index do |child, index|
+          assert_schema_nodes_bounded(child, "#{path}/#{key}/#{index}")
+        end
+      end
+    end
+  end
 
   def role_example(heading)
     text = File.read(File.join(SKILL, "judge-rubric.md"))

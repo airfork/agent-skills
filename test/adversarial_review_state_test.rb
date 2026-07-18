@@ -12,6 +12,23 @@ require "adversarial_review"
 class AdversarialReviewStateTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_atomic_writer_rejects_oversized_prospective_json_without_changing_destination
+    Dir.mktmpdir("adversarial-review-size") do |directory|
+      destination = File.join(directory, "state.json")
+      AdversarialReview::Atomic.write_json(destination, {"stable" => true})
+      before = File.binread(destination)
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        AdversarialReview::Atomic.write_json(
+          destination, {"payload" => "x" * AdversarialReview::Atomic::MAX_JSON_BYTES}
+        )
+      end
+
+      assert_equal "json_too_large", error.code
+      assert_equal before, File.binread(destination)
+    end
+  end
+
   def test_execution_policy_and_task_attestations_are_locked_and_persisted
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       built = build_ingest_manifest(repository)
@@ -91,6 +108,25 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal 1, execution.fetch("dispatch_attempts").length
       assert_equal false, execution.fetch("dispatch_attempts").first.fetch("content_sent")
       assert_raises(AdversarialReview::State::Error) { state.pin_executor!("codex") }
+    end
+  end
+
+  def test_critique_completion_requires_ingested_judge_roster
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_ingest_manifest(repository).merge("mode" => "critique")
+      state = AdversarialReview::State.create(
+        File.join(repository, ".git", "critique-missing-judge"), manifest
+      )
+      state.transition_to("attacking")
+      state.transition_to("deduplicating")
+      state.transition_to("culling")
+
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.transition_to("complete")
+      end
+
+      assert_equal "completion_blocked", error.code
+      assert_includes error.details.fetch("blockers"), "judge-roster-incomplete"
     end
   end
 
@@ -592,6 +628,35 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal "duplicate_result", error.code
       assert_equal state_before, File.binread(File.join(run_dir, "state.json"))
       assert_equal result_before, File.binread(result_path)
+    end
+  end
+
+  def test_atomic_accept_result_rejects_semantic_failure_without_execution_then_links_digests
+    with_ingest_state(stage: "attacking") do |state, run_dir, task|
+      capabilities = AdversarialReview::Capabilities.normalize(
+        {}, requested_model: "reviewer-model", requested_effort: "high"
+      )
+      before = File.binread(File.join(run_dir, "state.json"))
+      assert_raises(AdversarialReview::State::InvalidResult) do
+        state.accept_result(
+          task.fetch("task_id"), {}, authority: "reviewer", capabilities: capabilities,
+          usage: {"prompt_bytes" => 10}, attempts: 1,
+          runtime_provenance: {"session_id" => "invalid"}
+        )
+      end
+      assert_equal before, File.binread(File.join(run_dir, "state.json"))
+      refute state.to_h.dig("execution", "tasks").key?(task.fetch("task_id"))
+
+      state.accept_result(
+        task.fetch("task_id"), attack_payload(task), authority: "reviewer",
+        capabilities: capabilities, usage: {"prompt_bytes" => 10}, attempts: 1,
+        runtime_provenance: {"session_id" => "fresh"}
+      )
+      snapshot = state.to_h
+      record = snapshot.dig("execution", "tasks", task.fetch("task_id"))
+      ingestion = snapshot.dig("ingested_results", task.fetch("task_id"))
+      assert_equal ingestion.fetch("sha256"), record.fetch("result_sha256")
+      assert_equal ingestion.fetch("task_sha256"), record.fetch("task_sha256")
     end
   end
 
@@ -1308,8 +1373,18 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_allows_critique_mode_to_complete_after_culling
-    with_state("mode" => "critique") do |state, _run_dir|
-      advance(state, %w[attacking deduplicating culling complete])
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = build_ingest_manifest(repository).merge("mode" => "critique")
+      state = AdversarialReview::State.create(
+        File.join(repository, ".git", "critique-with-judge"), manifest
+      )
+      advance(state, %w[attacking deduplicating culling])
+      task = AdversarialReview::Prompts.role_task(manifest, state.to_h, "judge")
+      state.create_task_bundle(task.fetch("task_id")) { task }
+      state.ingest(task.fetch("task_id"), base_result_payload(task).merge(
+        "verdicts" => [], "metrics" => {}
+      ))
+      state.transition_to("complete")
 
       assert_equal "complete", state.to_h.fetch("stage")
     end

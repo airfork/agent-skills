@@ -30,6 +30,7 @@ module AdversarialReview
     end
 
     RUN_ID = /\A[A-Za-z0-9][A-Za-z0-9._-]{0,127}\z/.freeze
+    MAX_STATE_ITEMS = 4096
     TRANSITIONS = {
       "prepared" => %w[attacking].freeze,
       "attacking" => %w[deduplicating].freeze,
@@ -171,6 +172,7 @@ module AdversarialReview
           "metadata_required" => manifest.fetch("execution_metadata_required", false),
           "report_path" => manifest["report_path"],
           "dispatch_attempts" => [],
+          "dispatch_claims" => {},
           "selection_intent" => nil,
           "tasks" => {}
         },
@@ -484,6 +486,19 @@ module AdversarialReview
     end
 
     def ingest(task_id, payload)
+      ingest_with_execution(task_id, payload, nil)
+    end
+
+    def accept_result(task_id, payload, authority:, capabilities:, usage:, attempts:,
+                      runtime_provenance:)
+      execution_record = build_execution_record!(
+        task_id, authority: authority, capabilities: capabilities, usage: usage,
+        attempts: attempts, runtime_provenance: runtime_provenance
+      )
+      ingest_with_execution(task_id, payload, execution_record)
+    end
+
+    def ingest_with_execution(task_id, payload, execution_record)
       validate_task_id!(task_id)
       summary = nil
       Atomic.open_lock(
@@ -516,6 +531,20 @@ module AdversarialReview
         end
         validate_result_task!(task_id, task, schema_name, manifest, data, payload)
         ensure_ingest_stage!(data, schema_name)
+        if execution_record
+          existing_execution = data.dig("execution", "tasks", task_id)
+          if existing_execution
+            existing_base = existing_execution.reject do |key, _value|
+              %w[result_sha256 task_sha256].include?(key)
+            end
+            if existing_base != execution_record
+              raise Error.new(
+                "execution_record_conflict", "accepted task execution evidence is immutable",
+                {"task_id" => task_id}, 3
+              )
+            end
+          end
+        end
         if data.fetch("ingested_results").key?(task_id)
           invalid_result!(
             "duplicate_result", "task result has already been ingested",
@@ -541,6 +570,19 @@ module AdversarialReview
           "schema" => schema_name,
           "round" => task.fetch("round", data.fetch("revise_round"))
         }
+        if execution_record
+          accepted_record = deep_copy(execution_record).merge(
+            "task_sha256" => task_sha, "result_sha256" => result_sha
+          )
+          existing = data.fetch("execution").fetch("tasks")[task_id]
+          if existing && existing != accepted_record
+            raise Error.new(
+              "execution_record_conflict", "accepted task execution evidence is immutable",
+              {"task_id" => task_id}, 3
+            )
+          end
+          data.fetch("execution").fetch("tasks")[task_id] = accepted_record
+        end
         self.class.validate_snapshot!(manifest, data)
 
         created_result = false
@@ -984,32 +1026,39 @@ module AdversarialReview
       self
     end
 
+    def claim_dispatch!(task_id, owner_token)
+      validate_task_id!(task_id)
+      unless owner_token.is_a?(String) && owner_token.match?(/\A[0-9a-f]{32}\z/)
+        raise Error.new("invalid_dispatch_claim", "dispatch owner token is malformed", {}, 3)
+      end
+      mutate! do |data|
+        unless data.fetch("emitted_tasks").key?(task_id)
+          raise Error.new("unknown_task", "dispatch claim task was not emitted", {"task_id" => task_id}, 3)
+        end
+        data.fetch("execution").fetch("dispatch_claims")[task_id] = owner_token
+      end
+      self
+    end
+
+    def release_dispatch_claim!(task_id, owner_token)
+      validate_task_id!(task_id)
+      mutate! do |data|
+        claims = data.fetch("execution").fetch("dispatch_claims")
+        claims.delete(task_id) if claims[task_id] == owner_token
+      end
+      self
+    end
+
     def record_task_execution(task_id, authority:, capabilities:, usage:, attempts:,
                               runtime_provenance:)
-      validate_task_id!(task_id)
-      valid_usage = usage.is_a?(Hash) && usage.all? do |key, value|
-        key.is_a?(String) && value.is_a?(Integer) && value >= 0
-      end
-      unless %w[reviewer parent].include?(authority) && attempts.is_a?(Integer) && attempts >= 0 &&
-             valid_usage && runtime_provenance.is_a?(Hash)
-        raise Error.new("invalid_execution_record", "task execution record is malformed", {}, 3)
-      end
-      if authority == "reviewer"
-        Capabilities.gate(capabilities, "PASS")
-      elsif !capabilities.nil?
-        raise Error.new("invalid_execution_record", "parent authority must not claim reviewer capabilities", {}, 3)
-      end
+      record = build_execution_record!(
+        task_id, authority: authority, capabilities: capabilities, usage: usage,
+        attempts: attempts, runtime_provenance: runtime_provenance
+      )
       mutate! do |data|
         unless data.fetch("emitted_tasks").key?(task_id)
           raise Error.new("unknown_task", "execution record task was not emitted", {"task_id" => task_id}, 3)
         end
-        record = {
-          "authority" => authority,
-          "capabilities" => deep_copy(capabilities),
-          "usage" => deep_copy(usage),
-          "attempts" => attempts,
-          "runtime_provenance" => deep_copy(runtime_provenance)
-        }
         existing = data.fetch("execution").fetch("tasks")[task_id]
         if existing && existing != record
           raise Error.new("execution_record_conflict", "task execution evidence is immutable", {"task_id" => task_id}, 3)
@@ -1191,14 +1240,23 @@ module AdversarialReview
              [true, false].include?(data["fresh_sweep_completed"])
         raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
       end
+      bounded_collections = %w[
+        candidates findings task_attempts emitted_tasks ingested_results exact_duplicate_map
+        exact_duplicate_sources semantic_groups judge_votes evidence_gaps overflow_evidence_gaps
+        author_actions resolution_checks pending_arbiter_subjects degraded_capabilities events
+      ]
+      unless bounded_collections.all? { |key| data.fetch(key).length <= MAX_STATE_ITEMS }
+        raise Error.new("state_limit_exceeded", "persisted state collection exceeds its bound", {}, 3)
+      end
       execution = data.fetch("execution")
-      unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts executor_pinned jobs metadata_required report_path selected_executor selection_intent tasks] &&
+      unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts dispatch_claims executor_pinned jobs metadata_required report_path selected_executor selection_intent tasks] &&
              Manifest::EXECUTORS.include?(execution["selected_executor"]) && execution["selected_executor"] != "auto" &&
              [true, false].include?(execution["executor_pinned"]) &&
              execution["jobs"].is_a?(Integer) && execution["jobs"].positive? &&
              [true, false].include?(execution["metadata_required"]) &&
              (execution["report_path"].nil? || execution["report_path"].is_a?(String)) &&
              execution["tasks"].is_a?(Hash) &&
+             execution["dispatch_claims"].is_a?(Hash) &&
              (data["summary"].nil? || data["summary"].is_a?(Hash))
         raise Error.new("invalid_state", "persisted execution metadata is invalid", {}, 3)
       end
@@ -1217,6 +1275,18 @@ module AdversarialReview
         end
       unless valid_dispatch_attempts
         raise Error.new("invalid_state", "persisted dispatch attempt evidence is invalid", {}, 3)
+      end
+      if execution.fetch("dispatch_attempts").length > MAX_STATE_ITEMS ||
+         execution.fetch("tasks").length > MAX_STATE_ITEMS ||
+         execution.fetch("dispatch_claims").length > MAX_STATE_ITEMS
+        raise Error.new("state_limit_exceeded", "execution collection exceeds its bound", {}, 3)
+      end
+      valid_claims = execution.fetch("dispatch_claims").all? do |task_id, token|
+        data.fetch("emitted_tasks").key?(task_id) && token.is_a?(String) &&
+          token.match?(/\A[0-9a-f]{32}\z/)
+      end
+      unless valid_claims
+        raise Error.new("invalid_state", "persisted dispatch claims are invalid", {}, 3)
       end
       intent = execution["selection_intent"]
       valid_intent = intent.nil? || (
@@ -1250,14 +1320,22 @@ module AdversarialReview
       if execution.fetch("executor_pinned") == false
         allowed_ids = intent && intent["status"] == "active" ? [intent["task_id"]] : []
         evidence_ids = data.fetch("emitted_tasks").keys |
-          data.fetch("ingested_results").keys | execution.fetch("tasks").keys
+          data.fetch("ingested_results").keys | execution.fetch("tasks").keys |
+          execution.fetch("dispatch_claims").keys
         unless (evidence_ids - allowed_ids).empty? && execution.fetch("dispatch_attempts").empty?
           raise Error.new("invalid_state", "unpinned executor state contains unauthorized task evidence", {}, 3)
         end
       end
       valid_execution_tasks = execution.fetch("tasks").all? do |task_id, record|
+        base_keys = %w[attempts authority capabilities runtime_provenance usage]
+        accepted_keys = base_keys + %w[result_sha256 task_sha256]
         next false unless data.fetch("emitted_tasks").key?(task_id) && record.is_a?(Hash) &&
-                          record.keys.sort == %w[attempts authority capabilities runtime_provenance usage]
+                          [base_keys.sort, accepted_keys.sort].include?(record.keys.sort)
+        if record.key?("result_sha256")
+          ingestion = data.fetch("ingested_results")[task_id]
+          next false unless ingestion && record["result_sha256"] == ingestion["sha256"] &&
+                            record["task_sha256"] == ingestion["task_sha256"]
+        end
         authority = record["authority"]
         valid_capabilities = if authority == "reviewer"
                                begin
@@ -1662,6 +1740,15 @@ module AdversarialReview
       end
       blockers << "degraded-capabilities" unless data.fetch("degraded_capabilities").empty?
       blockers << "critique-not-culled" if data.fetch("mode") == "critique" && from_stage != "culling"
+      if data.fetch("mode") == "critique"
+        judge_tasks = data.fetch("emitted_tasks").select do |_task_id, record|
+          record["kind"] == "judge" && record["round"] == data.fetch("revise_round") &&
+            record["attempt"] == 1
+        end.keys
+        unless !judge_tasks.empty? && judge_tasks.all? { |task_id| data.fetch("ingested_results").key?(task_id) }
+          blockers << "judge-roster-incomplete"
+        end
+      end
       data.fetch("findings").each do |finding|
         finding_id = finding.fetch("id")
         unless finding.fetch("reported")
@@ -1866,6 +1953,30 @@ module AdversarialReview
                 prompt_bytes.is_a?(Integer) && prompt_bytes.positive?
 
       raise Error.new("invalid_dispatch_attempt", "dispatch attempt evidence is malformed", {}, 3)
+    end
+
+    def build_execution_record!(task_id, authority:, capabilities:, usage:, attempts:,
+                                runtime_provenance:)
+      validate_task_id!(task_id)
+      valid_usage = usage.is_a?(Hash) && usage.all? do |key, value|
+        key.is_a?(String) && value.is_a?(Integer) && value >= 0
+      end
+      unless %w[reviewer parent].include?(authority) && attempts.is_a?(Integer) && attempts >= 0 &&
+             valid_usage && runtime_provenance.is_a?(Hash)
+        raise Error.new("invalid_execution_record", "task execution record is malformed", {}, 3)
+      end
+      if authority == "reviewer"
+        Capabilities.gate(capabilities, "PASS")
+      elsif !capabilities.nil?
+        raise Error.new("invalid_execution_record", "parent authority must not claim reviewer capabilities", {}, 3)
+      end
+      {
+        "authority" => authority, "capabilities" => deep_copy(capabilities),
+        "usage" => deep_copy(usage), "attempts" => attempts,
+        "runtime_provenance" => deep_copy(runtime_provenance)
+      }
+    rescue Capabilities::Error => error
+      raise Error.new("invalid_execution_record", error.message, {}, 3)
     end
 
     def dispatch_attempt_record(task_id:, executor:, status:, error_code:, phase:,
@@ -2883,6 +2994,13 @@ module AdversarialReview
     def apply_attack_result!(data, task, payload)
       candidate_ids = []
       duplicate_mappings = []
+      sequences = Hash.new(0)
+      candidate_id_index = {}
+      data.fetch("candidates").each do |candidate|
+        key = [candidate.fetch("angle"), candidate.fetch("attempt")]
+        sequences[key] = [sequences[key], candidate.fetch("sequence")].max
+        candidate_id_index[candidate.fetch("id")] = true
+      end
       payload.fetch("findings").each_with_index do |finding, index|
         fingerprint = finding_fingerprint(finding)
         source = {
@@ -2904,7 +3022,8 @@ module AdversarialReview
           next
         end
         candidate = add_candidate_to_data!(
-          data, task.fetch("angle"), task.fetch("attempt"), finding
+          data, task.fetch("angle"), task.fetch("attempt"), finding,
+          sequences: sequences, candidate_id_index: candidate_id_index
         )
         retained_id = candidate.fetch("id")
         data.fetch("exact_duplicate_map")[fingerprint] = retained_id
@@ -2926,13 +3045,20 @@ module AdversarialReview
       Digest::SHA256.hexdigest(JSON.generate(canonical))
     end
 
-    def add_candidate_to_data!(data, angle, attempt, finding, round: data.fetch("revise_round"))
+    def add_candidate_to_data!(data, angle, attempt, finding, round: data.fetch("revise_round"),
+                               sequences: nil, candidate_id_index: nil)
       slug = sanitize_angle(angle)
-      sequence = data.fetch("candidates").count do |candidate|
-        candidate.fetch("angle") == slug && candidate.fetch("attempt") == attempt
-      end + 1
+      sequences ||= data.fetch("candidates").each_with_object(Hash.new(0)) do |candidate, index|
+        key = [candidate.fetch("angle"), candidate.fetch("attempt")]
+        index[key] = [index[key], candidate.fetch("sequence")].max
+      end
+      candidate_id_index ||= data.fetch("candidates").each_with_object({}) do |candidate, index|
+        index[candidate.fetch("id")] = true
+      end
+      key = [slug, attempt]
+      sequence = sequences[key] + 1
       id = "C-#{slug}-#{attempt}-#{sequence}"
-      if data.fetch("candidates").any? { |candidate| candidate.fetch("id") == id }
+      if candidate_id_index.key?(id)
         invalid_result!("candidate_collision", "candidate ID already exists", {"id" => id})
       end
       created = deep_copy(finding).merge(
@@ -2944,6 +3070,8 @@ module AdversarialReview
         "round" => round
       )
       data.fetch("candidates") << created
+      sequences[key] = sequence
+      candidate_id_index[id] = true
       created
     end
 

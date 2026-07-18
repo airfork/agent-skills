@@ -1,5 +1,6 @@
 require "minitest/autorun"
 require "json"
+require "stringio"
 require "open3"
 
 SKILL = File.expand_path("../skills/general/adversarial-review", __dir__) unless defined?(SKILL)
@@ -376,6 +377,65 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_stage_transition_crash_matrix_recovers_exact_missing_role_roster
+    cases = [
+      ["deduplicating", "critique", "default", "dedupe", 1],
+      ["culling", "critique", "default", "judge", 1],
+      ["culling", "critique", "ultra", "judge", 3],
+      ["awaiting-author", "revise", "default", "author-actions", 1],
+      ["resolving", "revise", "default", "resolution", 1],
+      ["arbitrating", "revise", "default", "arbiter", 1],
+      ["fresh-sweep", "revise", "default", "attack", 7]
+    ]
+    cases.each do |stage, mode, tier, kind, expected_count|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        manifest = AdversarialReview::Manifest.build(
+          repository: repository, spec: "docs/spec.md", tier: tier, mode: mode,
+          output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+        )
+        run_dir = File.join(repository, ".git", "crash-#{stage}-#{tier}")
+        state = AdversarialReview::State.create(run_dir, manifest)
+        state.transition_to("attacking")
+        state.transition_to("deduplicating") if %w[deduplicating culling awaiting-author resolving arbitrating fresh-sweep].include?(stage)
+        state.transition_to("culling") if %w[culling awaiting-author resolving arbitrating fresh-sweep].include?(stage)
+        state.transition_to("awaiting-author") if %w[awaiting-author resolving arbitrating fresh-sweep].include?(stage)
+        state.transition_to("resolving") if %w[resolving arbitrating fresh-sweep].include?(stage)
+        state.transition_to("arbitrating") if stage == "arbitrating"
+        state.transition_to("fresh-sweep") if stage == "fresh-sweep"
+
+        payload = AdversarialReview::CLI.continue_run(
+          ["--run-dir", run_dir], env: {}, program_path: CLI
+        )
+
+        snapshot = AdversarialReview::State.load(run_dir).to_h
+        matching = snapshot.fetch("emitted_tasks").values.select { |task| task.fetch("kind") == kind }
+        assert_equal stage, payload.fetch("stage"), "#{stage}/#{tier} advanced past a missing roster"
+        assert_equal expected_count, matching.length, "#{stage}/#{tier} roster"
+        assert_equal expected_count, payload.fetch("pending_batch_size"), "#{stage}/#{tier} pending"
+      end
+    end
+  end
+
+  def test_prepared_run_crash_resumes_into_exact_initial_attack_roster
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = AdversarialReview::Manifest.build(
+        repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+        output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+      )
+      run_dir = File.join(repository, ".git", "prepared-crash")
+      AdversarialReview::State.create(run_dir, manifest)
+
+      payload = AdversarialReview::CLI.continue_run(
+        ["--run-dir", run_dir], env: {}, program_path: CLI
+      )
+
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      assert_equal "attacking", payload.fetch("stage")
+      assert_equal 7, payload.fetch("pending_batch_size")
+      assert_equal 7, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }
+    end
+  end
+
   def test_direct_adapter_entry_rejects_missing_durable_task_authorization
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       state = direct_dispatch_state(repository, "unauthorized-direct", "codex")
@@ -448,6 +508,44 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal 2, status.exitstatus
       assert_empty stdout
       assert_equal "invocation_error", JSON.parse(stderr).fetch("code")
+    end
+  end
+
+  def test_report_destination_rejects_run_state_targets_plan_context_and_identity_aliases
+    with_repository(files: {
+      "docs/spec.md" => "# Product spec\n", "docs/plan.md" => "# Plan\n",
+      "docs/context.md" => "trusted context\n"
+    }) do |repository|
+      protected_paths = %w[docs/spec.md docs/plan.md docs/context.md]
+      before = protected_paths.to_h do |relative|
+        [relative, File.binread(File.join(repository, relative))]
+      end
+      report_cases = protected_paths.map { |relative| [relative.tr("/.", "--"), File.join(repository, relative)] }
+      run_dir = File.join(repository, ".git", "report-inside-run")
+      report_cases << ["state", File.join(run_dir, "state.json")]
+      hardlink = File.join(repository, "docs", "hardlink-report.md")
+      File.link(File.join(repository, "docs/spec.md"), hardlink)
+      report_cases << ["hardlink", hardlink]
+      symlink = File.join(repository, "docs", "symlink-report.md")
+      File.symlink("spec.md", symlink)
+      report_cases << ["symlink", symlink]
+
+      report_cases.each do |name, report|
+        current_run = name == "state" ? run_dir : File.join(repository, ".git", "report-#{name}")
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--plan", "docs/plan.md", "--context", "docs/context.md",
+          "--executor", "generic", "--output", "both", "--report", report,
+          "--run-dir", current_run
+        )
+        assert_equal 2, status.exitstatus, name
+        assert_empty stdout, name
+        assert_equal "invalid_report", JSON.parse(stderr).fetch("code"), name
+      end
+      before.each do |relative, bytes|
+        assert_equal bytes, File.binread(File.join(repository, relative)), relative
+      end
+      refute File.exist?(run_dir)
     end
   end
 
@@ -677,6 +775,156 @@ class AdversarialReviewCliTest < Minitest::Test
       end
       assert_equal "adapter_execution_failed", error.code
       assert_equal 5, error.exit_status
+    end
+  end
+
+  def test_cli_maps_prompt_and_generic_domain_errors_without_internal_details
+    cases = [
+      [AdversarialReview::Prompts::Error.new("secret prompt detail"), "invalid_task"],
+      [AdversarialReview::Adapters::Generic::Error.new("target_digest_mismatch", "secret generic detail"),
+       "target_digest_mismatch"]
+    ]
+    cases.each do |domain_error, expected_code|
+      stdout = StringIO.new
+      stderr = StringIO.new
+      failing = lambda do |_argv, env:, program_path:|
+        raise domain_error
+      end
+      status = AdversarialReview::CLI.stub(:start, failing) do
+        AdversarialReview::CLI.run(
+          ["start"], stdout: stdout, stderr: stderr, env: {}, program_path: CLI
+        )
+      end
+      payload = JSON.parse(stderr.string)
+      assert_equal 3, status
+      assert_empty stdout.string
+      assert_equal expected_code, payload.fetch("code")
+      refute_equal "internal_error", payload.fetch("code")
+      refute_includes stderr.string, "secret"
+    end
+  end
+
+  def test_direct_invalid_semantic_result_leaves_no_accepted_execution_and_fresh_retry_succeeds
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      state = direct_dispatch_state(repository, "direct-semantic-retry", "codex")
+      manifest = state.manifest_snapshot
+      task = AdversarialReview::Prompts.attack_task(
+        manifest, manifest.fetch("enabled_tasks").first, 1,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+      invalid = direct_execution_success(task)
+      invalid.payload = {}
+      invalid.runtime_provenance["executions"].first["session_id"] = "invalid-session"
+      valid = direct_execution_success(task)
+      valid.runtime_provenance["executions"].first["session_id"] = "fresh-session"
+      results = [invalid, valid]
+      runner = lambda do |_state, _task, _selected, _env|
+        results.shift
+      end
+
+      error = AdversarialReview::CLI.stub(:execute_direct, runner) do
+        assert_raises(AdversarialReview::State::InvalidResult) do
+          AdversarialReview::CLI.dispatch_task(state, task, "codex", {}, fallback_generic: false)
+        end
+      end
+      assert_equal "invalid_result", error.code
+      rejected = state.to_h
+      refute rejected.dig("execution", "tasks").key?(task.fetch("task_id"))
+      refute rejected.fetch("ingested_results").key?(task.fetch("task_id"))
+
+      selected = AdversarialReview::CLI.stub(:execute_direct, runner) do
+        AdversarialReview::CLI.dispatch_task(state, task, "codex", {}, fallback_generic: false)
+      end
+      accepted = state.to_h
+      assert_equal "codex", selected
+      assert accepted.fetch("ingested_results").key?(task.fetch("task_id"))
+      execution = accepted.dig("execution", "tasks", task.fetch("task_id"))
+      assert_equal "fresh-session", execution.dig("runtime_provenance", "executions", 0, "session_id")
+      assert_equal accepted.dig("ingested_results", task.fetch("task_id"), "sha256"),
+                   execution.fetch("result_sha256")
+      assert_equal accepted.dig("ingested_results", task.fetch("task_id"), "task_sha256"),
+                   execution.fetch("task_sha256")
+    end
+  end
+
+  def test_concurrent_direct_dispatch_has_one_paid_invocation_and_one_in_progress_result
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      state = direct_dispatch_state(repository, "concurrent-direct-claim", "codex")
+      run_dir = File.join(repository, ".git", "concurrent-direct-claim")
+      manifest = state.manifest_snapshot
+      task = AdversarialReview::Prompts.attack_task(
+        manifest, manifest.fetch("enabled_tasks").first, 1,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+      entered = Queue.new
+      release = Queue.new
+      calls = 0
+      runner = lambda do |_state, current_task, _selected, _env|
+        calls += 1
+        if calls == 1
+          entered << true
+          release.pop
+        end
+        direct_execution_success(current_task)
+      end
+      first_error = nil
+      AdversarialReview::CLI.stub(:execute_direct, runner) do
+        first = Thread.new do
+          begin
+            AdversarialReview::CLI.dispatch_task(
+              state, task, "codex", {}, fallback_generic: false
+            )
+          rescue StandardError => error
+            first_error = error
+          end
+        end
+        entered.pop
+        second = assert_raises(AdversarialReview::CLI::Error) do
+          AdversarialReview::CLI.dispatch_task(
+            AdversarialReview::State.load(run_dir),
+            task, "codex", {}, fallback_generic: false
+          )
+        end
+        assert_equal "dispatch_in_progress", second.code
+        assert_equal 1, calls
+        assert_equal 1, state.to_h.dig("execution", "selection_intent", "external_attempts")
+        release << true
+        first.join
+      end
+      refute first_error
+    end
+  end
+
+  def test_stale_authoritative_dispatch_claim_after_crash_is_adopted_without_time_lease
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      state = direct_dispatch_state(repository, "stale-direct-claim", "codex")
+      manifest = state.manifest_snapshot
+      task = AdversarialReview::Prompts.attack_task(
+        manifest, manifest.fetch("enabled_tasks").first, 1,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+      state.begin_selection_intent!(
+        task_id: task.fetch("task_id"), requested_executor: "codex",
+        candidate_executor: "codex", vendor: "codex", model: "codex-review",
+        effort: "high", stage: "attacking"
+      )
+      state.create_task_bundle(task.fetch("task_id")) { task }
+      state.claim_dispatch!(task.fetch("task_id"), "a" * 32)
+      calls = 0
+      runner = lambda do |_state, current_task, _selected, _env|
+        calls += 1
+        direct_execution_success(current_task)
+      end
+
+      AdversarialReview::CLI.stub(:execute_direct, runner) do
+        AdversarialReview::CLI.dispatch_task(
+          state, task, "codex", {}, fallback_generic: false
+        )
+      end
+
+      assert_equal 1, calls
+      assert_empty state.to_h.dig("execution", "dispatch_claims")
+      assert state.to_h.fetch("ingested_results").key?(task.fetch("task_id"))
     end
   end
 

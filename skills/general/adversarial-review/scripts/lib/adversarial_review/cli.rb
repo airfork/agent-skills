@@ -1,6 +1,7 @@
 require "digest"
 require "json"
 require "optparse"
+require "securerandom"
 require "time"
 
 module AdversarialReview
@@ -67,6 +68,15 @@ module AdversarialReview
       emit_error(stderr, Error.new(error.code, error.message, exit_status, safe_details(error)))
     rescue Capabilities::Error => error
       emit_error(stderr, Error.new("invalid_capabilities", error.message, 3))
+    rescue Adapters::Generic::Error => error
+      allowed = %w[
+        invalid_task invalid_task_digests invalid_task_id invalid_task_identity
+        invalid_task_schema target_digest_mismatch unsafe_task_path task_collision
+      ]
+      code = allowed.include?(error.code) ? error.code : "invalid_task"
+      emit_error(stderr, Error.new(code, "generic task operation was rejected", 3))
+    rescue Prompts::Error
+      emit_error(stderr, Error.new("invalid_task", "review task could not be constructed", 3))
     rescue JSON::ParserError => error
       emit_error(stderr, Error.new("invalid_json", "input JSON is invalid", 3,
                                    {"cause" => error.message}))
@@ -149,13 +159,15 @@ module AdversarialReview
       manifest["selected_executor"] = selected
       manifest["jobs"] = options.fetch(:jobs)
       manifest["execution_metadata_required"] = true
-      if %w[file both].include?(manifest.fetch("output"))
-        manifest["report_path"] = report_path_for(manifest, options[:report])
-      end
       run_dir = options[:run_dir] || State.default_run_dir(
         repository: manifest.fetch("repository").fetch("root"),
         run_id: manifest.fetch("run_id")
       )
+      if %w[file both].include?(manifest.fetch("output"))
+        manifest["report_path"] = report_path_for(
+          manifest, options[:report], run_dir: run_dir
+        )
+      end
       state = State.create(run_dir, manifest)
       state.transition_to("attacking")
       selected = dispatch_attack_tasks(
@@ -193,11 +205,11 @@ module AdversarialReview
             {"stage" => snapshot.fetch("stage"), "pending_author_tasks" => action_tasks}
           )
         end
-        state.record_task_execution(
-          action_tasks.first, authority: "parent", capabilities: nil, usage: {}, attempts: 0,
+        ingest_summary = state.accept_result(
+          action_tasks.first, read_json_file(options.fetch(:actions)),
+          authority: "parent", capabilities: nil, usage: {}, attempts: 0,
           runtime_provenance: {"authority" => "parent", "source" => "continue --actions"}
         )
-        ingest_summary = state.ingest(action_tasks.first, read_json_file(options.fetch(:actions)))
         return response(state).merge("task_id" => action_tasks.first, "ingest" => ingest_summary)
       end
       recover_selection_intent!(state)
@@ -222,19 +234,26 @@ module AdversarialReview
         return response(state)
       end
 
-      if %w[attacking fresh-sweep].include?(snapshot.fetch("stage")) &&
-         attack_roster_pending?(state, selected, env)
+      if stage_roster_pending?(state, selected, env)
         return response(state)
       end
 
       case snapshot.fetch("stage")
+      when "prepared"
+        state.transition_to("attacking")
+        selected = dispatch_attack_tasks(
+          state, selected, env, fallback_generic: fallback_generic
+        )
+        state.pin_executor!(selected)
       when "attacking"
+        preemit_stage_tasks(state, "deduplicating")
         state.transition_to("deduplicating")
         selected = dispatch_role_task(state, "dedupe", selected, env,
                                       fallback_generic: fallback_generic)
       when "deduplicating"
         next_cull = snapshot.fetch("revise_round") == 2 && snapshot.fetch("fresh_sweep_required") ?
           "culling-new-findings" : "culling"
+        preemit_stage_tasks(state, next_cull)
         state.transition_to(next_cull)
         selected = dispatch_judge_tasks(state, selected, env, fallback_generic: fallback_generic)
       when "culling", "culling-new-findings"
@@ -244,6 +263,7 @@ module AdversarialReview
               snapshot.fetch("findings").none? { |finding| finding.fetch("state") == "pending" }
           state.transition_to("complete")
         else
+          preemit_stage_tasks(state, "awaiting-author")
           state.transition_to("awaiting-author")
           task = Prompts.parent_action_task(manifest, state.to_h)
           state.create_task_bundle(task.fetch("task_id")) { task }
@@ -257,12 +277,14 @@ module AdversarialReview
           return response(state).merge("next_action" => "submit-author-actions")
         end
         state.refresh_targets_after_actions! unless snapshot.fetch("findings").empty?
+        preemit_stage_tasks(state, "resolving")
         state.transition_to("resolving")
         selected = dispatch_role_task(state, "resolution", selected, env,
                                       fallback_generic: fallback_generic)
       when "resolving"
         latest = state.to_h
         if latest.fetch("pending_arbiter_subjects").any?
+          preemit_stage_tasks(state, "arbitrating")
           state.transition_to("arbitrating")
           selected = dispatch_role_task(state, "arbiter", selected, env,
                                         fallback_generic: fallback_generic)
@@ -280,6 +302,7 @@ module AdversarialReview
           state.transition_to("complete")
         end
       when "fresh-sweep"
+        preemit_stage_tasks(state, "deduplicating")
         state.transition_to("deduplicating")
         selected = dispatch_role_task(state, "dedupe", selected, env,
                                       fallback_generic: fallback_generic)
@@ -291,9 +314,12 @@ module AdversarialReview
         raise Error.new("invalid_state", "run cannot be continued from this stage", 3,
                         {"stage" => snapshot.fetch("stage")})
       end
-      terminal_response(
-        state, report_path: options[:report] || manifest["report_path"], program_path: program_path
-      )
+      report_path = if options[:report]
+                      report_path_for(manifest, options[:report], run_dir: state_run_dir(state))
+                    else
+                      manifest["report_path"]
+                    end
+      terminal_response(state, report_path: report_path, program_path: program_path)
     end
 
     def ingest(argv)
@@ -322,15 +348,14 @@ module AdversarialReview
         read_json_file(options.fetch(:capabilities)), task, options.fetch(:run_dir)
       )
       declaration = attestation.fetch("capabilities")
-      state.record_task_execution(
-        task.fetch("task_id"), authority: "reviewer", capabilities: declaration,
-        usage: {"prompt_bytes" => task_bytes.bytesize},
-        attempts: task.fetch("attempt"),
+      summary = state.accept_result(
+        task.fetch("task_id"), read_json_file(options.fetch(:result)),
+        authority: "reviewer", capabilities: declaration,
+        usage: {"prompt_bytes" => task_bytes.bytesize}, attempts: task.fetch("attempt"),
         runtime_provenance: {
           "adapter" => "generic", "capability_gate" => attestation.reject { |key, _| key == "capabilities" }
         }
       )
-      summary = state.ingest(options.fetch(:task), read_json_file(options.fetch(:result)))
       response(state).merge(
         "task_id" => options.fetch(:task), "ingest" => summary,
         "capabilities" => declaration,
@@ -369,7 +394,7 @@ module AdversarialReview
       [model, effort].any? { |value| value.nil? || value.strip.empty? || value == "inherit" }
     end
 
-    def report_path_for(manifest, requested)
+    def report_path_for(manifest, requested, run_dir:)
       root = manifest.fetch("repository").fetch("root")
       path = if requested
                File.expand_path(requested, root)
@@ -378,10 +403,54 @@ module AdversarialReview
                stem = File.basename(first, File.extname(first))
                File.join(root, File.dirname(first), "#{stem}-review.md")
              end
-      unless File.absolute_path(path) == path
-        raise Error.new("invalid_report", "report path must be absolute after resolution", 2)
+      parent = File.dirname(path)
+      basename = File.basename(path)
+      missing = []
+      cursor = parent
+      until File.exist?(cursor) || File.symlink?(cursor)
+        missing.unshift(File.basename(cursor))
+        next_cursor = File.dirname(cursor)
+        raise Error.new("invalid_report", "report parent cannot be resolved", 2) if next_cursor == cursor
+        cursor = next_cursor
+      end
+      raise Error.new("invalid_report", "report parent contains a symlink", 2) if File.symlink?(cursor)
+      canonical_parent = File.join(File.realpath(cursor), *missing)
+      canonical_path = File.join(canonical_parent, basename)
+      unless File.absolute_path(path) == path && !%w[. ..].include?(basename)
+        raise Error.new("invalid_report", "report path must resolve through a real parent directory", 2)
+      end
+      expanded_run = File.expand_path(run_dir)
+      if path == expanded_run || path.start_with?(expanded_run + File::SEPARATOR) ||
+         canonical_path == expanded_run || canonical_path.start_with?(expanded_run + File::SEPARATOR)
+        raise Error.new("invalid_report", "report path must be outside the review run directory", 2)
+      end
+      protected = manifest.fetch("targets").map { |target| target.fetch("path") } +
+        manifest.fetch("context_paths", [])
+      protected_paths = protected.map { |relative| File.expand_path(relative, root) }
+      protected_paths.concat(%w[SKILL.md attack-angles.md judge-rubric.md].map do |name|
+        File.join(AdversarialReview.root, name)
+      end)
+      if protected_paths.include?(canonical_path)
+        raise Error.new("invalid_report", "report path collides with protected review input", 2)
+      end
+      if File.exist?(canonical_path) || File.symlink?(canonical_path)
+        destination = File.lstat(canonical_path)
+        unless destination.file? && !destination.symlink?
+          raise Error.new("invalid_report", "existing report destination is not a regular file", 2)
+        end
+        protected_paths.select { |protected_path| File.file?(protected_path) }.each do |protected_path|
+          protected_stat = File.stat(protected_path)
+          if destination.dev == protected_stat.dev && destination.ino == protected_stat.ino
+            raise Error.new("invalid_report", "report destination aliases protected review input", 2)
+          end
+        end
       end
       path
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM => error
+      raise Error.new(
+        "invalid_report", "report destination cannot be resolved safely", 2,
+        {"cause" => error.class.name}
+      )
     end
 
     def select_executor(options, env)
@@ -458,6 +527,8 @@ module AdversarialReview
       fallback_before_call = fallback_generic && intent["status"] == "active" &&
         intent["requested_executor"] == "auto" && intent["external_attempts"].zero?
       state.create_task_bundle(task.fetch("task_id")) { task } unless already_emitted
+      claim_file, claim_token = acquire_dispatch_claim(state, task.fetch("task_id"))
+      begin
       if intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
         state.mark_selection_call_started!(task.fetch("task_id"))
       end
@@ -497,12 +568,12 @@ module AdversarialReview
       # Count the reviewed task JSON once; adapter preflight and repair attempts do not
       # resubmit a different authoritative bundle and therefore do not multiply this value.
       usage = (result.usage || {}).merge("prompt_bytes" => prompt_bytes)
-      state.record_task_execution(
-        task.fetch("task_id"), authority: "reviewer", capabilities: result.capabilities,
+      state.accept_result(
+        task.fetch("task_id"), result.payload,
+        authority: "reviewer", capabilities: result.capabilities,
         usage: usage, attempts: result.attempts || 1,
         runtime_provenance: result.runtime_provenance || {}
       )
-      state.ingest(task.fetch("task_id"), result.payload)
       if selecting
         state.finalize_selection_intent!(
           task_id: task.fetch("task_id"), executor: selected, status: "complete",
@@ -516,12 +587,47 @@ module AdversarialReview
         )
       end
       selected
+      ensure
+        release_dispatch_claim(state, task.fetch("task_id"), claim_file, claim_token)
+      end
     end
 
     def dispatch_phase(result)
       phase = result.runtime_provenance.to_h.dig("failure", "phase")
       %w[probe preflight execution].include?(phase) ? phase :
         (result.status == "complete" ? "execution" : "probe")
+    end
+
+    def acquire_dispatch_claim(state, task_id)
+      path = File.join(state_run_dir(state), ".dispatch-#{task_id}.lock")
+      flags = File::RDWR | File::CREAT
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      file = File.open(path, flags, 0o600)
+      unless file.stat.file? && file.flock(File::LOCK_EX | File::LOCK_NB)
+        file.close
+        raise Error.new(
+          "dispatch_in_progress", "task already has an active direct dispatch", 3,
+          {"task_id" => task_id}
+        )
+      end
+      token = SecureRandom.hex(16)
+      state.claim_dispatch!(task_id, token)
+      [file, token]
+    rescue Errno::ELOOP, Errno::EACCES, Errno::EPERM, Errno::ENOTDIR => error
+      file.close if file && !file.closed?
+      raise Error.new(
+        "unsafe_dispatch_claim", "dispatch claim path is unsafe", 3,
+        {"task_id" => task_id, "cause" => error.class.name}
+      )
+    end
+
+    def release_dispatch_claim(state, task_id, file, token)
+      state.release_dispatch_claim!(task_id, token) if token
+    ensure
+      if file && !file.closed?
+        file.flock(File::LOCK_UN)
+        file.close
+      end
     end
 
     def resume_stage_dispatch(state, selected, env)
@@ -614,6 +720,109 @@ module AdversarialReview
         return true
       end
       expected.any? { |task_id| !snapshot.fetch("ingested_results").key?(task_id) }
+    end
+
+    def stage_roster_pending?(state, selected, env)
+      snapshot = state.to_h
+      stage = snapshot.fetch("stage")
+      return attack_roster_pending?(state, selected, env) if %w[attacking fresh-sweep].include?(stage)
+
+      if stage == "awaiting-author"
+        task_id = "author-actions-parent-r#{snapshot.fetch("revise_round")}-a1"
+        if snapshot.fetch("emitted_tasks").key?(task_id)
+          return !snapshot.fetch("ingested_results").key?(task_id)
+        end
+      end
+
+      manifest = state.manifest_snapshot
+      tasks = case stage
+              when "deduplicating"
+                [Prompts.role_task(manifest, snapshot, "dedupe")]
+              when "culling", "culling-new-findings"
+                if manifest.fetch("tier") == "ultra"
+                  voters = %w[voter-1 voter-2 voter-3]
+                  vote_group = "VG-cull-r#{snapshot.fetch("revise_round")}"
+                  voters.map do |voter|
+                    Prompts.role_task(
+                      manifest, snapshot, "judge", voter_id: voter,
+                      voter_ids: voters, vote_group_id: vote_group
+                    )
+                  end
+                else
+                  [Prompts.role_task(manifest, snapshot, "judge")]
+                end
+              when "awaiting-author"
+                [Prompts.parent_action_task(manifest, snapshot)]
+              when "resolving"
+                [Prompts.role_task(manifest, snapshot, "resolution")]
+              when "arbitrating"
+                [Prompts.role_task(manifest, snapshot, "arbiter")]
+              else
+                return false
+              end
+      expected_ids = tasks.map { |task| task.fetch("task_id") }
+      expected_kind = tasks.first.fetch("kind")
+      observed_ids = snapshot.fetch("emitted_tasks").values.select do |record|
+        record.fetch("kind") == expected_kind &&
+          record.fetch("round") == snapshot.fetch("revise_round") && record.fetch("attempt") == 1
+      end.map { |record| record.fetch("task_id") }
+      unexpected = observed_ids - expected_ids
+      unless unexpected.empty?
+        raise Error.new(
+          "invalid_stage_roster", "stage contains an unexpected authoritative task", 3,
+          {"stage" => stage, "task_ids" => unexpected.sort}
+        )
+      end
+      missing = tasks.reject do |task|
+        snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
+      end
+      unless missing.empty?
+        missing.each do |task|
+          if task["authority"] == "parent"
+            state.create_task_bundle(task.fetch("task_id")) { task }
+          else
+            selected = dispatch_task(state, task, selected, env, fallback_generic: false)
+          end
+        end
+        return true
+      end
+      tasks.any? do |task|
+        !snapshot.fetch("ingested_results").key?(task.fetch("task_id"))
+      end
+    end
+
+    def preemit_stage_tasks(state, next_stage)
+      snapshot = state.to_h
+      manifest = state.manifest_snapshot
+      tasks = case next_stage
+              when "deduplicating"
+                [Prompts.role_task(manifest, snapshot, "dedupe")]
+              when "culling", "culling-new-findings"
+                if manifest.fetch("tier") == "ultra"
+                  voters = %w[voter-1 voter-2 voter-3]
+                  vote_group = "VG-cull-r#{snapshot.fetch("revise_round")}"
+                  voters.map do |voter|
+                    Prompts.role_task(
+                      manifest, snapshot, "judge", voter_id: voter,
+                      voter_ids: voters, vote_group_id: vote_group
+                    )
+                  end
+                else
+                  [Prompts.role_task(manifest, snapshot, "judge")]
+                end
+              when "awaiting-author"
+                [Prompts.parent_action_task(manifest, snapshot)]
+              when "resolving"
+                [Prompts.role_task(manifest, snapshot, "resolution")]
+              when "arbitrating"
+                [Prompts.role_task(manifest, snapshot, "arbiter")]
+              else
+                []
+              end
+      tasks.each do |task|
+        next if snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
+        state.create_task_bundle(task.fetch("task_id")) { task }
+      end
     end
 
     def execute_direct(state, task, selected, env)

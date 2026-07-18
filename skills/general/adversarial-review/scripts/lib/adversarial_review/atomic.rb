@@ -52,6 +52,7 @@ module AdversarialReview
     def write_json_relative(directory, destination_name, value, temporary_name: nil,
                             on_publish: nil)
       validate_relative_name!(destination_name)
+      serialized = bounded_json_bytes(value, destination_name)
       temporary_name ||= ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
       validate_relative_name!(temporary_name)
       created = false
@@ -63,8 +64,7 @@ module AdversarialReview
         created = true
         begin
           file.chmod(0o600)
-          file.write(JSON.generate(value))
-          file.write("\n")
+          file.write(serialized)
           file.flush
           file.fsync
         ensure
@@ -94,6 +94,7 @@ module AdversarialReview
 
     def write_new_json(directory, destination_name, value)
       validate_relative_name!(destination_name)
+      serialized = bounded_json_bytes(value, destination_name)
       temporary_name = ".#{destination_name}.tmp-#{Process.pid}-#{SecureRandom.hex(8)}"
       created = false
       begin
@@ -108,8 +109,7 @@ module AdversarialReview
         created = true
         begin
           file.chmod(0o600)
-          file.write(JSON.generate(value))
-          file.write("\n")
+          file.write(serialized)
           file.flush
           file.fsync
         ensure
@@ -158,6 +158,16 @@ module AdversarialReview
       raise_state_error(
         unsafe_code, "persisted JSON is unavailable",
         {"path" => name, "cause" => error.class.name}, unsafe_exit_status
+      )
+    end
+
+    def bounded_json_bytes(value, path)
+      bytes = JSON.generate(value) + "\n"
+      return bytes if bytes.bytesize <= MAX_JSON_BYTES
+
+      raise_state_error(
+        "json_too_large", "prospective JSON exceeds the size limit",
+        {"path" => path, "bytes" => bytes.bytesize, "limit" => MAX_JSON_BYTES}, 3
       )
     end
 
