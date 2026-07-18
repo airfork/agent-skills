@@ -62,9 +62,33 @@ module AdversarialReview
       unless executable.is_a?(Executable)
         raise SecurityError.new("invalid_executable", "executable identity is not pinned")
       end
-      current = identity(executable.path)
-      fields = %i[path device inode mode mtime_ns size sha256]
-      unless fields.all? { |field| current.public_send(field) == executable.public_send(field) }
+      before = File.lstat(executable.path)
+      unless executable_metadata_matches?(before, executable) && before.file? &&
+             !before.symlink? && (before.mode & 0o111).positive?
+        raise SecurityError.new("executable_changed", "selected executable changed after capability probing")
+      end
+
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      digest = nil
+      File.open(executable.path, flags) do |file|
+        opened = file.stat
+        unless executable_metadata_matches?(opened, executable) && opened.file? &&
+               (opened.mode & 0o111).positive?
+          raise SecurityError.new(
+            "executable_changed", "selected executable identity changed before hashing"
+          )
+        end
+        digest = hash_descriptor(file)
+        after_hash = file.stat
+        unless executable_metadata_matches?(after_hash, executable)
+          raise SecurityError.new(
+            "executable_changed", "selected executable changed while hashing"
+          )
+        end
+      end
+      after_path = File.lstat(executable.path)
+      unless executable_metadata_matches?(after_path, executable) && digest == executable.sha256
         raise SecurityError.new("executable_changed", "selected executable changed after capability probing")
       end
       true
@@ -260,7 +284,7 @@ module AdversarialReview
                before.dev == opened.dev && before.ino == opened.ino
           raise SecurityError.new("executable_changed", "selected executable identity changed while reading")
         end
-        digest = Digest::SHA256.file(file).hexdigest
+        digest = hash_descriptor(file)
       end
       after = File.lstat(path)
       unless before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
@@ -274,6 +298,24 @@ module AdversarialReview
       )
     end
     private_class_method :identity
+
+    def executable_metadata_matches?(stat, executable)
+      stat.dev == executable.device && stat.ino == executable.inode &&
+        stat.mode == executable.mode && time_nanoseconds(stat.mtime) == executable.mtime_ns &&
+        stat.size == executable.size
+    end
+    private_class_method :executable_metadata_matches?
+
+    def hash_descriptor(file)
+      file.rewind
+      digest = Digest::SHA256.new
+      loop do
+        digest.update(file.readpartial(65_536))
+      end
+    rescue EOFError
+      digest.hexdigest
+    end
+    private_class_method :hash_descriptor
 
     def time_nanoseconds(time)
       time.to_i * 1_000_000_000 + time.nsec

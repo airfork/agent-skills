@@ -137,6 +137,89 @@ class AdversarialReviewSecurityTest < Minitest::Test
     end
   end
 
+  def test_metadata_mismatch_is_rejected_before_descriptor_hashing
+    Dir.mktmpdir("adversarial-review-bin") do |bin|
+      fake = write_fake_executable(bin)
+      pinned = AdversarialReview::Runner.resolve_executable(fake)
+      File.chmod(0o755, fake)
+      digest_called = false
+      open_called = false
+
+      error = AdversarialReview::Runner.stub(
+        :hash_descriptor,
+        proc { |_file| digest_called = true; raise "digest must not run" }
+      ) do
+        File.stub(:open, proc { |*_arguments| open_called = true; raise "open must not run" }) do
+          assert_raises(AdversarialReview::Runner::SecurityError) do
+            AdversarialReview::Runner.verify_executable!(pinned)
+          end
+        end
+      end
+
+      assert_equal "executable_changed", error.code
+      assert_equal false, open_called
+      assert_equal false, digest_called
+    end
+  end
+
+  def test_descriptor_identity_is_rechecked_before_hashing_after_open_race
+    Dir.mktmpdir("adversarial-review-bin") do |bin|
+      fake = write_fake_executable(bin)
+      pinned = AdversarialReview::Runner.resolve_executable(fake)
+      replacement = File.join(bin, "replacement")
+      File.write(replacement, File.binread(fake))
+      File.chmod(0o700, replacement)
+      original_open = File.method(:open)
+      swapped = false
+      digest_called = false
+      open_with_swap = proc do |*arguments, &block|
+        if arguments.fetch(0) == pinned.path && !swapped
+          File.rename(replacement, pinned.path)
+          swapped = true
+        end
+        original_open.call(*arguments, &block)
+      end
+
+      error = AdversarialReview::Runner.stub(
+        :hash_descriptor,
+        proc { |_file| digest_called = true; raise "digest must not run" }
+      ) do
+        File.stub(:open, open_with_swap) do
+          assert_raises(AdversarialReview::Runner::SecurityError) do
+            AdversarialReview::Runner.verify_executable!(pinned)
+          end
+        end
+      end
+
+      assert_equal "executable_changed", error.code
+      assert_equal true, swapped
+      assert_equal false, digest_called
+    end
+  end
+
+  def test_matching_metadata_with_changed_content_is_rejected_by_descriptor_hash
+    Dir.mktmpdir("adversarial-review-bin") do |bin|
+      fake = write_fake_executable(bin)
+      stable_time = Time.at(Time.now.to_i - 10)
+      File.utime(stable_time, stable_time, fake)
+      pinned = AdversarialReview::Runner.resolve_executable(fake)
+      changed = File.binread(fake).tr("a", "b")
+      refute_equal File.binread(fake), changed
+      File.binwrite(fake, changed)
+      File.chmod(pinned.mode & 0o777, fake)
+      File.utime(stable_time, stable_time, fake)
+      assert_equal pinned.size, File.stat(fake).size
+      assert_equal pinned.mtime_ns,
+                   File.stat(fake).mtime.to_i * 1_000_000_000 + File.stat(fake).mtime.nsec
+
+      error = assert_raises(AdversarialReview::Runner::SecurityError) do
+        AdversarialReview::Runner.verify_executable!(pinned)
+      end
+
+      assert_equal "executable_changed", error.code
+    end
+  end
+
   def test_executable_metadata_is_rejected_before_a_fifo_can_block_hashing
     Dir.mktmpdir("adversarial-review-bin") do |bin|
       fake = write_fake_executable(bin)
