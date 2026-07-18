@@ -11,16 +11,19 @@ fresh context, canonical repository, read-only policy, structured
 output, session binding, and required vote independence. Record all eight
 capabilities: `fresh_context`, `repository_access`, `read_only`,
 `model_selection`, `effort_selection`, `structured_output`, `usage_metrics`, and
-`parallel_dispatch`. A failed or missing observation selects Generic Adapter
-with a degraded capability record; it never becomes an ordinary direct result.
+`parallel_dispatch`. A failed or missing observation returns an ineligible generic-shaped adapter result; the adapter itself never emits Generic bundles.
 
 Use `DEGRADED CAPABILITIES` when any required capability is `unavailable` or a
 required safety boundary (`fresh_context`, `repository_access`, or `read_only`)
-is only `behavioral`. This capability verdict is distinct from `PASSED`,
-`PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes.
+is only `behavioral`. It replaces only an ordinary `PASSED`. `REPORT ONLY`,
+`PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict;
+revise/reject outcomes also keep their verdict and separately disclose degradation.
 
 The public CLI supplies `parallel_dispatch` as `unavailable`, and the required
-capability gate blocks direct execution before reviewed content; the public CLI therefore selects Generic Adapter before content. The direct adapter classes are implemented and fixture-conformant for embedding orchestrators that provide caller-supplied real dispatch evidence. Generic bundles are intended for host-native parallelism.
+capability gate makes the direct adapter result ineligible before reviewed
+content. The direct adapter classes are implemented and fixture-conformant for
+embedding orchestrators that provide caller-supplied real dispatch evidence.
+Generic bundles are intended for host-native parallelism.
 
 Automatic generic fallback is available only for `--executor auto`, and only
 before reviewed content. Its authorization is fixed before any external attempt,
@@ -31,9 +34,15 @@ Capability or eligibility failure stops with exit `4`; execution or invalid
 result failure stops with exit `5`. After reviewed content, either class stops
 without fallback. The run remains resumable and the selected executor remains pinned.
 
+Only the public CLI with `--executor auto`, at the pre-content boundary with
+zero prior external attempts, converts an ineligible result to emitted Generic bundles.
+Explicit direct selection stops with exit `4` or `5`, remains pinned and
+resumable, and never converts the result to Generic bundles.
+
 The parser rejects direct `--jobs` greater than 1. Generic execution emits
 independent task bundles. `--ultra` is Claude-only for direct execution. On any non-Claude host,
-`--executor auto --tier ultra` selects generic; it never silently runs `high`.
+the qualifying public `--executor auto --tier ultra` boundary emits Generic
+bundles; explicit non-Claude ultra stops with exit `4` and never runs `high`.
 
 ## Generic Adapter
 
@@ -52,17 +61,14 @@ Direct Codex requires `codex exec` support for ephemeral, ignored user config,
 strict config, read-only sandbox, explicit model/effort, repository directory,
 JSON events, output schema, and a bound final response. Runtime events must
 confirm all shared-gate claims. Codex `0.144.5` was observed during design, but
-its real runtime contract was not verified for this package, so it currently
-falls back to generic. A future version may run direct only after machine
-attestation passes; the version note is not a pin or allowlist.
+its real runtime contract was not verified for this package, so its direct result is currently ineligible and generic-shaped. The adapter does not emit Generic bundles; only the qualifying public auto boundary converts it. A future version can become direct-eligible only after machine attestation and caller dispatch evidence pass; the version note is not a pin.
 
 ## Claude Adapter
 
 Direct Claude requires print mode, plan permission, a read/search-only tool
 allowlist, explicit model/effort, JSON schema output, fresh session identity,
 usage, and independent-vote evidence. Claude `2.1.212` was observed without
-attested effort, fresh context, or independent voting, so it currently falls
-back to generic. A future compatible version may pass the runtime gate. Direct
+attested effort, fresh context, or independent voting, so its direct result is ineligible and generic-shaped. The adapter does not emit Generic bundles; only the qualifying public auto boundary converts it. A future version can become direct-eligible only after machine attestation and caller dispatch evidence pass. Direct
 Claude alone may run `ultra`, using three independent evidence-bearing votes;
 split votes involving `UNPROVEN` require arbitration.
 
@@ -71,16 +77,17 @@ split votes involving `UNPROVEN` require arbitration.
 Direct Cursor requires print mode, ask/read-only mode, enabled sandbox, explicit
 workspace/model/effort, stream JSON, fresh session identity, and matching
 terminal attestation. Cursor `2026.07.16-899851b` was observed without usable
-effort and runtime attestation, so it currently falls back to generic. Future
-versions may run direct only when their events satisfy the shared gate.
+effort and runtime attestation, so its direct result is ineligible and generic-shaped. The adapter does not emit Generic bundles; only the qualifying public auto boundary converts it. A future version can become direct-eligible only after machine attestation and caller dispatch evidence pass.
 
 ## Gemini Adapter
 
 Direct Gemini requires an isolated ephemeral agent configuration, sandbox,
 read/search-only tools, explicit workspace/model/effort, JSON output, fresh
 session binding, and usage telemetry. Gemini was absent from the design host, so
-no installed version is eligible there and execution falls back to generic.
-Future versions may run direct only after machine attestation passes.
+its direct result is ineligible and generic-shaped there. The adapter does not
+emit Generic bundles; only the qualifying public auto boundary converts it. A
+future version can become direct-eligible only after machine attestation and
+caller dispatch evidence pass.
 
 ## Security Boundary
 

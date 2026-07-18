@@ -62,7 +62,7 @@ skills:
         enabled: true
         mode: symlink
     description: Script-backed portable control plane for deterministic adversarial review of specs and plans, using first-class generic task bundles, immutable IDs, revise/reject resolution, and resumable provenance-rich reports.
-    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, and Gemini, but review execution never applies global install changes. The public CLI emits generic bundles because parallel dispatch is unavailable; direct adapter components are fixture-conformant for embedding orchestrators that supply real dispatch evidence and pass machine-readable capability attestation. Codex named-agent TOMLs remain optional separate setup.
+    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, and Gemini, but review execution never applies global install changes. The qualifying public auto path emits generic bundles because parallel dispatch is unavailable; explicit direct selection stops when ineligible. Direct adapter components are fixture-conformant for embedding orchestrators that supply real dispatch evidence and pass machine-readable capability attestation. Codex named-agent TOMLs remain optional separate setup.
 
   - name: code-review
     path: skills/codex-cursor/code-review

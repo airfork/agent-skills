@@ -200,7 +200,7 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adversarial_adapter, "Treat generic mode as the portable baseline and first-class fallback."
     assert_includes adversarial_adapter, "The control plane never silently downgrades model, effort, tier, or vendor."
     assert_includes adversarial_adapter, "requested and observed model"
-    assert_includes adversarial_adapter, "A failed or missing observation selects Generic Adapter"
+    assert_includes adversarial_adapter, "A failed or missing observation returns an ineligible generic-shaped adapter result"
 
     adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
     portable_effort_policy = "If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback."
@@ -246,8 +246,8 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adapter, "A direct adapter may run only when a pinned executable"
     assert_includes adapter, "Runtime events must\nconfirm all shared-gate claims."
     assert_includes adapter, "Codex `0.144.5` was observed during design"
-    assert_includes adapter, "so it currently\nfalls back to generic"
-    assert_includes adapter, "A future version may run direct only after machine\nattestation passes"
+    assert_includes adapter, "so its direct result is currently ineligible and generic-shaped"
+    assert_includes adapter, "A future version can become direct-eligible only after machine attestation and caller dispatch evidence pass"
     refute_includes adapter, "downgrade to `--high`"
   end
 
@@ -372,7 +372,7 @@ class ModelTierContractTest < Minitest::Test
     assert_match(/reviewed content.*exit `5`.*resumable.*pinned/im, adapters)
 
     assert_includes adapters, "`parallel_dispatch` as `unavailable`"
-    assert_includes adapters, "the public CLI therefore selects Generic Adapter before content"
+    assert_includes adapters, "capability gate makes the direct adapter result ineligible before reviewed"
     assert_includes adapters, "fixture-conformant"
     assert_includes adapters, "caller-supplied real dispatch evidence"
     assert_includes adapters, "Generic bundles are intended for host-native parallelism."
@@ -402,7 +402,44 @@ class ModelTierContractTest < Minitest::Test
       assert_includes text, "DEGRADED CAPABILITIES"
     end
     assert_match(/required capability.*`unavailable`.*safety boundary.*`behavioral`/im, skill)
-    assert_match(/distinct from `PASSED`, `PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes/im, skill)
+    assert_includes skill, "replaces only an ordinary `PASSED`"
+    assert_match(/`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict/im, skill)
+    assert_match(/revise\/reject outcomes.*separately disclose degradation/im, skill)
+  end
+
+  def test_adversarial_review_adapter_ineligibility_is_not_universal_cli_fallback
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+    usage = read("USAGE.md")
+
+    assert_includes adapters, "A failed or missing observation returns an ineligible generic-shaped adapter result"
+    assert_match(/Only the public CLI with `--executor auto`.*pre-content.*zero prior external attempts.*converts.*emitted Generic bundles/im, adapters)
+    assert_match(/Explicit direct.*exit `4` or `5`.*never converts.*Generic bundles/im, adapters)
+
+    %w[Codex Claude Cursor Gemini].each do |vendor|
+      section = adapters[/## #{vendor} Adapter\n(?<body>.*?)(?=\n## |\z)/m, :body]
+      refute_nil section, vendor
+      normalized = section.gsub(/\s+/, " ")
+      assert_match(/ineligible.*generic-shaped|generic-shaped.*ineligible/i, normalized, vendor)
+      assert_includes normalized, "The adapter does not emit Generic bundles; only the qualifying public auto boundary converts it."
+      refute_match(/falls? back|selects? generic|execution falls/i, normalized, vendor)
+    end
+
+    assert_match(/Only `--executor auto`.*converts.*Generic bundles/im, usage)
+    assert_match(/Explicit direct.*exit `4` or `5`.*never.*Generic bundles/im, usage)
+  end
+
+  def test_adversarial_review_degradation_only_replaces_an_ordinary_pass
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+    usage = read("USAGE.md")
+
+    [skill, adapters, usage].each do |text|
+      normalized = text.gsub(/\s+/, " ")
+      assert_includes normalized, "DEGRADED CAPABILITIES"
+      assert_includes normalized, "replaces only an ordinary `PASSED`"
+      assert_includes normalized, "`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict"
+      assert_match(/revise\/reject outcomes.*separately disclose degradation/i, normalized)
+    end
   end
 
   def test_codex_model_inheritance_is_structurally_guarded

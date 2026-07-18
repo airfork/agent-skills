@@ -67,7 +67,7 @@ The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
 | `--tier` | `default|high|ultra`; `default` | `high` adds divergence/arbitration; direct `ultra` is Claude-only. Non-Claude auto selection uses generic, never a silent `high` downgrade. |
 | `--mode` | `critique|revise`; `revise` | Critique reports only; revise accepts parent fixes/rejections and verifies resolution. |
 | `--output` | `chat|file|both`; `both` | Select rendered destinations. File output defaults beside the first target as `<stem>-review.md`. |
-| `--executor` | `auto|codex|claude|cursor|gemini|generic`; `auto` | Auto uses direct execution only after exact runtime attestation; otherwise it emits generic bundles. |
+| `--executor` | `auto|codex|claude|cursor|gemini|generic`; `auto` | Only qualifying public auto selection may convert an ineligible pre-content adapter result to generic bundles; explicit direct stops. |
 | `--model`, `--effort` | `inherit` | Direct execution requires explicit exact values. Generic mode records requested values and host evidence. |
 | `--jobs` | positive integer; `1` | Direct execution rejects values above 1; generic emits independent bundles for host-native parallelism. |
 | `--context` | repeatable path | Add bounded repository context. |
@@ -79,16 +79,15 @@ The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
 
 There is no quick/low tier and no silent model, effort, tier, or vendor
 downgrade. The public CLI declares `parallel_dispatch` unavailable, so its
-required gate selects Generic before reviewed content. Direct adapter classes
+required gate makes direct adapter results ineligible before reviewed content. Direct adapter classes
 are fixture-conformant for embedding orchestrators that supply real dispatch
 evidence; the public CLI does not claim direct execution. Generic bundles are
 intended for host-native parallelism.
 
-Automatic generic fallback applies only to `--executor auto` at the initial
-pre-content boundary with zero prior external attempts. Explicit direct
-selection never falls back. Capability failures stop with exit `4`; execution
-or invalid-result failures stop with exit `5`. No post-content failure changes
-vendor; the run stays resumable and its executor stays pinned.
+Only `--executor auto`, at the pre-content boundary with zero prior external
+attempts, converts an ineligible result to emitted Generic bundles. Explicit direct
+selection stops with exit `4` or `5`, stays pinned/resumable, and never converts
+the result to Generic bundles. No post-content failure changes vendor.
 
 ### Lifecycle
 
@@ -106,10 +105,11 @@ vendor; the run stays resumable and its executor stays pinned.
 Reports contain immutable candidate/finding IDs, `PROMOTE|REFUTE|UNPROVEN`
 dispositions, source angles, current target digests, complete capability and
 executor/CLI/model/effort provenance, retries, timing, and usage metrics when
-exposed. `DEGRADED CAPABILITIES` replaces an ordinary pass when any required
-capability is unavailable or a required safety boundary is only behavioral; it
-is separate from convergence outcomes. Running a review never installs global
-links or agent configuration.
+exposed. `DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a
+required capability is unavailable or a safety boundary is behavioral.
+`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their
+verdict; revise/reject outcomes also keep their verdict and separately disclose degradation.
+Running a review never installs global links or agent configuration.
 
 If Ruby is unavailable, use the bounded manual fallback in the skill: follow
 its attack/judge references and schemas, preserve IDs and parent authority,

@@ -9,8 +9,7 @@ description: >-
 
 # Adversarial Review
 
-Require Ruby 2.6 or newer and repository spec/plan files. Run the control plane;
-do not recreate its state or outputs. Load details from
+Require Ruby 2.6 or newer and repository spec/plan files. Load details from
 [attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
 [platform-adapters.md](platform-adapters.md).
 
@@ -67,7 +66,6 @@ never claim scripted crash recovery or resumability.
 
 ## Outcomes
 
-Use `DEGRADED CAPABILITIES` when any required capability is `unavailable` or a
-required safety boundary is only `behavioral`. This capability verdict is
-distinct from `PASSED`, `PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes.
+`DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a required capability is `unavailable` or a safety boundary is `behavioral`.
+`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict; revise/reject outcomes also keep their verdict and separately disclose degradation.
 Return the script's stable IDs, provenance, and usage. Critique mode never edits targets.
