@@ -190,8 +190,15 @@ module AdversarialReview
       require_option!(options, :run_dir)
       state = State.load(options.fetch(:run_dir))
       manifest = state.manifest_snapshot
-      selected = state.to_h.fetch("execution").fetch("selected_executor")
+      requested_report = nil
+      if options[:report]
+        requested_report = report_path_for(
+          manifest, options.fetch(:report), run_dir: state_run_dir(state)
+        )
+        state.set_report_path!(requested_report)
+      end
       snapshot = state.to_h
+      selected = snapshot.fetch("execution").fetch("selected_executor")
       fallback_generic = manifest.fetch("requested_executor") == "auto" &&
         snapshot.dig("execution", "tasks").empty?
       if options[:actions]
@@ -254,7 +261,11 @@ module AdversarialReview
         state.transition_to(next_cull)
         selected = dispatch_judge_tasks(state, selected, env, fallback_generic: fallback_generic)
       when "culling", "culling-new-findings"
-        if manifest.fetch("mode") == "critique"
+        if snapshot.fetch("pending_arbiter_subjects").any?
+          state.transition_to("arbitrating")
+          selected = dispatch_role_task(state, "arbiter", selected, env,
+                                        fallback_generic: fallback_generic)
+        elsif manifest.fetch("mode") == "critique"
           state.transition_to("complete")
         elsif snapshot.fetch("stage") == "culling-new-findings" &&
               snapshot.fetch("findings").none? { |finding| finding.fetch("state") == "pending" }
@@ -300,18 +311,33 @@ module AdversarialReview
         selected = dispatch_role_task(state, "dedupe", selected, env,
                                       fallback_generic: fallback_generic)
       when "arbitrating"
-        state.transition_to(state.can_complete? ? "complete" : "did-not-converge")
+        latest = state.to_h
+        if latest.fetch("pending_arbiter_subjects").any?
+          state.transition_to("did-not-converge")
+        elsif manifest.fetch("mode") == "revise" && pending_author_actions?(latest)
+          state.transition_to("awaiting-author")
+          task = Prompts.parent_action_task(manifest, state.to_h)
+          state.create_task_bundle(task.fetch("task_id")) { task }
+        elsif latest.fetch("fresh_sweep_required") && !latest.fetch("fresh_sweep_completed")
+          if latest.fetch("revise_round") >= 2
+            state.transition_to("did-not-converge")
+          else
+            state.transition_to("fresh-sweep")
+            selected = dispatch_attack_tasks(
+              state, selected, env,
+              fallback_generic: manifest.fetch("requested_executor") == "auto"
+            )
+          end
+        else
+          state.transition_to(state.can_complete? ? "complete" : "did-not-converge")
+        end
       when "complete", "did-not-converge"
         # Idempotent terminal render/status.
       else
         raise Error.new("invalid_state", "run cannot be continued from this stage", 3,
                         {"stage" => snapshot.fetch("stage")})
       end
-      report_path = if options[:report]
-                      report_path_for(manifest, options[:report], run_dir: state_run_dir(state))
-                    else
-                      manifest["report_path"]
-                    end
+      report_path = requested_report || state.to_h.dig("execution", "report_path")
       terminal_response(state, report_path: report_path, program_path: program_path)
     end
 
@@ -456,6 +482,9 @@ module AdversarialReview
         raise Error.new("invalid_report", "report parent cannot be resolved", 2) if next_cursor == cursor
         cursor = next_cursor
       end
+      unless missing.empty?
+        raise Error.new("invalid_report", "report parent directory must already exist", 2)
+      end
       raise Error.new("invalid_report", "report parent contains a symlink", 2) if File.symlink?(cursor)
       canonical_parent = File.join(File.realpath(cursor), *missing)
       canonical_path = File.join(canonical_parent, basename)
@@ -507,10 +536,12 @@ module AdversarialReview
 
     def dispatch_attack_tasks(state, selected, env, fallback_generic: false)
       manifest = state.manifest_snapshot
-      round = state.to_h.fetch("revise_round")
+      snapshot = state.to_h
+      round = snapshot.fetch("revise_round")
+      current_digests = snapshot.fetch("current_target_digests")
       manifest.fetch("enabled_tasks").each do |angle|
         task = Prompts.attack_task(manifest, angle, 1, round: round,
-                                   current_digests: state.to_h.fetch("current_target_digests"))
+                                   current_digests: current_digests)
         selected = dispatch_task(
           state, task, selected, env, fallback_generic: fallback_generic
         )
@@ -530,11 +561,12 @@ module AdversarialReview
       return dispatch_role_task(state, "judge", selected, env,
                                 fallback_generic: fallback_generic) unless manifest.fetch("tier") == "ultra"
 
+      snapshot = state.to_h
       voters = %w[voter-1 voter-2 voter-3]
-      vote_group = "VG-cull-r#{state.to_h.fetch("revise_round")}"
+      vote_group = "VG-cull-r#{snapshot.fetch("revise_round")}"
       voters.each do |voter|
         task = Prompts.role_task(
-          manifest, state.to_h, "judge", voter_id: voter,
+          manifest, snapshot, "judge", voter_id: voter,
           voter_ids: voters, vote_group_id: vote_group
         )
         selected = dispatch_task(state, task, selected, env, fallback_generic: fallback_generic)
@@ -549,7 +581,7 @@ module AdversarialReview
 
       if selected == "generic"
         state.pin_executor!("generic") unless snapshot.dig("execution", "executor_pinned")
-        Adapters::Generic.new.run(task, state_run_dir(state))
+        Adapters::Generic.new.run(task, state_run_dir(state), state: state)
         return selected
       end
 
@@ -578,6 +610,7 @@ module AdversarialReview
       result = execute_direct(state, task, selected, env)
       prompt_bytes = JSON.generate(task).bytesize
       phase = dispatch_phase(result)
+      session_ids = session_ids_from_provenance(result.runtime_provenance)
       selecting = intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
       unless result.status == "complete" && result.payload
         eligible = Adapters::Base.eligibility_error?(result.error_code)
@@ -585,22 +618,24 @@ module AdversarialReview
           state.finalize_selection_intent!(
             task_id: task.fetch("task_id"), executor: selected, status: "fallback",
             error_code: result.error_code, phase: phase, content_sent: false,
-            prompt_bytes: prompt_bytes, selected_executor: "generic"
+            prompt_bytes: prompt_bytes, selected_executor: "generic",
+            session_ids: session_ids
           )
-          Adapters::Generic.new.run(task, state_run_dir(state))
+          Adapters::Generic.new.run(task, state_run_dir(state), state: state)
           return "generic"
         end
         if selecting
           state.finalize_selection_intent!(
             task_id: task.fetch("task_id"), executor: selected, status: "failed",
             error_code: result.error_code, phase: phase, content_sent: phase == "execution",
-            prompt_bytes: prompt_bytes, selected_executor: selected
+            prompt_bytes: prompt_bytes, selected_executor: selected,
+            session_ids: session_ids
           )
         else
           state.record_dispatch_attempt!(
             task_id: task.fetch("task_id"), executor: selected, status: "failed",
             error_code: result.error_code, phase: phase, content_sent: phase == "execution",
-            prompt_bytes: prompt_bytes
+            prompt_bytes: prompt_bytes, session_ids: session_ids
           )
         end
         status = eligible ? 4 : 5
@@ -621,12 +656,14 @@ module AdversarialReview
         state.finalize_selection_intent!(
           task_id: task.fetch("task_id"), executor: selected, status: "complete",
           error_code: nil, phase: "execution", content_sent: true,
-          prompt_bytes: prompt_bytes, selected_executor: selected
+          prompt_bytes: prompt_bytes, selected_executor: selected,
+          session_ids: session_ids
         )
       else
         state.record_dispatch_attempt!(
           task_id: task.fetch("task_id"), executor: selected, status: "complete",
-          error_code: nil, phase: "execution", content_sent: true, prompt_bytes: prompt_bytes
+          error_code: nil, phase: "execution", content_sent: true, prompt_bytes: prompt_bytes,
+          session_ids: session_ids
         )
       end
       selected
@@ -780,6 +817,7 @@ module AdversarialReview
           return false
         end
       end
+      return false if stage == "arbitrating" && snapshot.fetch("pending_arbiter_subjects").empty?
 
       manifest = state.manifest_snapshot
       tasks = case stage
@@ -871,8 +909,20 @@ module AdversarialReview
         )
       end
       manifest = state.manifest_snapshot
+      authenticated = nil
+      state.read_task_bundle(task.fetch("task_id")) do |_locked_manifest, _locked_state, bundle, bytes|
+        task_path = File.join(state_run_dir(state), "tasks", "#{task.fetch("task_id")}.json")
+        handoff = Adapters::Generic.handoff_metadata(task_path, bundle, bytes)
+        authenticated = Adapters::Generic.read_authenticated_handoff(handoff)
+      end
+      unless authenticated.fetch("task") == task
+        raise Adapters::Generic::Error.new(
+          "invalid_task", "direct task does not match its authenticated bundle"
+        )
+      end
+      task = authenticated.fetch("task")
       schema_name = task.fetch("schema").sub(%r{\Aassets/schemas/}, "").sub(/\.json\z/, "")
-      schema = read_json_file(File.join(AdversarialReview.root, task.fetch("schema")))
+      schema = authenticated.fetch("schema")
       executable = env.fetch("ADVERSARIAL_REVIEW_#{selected.upcase}_CLI", EXECUTABLES.fetch(selected))
       adapter = ADAPTERS.fetch(selected).new(
         executable: executable,
@@ -884,7 +934,8 @@ module AdversarialReview
         prompt: JSON.generate(task),
         tier: manifest.fetch("tier"),
         run_directory: state_run_dir(state),
-        source_env: env
+        source_env: env,
+        prior_session_ids: prior_direct_session_ids(snapshot)
       )
       adapter.execute(
         required_checks: task.fetch("required_checks"),
@@ -898,6 +949,32 @@ module AdversarialReview
 
     def state_run_dir(state)
       state.instance_variable_get(:@run_dir)
+    end
+
+    def prior_direct_session_ids(snapshot)
+      ids = Array(snapshot.dig("execution", "dispatch_attempts")).each_with_object([]) do |attempt, found|
+        Array(attempt.is_a?(Hash) ? attempt["session_ids"] : nil).each do |session_id|
+          found << session_id if session_id.is_a?(String) && !session_id.empty? && !found.include?(session_id)
+        end
+      end
+      tasks = snapshot.dig("execution", "tasks")
+      return ids unless tasks.is_a?(Hash)
+
+      tasks.values.each_with_object(ids) do |record, found|
+        provenance = record.is_a?(Hash) ? record["runtime_provenance"] : nil
+        session_ids_from_provenance(provenance).each do |session_id|
+          found << session_id unless found.include?(session_id)
+        end
+      end
+    end
+
+    def session_ids_from_provenance(provenance)
+      return [] unless provenance.is_a?(Hash)
+
+      ([provenance["preflight"]] + Array(provenance["executions"])).each_with_object([]) do |observation, ids|
+        session_id = observation.is_a?(Hash) ? observation["session_id"] : nil
+        ids << session_id if session_id.is_a?(String) && !session_id.empty? && !ids.include?(session_id)
+      end
     end
 
     def response(state)
@@ -943,6 +1020,14 @@ module AdversarialReview
       snapshot.fetch("emitted_tasks").keys.reject do |task_id|
         snapshot.fetch("ingested_results").key?(task_id)
       end.sort
+    end
+
+    def pending_author_actions?(snapshot)
+      snapshot.fetch("findings").any? do |finding|
+        actionable = finding.fetch("reported") || %w[CRITICAL HIGH].include?(finding.fetch("severity"))
+        actionable && finding.fetch("state") == "pending" &&
+          !snapshot.fetch("author_actions").key?(finding.fetch("id"))
+      end
     end
 
     def terminal_response(state, report_path:, program_path:)
@@ -1028,6 +1113,7 @@ module AdversarialReview
       )
       {
         "schema_version" => 1,
+        "terminal_stage" => snapshot.fetch("stage"),
         "run_id" => manifest.fetch("run_id"),
         "targets" => current_targets,
         "repository" => manifest.fetch("repository"),

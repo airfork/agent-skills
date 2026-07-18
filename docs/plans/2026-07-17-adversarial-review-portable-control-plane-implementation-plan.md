@@ -264,12 +264,12 @@ Expected: all schema tests pass with zero failures.
 - [ ] **Step 8: Commit Task 1**
 
 ```bash
-git add skills/general/adversarial-review/assets/schemas \
+rtk git add skills/general/adversarial-review/assets/schemas \
   skills/general/adversarial-review/attack-angles.md \
   skills/general/adversarial-review/judge-rubric.md \
   skills/general/adversarial-review/scripts/lib \
   test/adversarial_review_schema_test.rb test/model_tier_contract_test.rb
-git commit -m "Add adversarial review result schemas"
+rtk git commit -m "Add adversarial review result schemas"
 ```
 
 ## Task 2: Build Manifests, Explicit Role Routing, And Compact Inventories
@@ -378,11 +378,11 @@ Expected: both pass.
 - [ ] **Step 5: Commit Task 2**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review/manifest.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review/manifest.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   test/support/adversarial_review_helper.rb \
   test/adversarial_review_manifest_test.rb
-git commit -m "Build portable adversarial review manifests"
+rtk git commit -m "Build portable adversarial review manifests"
 ```
 
 ## Task 3: Implement Locked, Resumable Review State
@@ -468,11 +468,11 @@ Expected: all state tests pass.
 - [ ] **Step 5: Commit Task 3**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/atomic.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/state.rb \
   test/adversarial_review_state_test.rb
-git commit -m "Add resumable adversarial review state"
+rtk git commit -m "Add resumable adversarial review state"
 ```
 
 ## Task 4: Generate Canonical Prompts And Generic Task Bundles
@@ -549,12 +549,12 @@ Expected: task bundles pass all assertions.
 - [ ] **Step 5: Commit Task 4**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/capabilities.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/prompts.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/generic.rb \
   test/adversarial_review_cli_test.rb
-git commit -m "Emit portable adversarial review tasks"
+rtk git commit -m "Emit portable adversarial review tasks"
 ```
 
 ## Task 5: Add Result Ingestion, Cull Semantics, And Author Actions
@@ -625,11 +625,11 @@ Run the two focused tests. Expected: zero failures.
 - [ ] **Step 5: Commit Task 5**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review/state.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review/state.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/schema.rb \
   test/adversarial_review_state_test.rb \
   test/adversarial_review_cli_test.rb
-git commit -m "Ingest adversarial review findings deterministically"
+rtk git commit -m "Ingest adversarial review findings deterministically"
 ```
 
 ## Task 6: Render Atomic Reports And Shared Chat Summaries
@@ -695,10 +695,10 @@ Expected: all report tests pass.
 - [ ] **Step 5: Commit Task 6**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/reporting.rb \
   test/adversarial_review_reporting_test.rb
-git commit -m "Render deterministic adversarial review reports"
+rtk git commit -m "Render deterministic adversarial review reports"
 ```
 
 ## Task 7: Add A Shared Process Runner And Fake-CLI Harness
@@ -791,12 +791,12 @@ Expected: runner/base tests pass.
 - [ ] **Step 5: Commit Task 7**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review/runner.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review/runner.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/base.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   test/support/adversarial_review_helper.rb \
   test/adversarial_review_adapters_test.rb test/adversarial_review_security_test.rb
-git commit -m "Add adversarial review adapter runner"
+rtk git commit -m "Add adversarial review adapter runner"
 ```
 
 ## Task 8: Implement Codex And Claude Direct Adapters
@@ -898,12 +898,12 @@ Expected: Codex, Claude, runner, and base tests all pass.
 - [ ] **Step 7: Commit Task 8**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/codex.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/codex.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/claude.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   test/fixtures/adversarial-review/codex test/fixtures/adversarial-review/claude \
   test/adversarial_review_adapters_test.rb
-git commit -m "Add Codex and Claude adversarial review adapters"
+rtk git commit -m "Add Codex and Claude adversarial review adapters"
 ```
 
 ## Task 9: Implement Cursor And Gemini Direct Adapters
@@ -991,12 +991,12 @@ Expected: every fake adapter test passes.
 - [ ] **Step 7: Commit Task 9**
 
 ```bash
-git add skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/cursor.rb \
+rtk git add skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/cursor.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review/adapters/gemini.rb \
   skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   test/fixtures/adversarial-review/cursor test/fixtures/adversarial-review/gemini \
   test/adversarial_review_adapters_test.rb
-git commit -m "Add Cursor and Gemini adversarial review adapters"
+rtk git commit -m "Add Cursor and Gemini adversarial review adapters"
 ```
 
 ## Task 10: Wire The Public CLI And Auto-Selection
@@ -1062,10 +1062,10 @@ Expected: all pass.
 - [ ] **Step 5: Commit Task 10**
 
 ```bash
-git add skills/general/adversarial-review/scripts/adversarial-review \
+rtk git add skills/general/adversarial-review/scripts/adversarial-review \
   skills/general/adversarial-review/scripts/lib/adversarial_review.rb \
   test/adversarial_review_cli_test.rb
-git commit -m "Expose portable adversarial review CLI"
+rtk git commit -m "Expose portable adversarial review CLI"
 ```
 
 ## Task 11: Update The Skill Contract And Public Documentation
@@ -1135,9 +1135,9 @@ Expected: all pass.
 - [ ] **Step 6: Commit Task 11**
 
 ```bash
-git add skills/general/adversarial-review USAGE.md CATALOG.md skills.yaml \
+rtk git add skills/general/adversarial-review USAGE.md CATALOG.md skills.yaml \
   COMMANDS.md test/model_tier_contract_test.rb
-git commit -m "Document portable adversarial review execution"
+rtk git commit -m "Document portable adversarial review execution"
 ```
 
 ## Task 12: Extend Verification And Run Cross-Adapter Conformance
@@ -1232,9 +1232,9 @@ would link; no global state changes.
 - [ ] **Step 7: Commit Task 12**
 
 ```bash
-git add scripts/verify scripts/verify-adversarial-review test/adversarial_review_cli_test.rb \
+rtk git add scripts/verify scripts/verify-adversarial-review test/adversarial_review_cli_test.rb \
   test/adversarial_review_adapters_test.rb
-git commit -m "Verify adversarial review control plane"
+rtk git commit -m "Verify adversarial review control plane"
 ```
 
 ## Task 13: Run Report-Only A/B Evaluation And Final Review
@@ -1318,10 +1318,10 @@ contains only intentional implementation, tests, docs, and evaluation changes.
 - [ ] **Step 7: Commit evaluation and remediation**
 
 ```bash
-git add docs/plans/2026-07-17-adversarial-review-control-plane-evaluation.md \
+rtk git add docs/plans/2026-07-17-adversarial-review-control-plane-evaluation.md \
   skills/general/adversarial-review test scripts/verify USAGE.md CATALOG.md \
   skills.yaml COMMANDS.md
-git commit -m "Evaluate portable adversarial review control plane"
+rtk git commit -m "Evaluate portable adversarial review control plane"
 ```
 
 ## Plan Completion Gate

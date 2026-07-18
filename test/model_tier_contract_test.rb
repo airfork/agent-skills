@@ -395,10 +395,10 @@ class ModelTierContractTest < Minitest::Test
     assert_match(/reviewed content.*exit `5`.*resumable.*pinned/im, adapters)
 
     assert_includes adapters, "`parallel_dispatch` as `unavailable`"
-    assert_includes adapters, "capability gate makes the direct adapter result ineligible before reviewed"
-    assert_includes adapters, "fixture-conformant"
-    assert_includes adapters, "caller-supplied real dispatch evidence"
-    assert_includes adapters, "Generic bundles are intended for host-native parallelism."
+    assert_match(/default\/high direct Codex and Claude.*advisory.*all other safety/im, adapters)
+    assert_includes adapters, "Ultra keeps parallel dispatch as a hard requirement."
+    assert_match(/Cursor and\s+Gemini remain direct-ineligible/, adapters)
+    assert_includes adapters, "Generic bundles are the portable path for host-native parallelism."
     assert_includes adapters, "`pending_task_handoffs` is the normative dispatch surface"
     assert_match(/verify `task_sha256`.*before parsing JSON.*before using.*cwd.*schema.*prompt/im, adapters)
     assert_match(/read the task bytes exactly once/i, adapters)

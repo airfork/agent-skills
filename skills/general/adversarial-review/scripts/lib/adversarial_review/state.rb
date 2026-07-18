@@ -35,12 +35,12 @@ module AdversarialReview
       "prepared" => %w[attacking].freeze,
       "attacking" => %w[deduplicating].freeze,
       "deduplicating" => %w[culling culling-new-findings].freeze,
-      "culling" => %w[awaiting-author complete].freeze,
+      "culling" => %w[awaiting-author arbitrating complete].freeze,
       "awaiting-author" => %w[resolving].freeze,
       "resolving" => %w[fresh-sweep arbitrating complete did-not-converge].freeze,
       "fresh-sweep" => %w[deduplicating culling-new-findings].freeze,
       "culling-new-findings" => %w[awaiting-author arbitrating complete did-not-converge].freeze,
-      "arbitrating" => %w[awaiting-author complete did-not-converge].freeze
+      "arbitrating" => %w[awaiting-author fresh-sweep complete did-not-converge].freeze
     }.freeze
     NEXT_ACTIONS = {
       "prepared" => "attack",
@@ -374,6 +374,23 @@ module AdversarialReview
         snapshot = deep_freeze(deep_copy(manifest))
       end
       snapshot
+    end
+
+    def set_report_path!(path)
+      unless path.nil? || (path.is_a?(String) && File.absolute_path(path) == path)
+        raise Error.new("invalid_report", "report path must be absolute", {"path" => path}, 2)
+      end
+      mutate! do |data|
+        current = data.dig("execution", "report_path")
+        if data["summary"] && current != path
+          raise Error.new(
+            "invalid_report", "report destination is immutable after terminal rendering",
+            {"requested" => path, "expected" => current}, 2
+          )
+        end
+        data.fetch("execution")["report_path"] = path
+      end
+      self
     end
 
     def create_task_bundle(task_id)
@@ -972,11 +989,13 @@ module AdversarialReview
     end
 
     def finalize_selection_intent!(task_id:, executor:, status:, error_code:, phase:,
-                                   content_sent:, prompt_bytes:, selected_executor:)
+                                   content_sent:, prompt_bytes:, selected_executor:,
+                                   session_ids: [])
       validate_task_id!(task_id)
       validate_dispatch_attempt!(task_id: task_id, executor: executor, status: status,
                                  error_code: error_code, phase: phase,
-                                 content_sent: content_sent, prompt_bytes: prompt_bytes)
+                                 content_sent: content_sent, prompt_bytes: prompt_bytes,
+                                 session_ids: session_ids)
       mutate! do |data|
         execution = data.fetch("execution")
         intent = execution["selection_intent"]
@@ -1007,21 +1026,24 @@ module AdversarialReview
         intent["phase"] = phase
         execution.fetch("dispatch_attempts") << dispatch_attempt_record(
           task_id: task_id, executor: executor, status: status, error_code: error_code,
-          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes
+          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes,
+          session_ids: session_ids
         )
       end
       self
     end
 
     def record_dispatch_attempt!(task_id:, executor:, status:, error_code:, phase:,
-                                 content_sent:, prompt_bytes:)
+                                 content_sent:, prompt_bytes:, session_ids: [])
       validate_dispatch_attempt!(task_id: task_id, executor: executor, status: status,
                                  error_code: error_code, phase: phase,
-                                 content_sent: content_sent, prompt_bytes: prompt_bytes)
+                                 content_sent: content_sent, prompt_bytes: prompt_bytes,
+                                 session_ids: session_ids)
       mutate! do |data|
         data.fetch("execution").fetch("dispatch_attempts") << dispatch_attempt_record(
           task_id: task_id, executor: executor, status: status, error_code: error_code,
-          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes
+          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes,
+          session_ids: session_ids
         )
       end
       self
@@ -1297,7 +1319,7 @@ module AdversarialReview
       valid_dispatch_attempts = execution.fetch("dispatch_attempts").is_a?(Array) &&
         execution.fetch("dispatch_attempts").all? do |attempt|
           attempt.is_a?(Hash) &&
-            attempt.keys.sort == %w[content_sent error_code executor phase prompt_bytes status task_id] &&
+            attempt.keys.sort == %w[content_sent error_code executor phase prompt_bytes session_ids status task_id] &&
             attempt["task_id"].is_a?(String) && RUN_ID.match?(attempt["task_id"]) &&
             Manifest::EXECUTORS.include?(attempt["executor"]) && attempt["executor"] != "auto" &&
             %w[complete failed fallback].include?(attempt["status"]) &&
@@ -1305,7 +1327,13 @@ module AdversarialReview
              (attempt["error_code"].is_a?(String) && !attempt["error_code"].empty?)) &&
             %w[probe preflight execution].include?(attempt["phase"]) &&
             [true, false].include?(attempt["content_sent"]) &&
-            attempt["prompt_bytes"].is_a?(Integer) && attempt["prompt_bytes"].positive?
+            attempt["prompt_bytes"].is_a?(Integer) && attempt["prompt_bytes"].positive? &&
+            attempt["session_ids"].is_a?(Array) &&
+            attempt["session_ids"].length <= MAX_STATE_ITEMS &&
+            attempt["session_ids"].uniq.length == attempt["session_ids"].length &&
+            attempt["session_ids"].all? do |session_id|
+              session_id.is_a?(String) && !session_id.empty? && session_id.bytesize <= 1024
+            end
         end
       unless valid_dispatch_attempts
         raise Error.new("invalid_state", "persisted dispatch attempt evidence is invalid", {}, 3)
@@ -1393,9 +1421,12 @@ module AdversarialReview
         task_id.is_a?(String) && !task_id.empty? && attempt.is_a?(Integer) && !attempt.negative?
       end
       valid_emitted_tasks = data.fetch("emitted_tasks").all? do |task_id, record|
-        record.is_a?(Hash) && record.keys.sort == %w[angle attempt kind round sha256 task_id] &&
+        record.is_a?(Hash) && record.keys.sort == %w[angle attempt authority kind round sha256 task_id] &&
           record["task_id"] == task_id && task_id.is_a?(String) && RUN_ID.match?(task_id) &&
           RESULT_SCHEMAS.include?(record["kind"]) &&
+          %w[parent reviewer].include?(record["authority"]) &&
+          (record["kind"] == "author-actions" ? record["authority"] == "parent" :
+            record["authority"] == "reviewer") &&
           (record["angle"].nil? || (record["angle"].is_a?(String) && !record["angle"].empty?)) &&
           [1, 2].include?(record["round"]) && record["attempt"].is_a?(Integer) &&
           record["attempt"].positive? && record["sha256"].is_a?(String) &&
@@ -1426,7 +1457,9 @@ module AdversarialReview
         indexed[candidate.fetch("id")] = candidate
       end
       unless data.fetch("findings").all? do |finding|
-               valid_finding_snapshot?(finding, candidates_by_id)
+               valid_finding_snapshot?(
+                 finding, candidates_by_id, data.fetch("exact_duplicate_sources")
+               )
              end
         raise Error.new("invalid_state", "persisted findings are invalid", {}, 3)
       end
@@ -1532,7 +1565,7 @@ module AdversarialReview
       false
     end
 
-    def self.valid_finding_snapshot?(finding, candidates_by_id)
+    def self.valid_finding_snapshot?(finding, candidates_by_id, duplicate_sources)
       return false unless finding.is_a?(Hash)
 
       candidate_ids = finding["candidate_ids"]
@@ -1540,15 +1573,21 @@ module AdversarialReview
       return false unless candidate_ids.is_a?(Array) && !candidate_ids.empty? &&
                           candidate_ids.all? { |id| id.is_a?(String) && candidates_by_id.key?(id) } &&
                           candidate_ids.uniq.length == candidate_ids.length &&
-                          sources.is_a?(Array) && sources.length == candidate_ids.length
+                          sources.is_a?(Array) && !sources.empty?
 
-      sources_valid = sources.each_with_index.all? do |source, index|
-        candidate = candidates_by_id[candidate_ids[index]]
-        source.is_a?(Hash) && source["candidate_id"] == candidate.fetch("id") &&
-          source["angle"] == candidate.fetch("angle") &&
-          source["attempt"] == candidate.fetch("attempt")
+      represented = {}
+      sources_valid = sources.all? do |source|
+        candidate = source.is_a?(Hash) ? candidates_by_id[source["candidate_id"]] : nil
+        next false unless candidate && candidate_ids.include?(candidate.fetch("id"))
+
+        expected = duplicate_sources.fetch(candidate.fetch("id"), []).map do |item|
+          [item["angle"], item["attempt"]]
+        end
+        expected << [candidate.fetch("angle"), candidate.fetch("attempt")]
+        represented[candidate.fetch("id")] = true
+        expected.include?([source["angle"], source["attempt"]])
       end
-      sources_valid &&
+      sources_valid && represented.keys.sort == candidate_ids.sort &&
         finding["id"].is_a?(String) && finding["id"].match?(/\AAR-[0-9a-f]{8}-\d{3,}\z/) &&
         finding["group_id"].is_a?(String) && !finding["group_id"].empty? &&
         SEVERITY_RANK.key?(finding["severity"]) && finding["confidence"].is_a?(Numeric) &&
@@ -1631,7 +1670,7 @@ module AdversarialReview
       end
       valid_duplicate_links = data.fetch("exact_duplicate_map").values.uniq.length ==
         data.fetch("exact_duplicate_map").values.length &&
-        data.fetch("exact_duplicate_map").values.sort == data.fetch("exact_duplicate_sources").keys.sort
+        (data.fetch("exact_duplicate_map").values - data.fetch("exact_duplicate_sources").keys).empty?
       valid_groups = data.fetch("semantic_groups").all? do |group_id, group|
         required_group_keys = %w[candidate_ids group_id location round source_angles summary task_id]
         allowed_group_keys = required_group_keys + %w[arbiter_decision arbiter_evidence]
@@ -1652,8 +1691,11 @@ module AdversarialReview
           group["candidate_ids"].is_a?(Array) && !group["candidate_ids"].empty? &&
           group["candidate_ids"].uniq.length == group["candidate_ids"].length &&
           group["candidate_ids"].all? { |candidate_id| candidate_ids.key?(candidate_id) } &&
-          group["candidate_ids"].map do |candidate_id|
-            candidate_records.fetch(candidate_id)["angle"]
+          group["candidate_ids"].flat_map do |candidate_id|
+            candidate = candidate_records.fetch(candidate_id)
+            duplicate_angles = data.fetch("exact_duplicate_sources")
+                                   .fetch(candidate_id, []).map { |source| source["angle"] }
+            duplicate_angles + [candidate["angle"]]
           end.uniq.sort == source_angles.sort &&
           [1, 2].include?(group["round"]) && group["task_id"].is_a?(String) &&
           data.fetch("ingested_results").key?(group["task_id"]) &&
@@ -1979,14 +2021,19 @@ module AdversarialReview
     end
 
     def validate_dispatch_attempt!(task_id:, executor:, status:, error_code:, phase:,
-                                   content_sent:, prompt_bytes:)
+                                   content_sent:, prompt_bytes:, session_ids:)
       validate_task_id!(task_id)
       return if Manifest::EXECUTORS.include?(executor) && executor != "auto" &&
                 %w[complete failed fallback].include?(status) &&
                 (error_code.nil? || (error_code.is_a?(String) && !error_code.empty?)) &&
                 %w[probe preflight execution].include?(phase) &&
                 [true, false].include?(content_sent) &&
-                prompt_bytes.is_a?(Integer) && prompt_bytes.positive?
+                prompt_bytes.is_a?(Integer) && prompt_bytes.positive? &&
+                session_ids.is_a?(Array) && session_ids.length <= MAX_STATE_ITEMS &&
+                session_ids.uniq.length == session_ids.length &&
+                session_ids.all? do |session_id|
+                  session_id.is_a?(String) && !session_id.empty? && session_id.bytesize <= 1024
+                end
 
       raise Error.new("invalid_dispatch_attempt", "dispatch attempt evidence is malformed", {}, 3)
     end
@@ -2016,11 +2063,12 @@ module AdversarialReview
     end
 
     def dispatch_attempt_record(task_id:, executor:, status:, error_code:, phase:,
-                                content_sent:, prompt_bytes:)
+                                content_sent:, prompt_bytes:, session_ids:)
       {
         "task_id" => task_id, "executor" => executor, "status" => status,
         "error_code" => error_code, "phase" => phase,
-        "content_sent" => content_sent, "prompt_bytes" => prompt_bytes
+        "content_sent" => content_sent, "prompt_bytes" => prompt_bytes,
+        "session_ids" => session_ids.dup
       }
     end
 
@@ -2277,6 +2325,11 @@ module AdversarialReview
              match[:prefix].start_with?("#{kind}-")
         invalid_result!("invalid_task", "task kind does not match its canonical task ID")
       end
+      authority = task.fetch("authority", kind == "author-actions" ? "parent" : "reviewer")
+      expected_authority = kind == "author-actions" ? "parent" : "reviewer"
+      unless authority == expected_authority
+        invalid_result!("invalid_task", "task authority does not match its role")
+      end
       angle = task["angle"]
       if angle
         unless angle.is_a?(String) && !angle.empty? && match[:prefix] == "#{kind}-#{angle}" &&
@@ -2288,6 +2341,7 @@ module AdversarialReview
         "task_id" => requested_id,
         "kind" => kind,
         "angle" => angle,
+        "authority" => authority,
         "round" => round,
         "attempt" => attempt,
         "sha256" => Digest::SHA256.hexdigest(task_bytes)
@@ -2548,6 +2602,7 @@ module AdversarialReview
       end
       angle = task.fetch("angle", "resolution")
       attempt = task.fetch("attempt", 1)
+      candidate_round = data.fetch("revise_round") + 1
       ids = []
       findings.each_with_index do |finding, index|
         fingerprint = finding_fingerprint(finding)
@@ -2558,12 +2613,12 @@ module AdversarialReview
           "round" => data.fetch("revise_round"),
           "finding_index" => index
         }
-        candidate_id = data.fetch("exact_duplicate_map")[fingerprint]
+        candidate_id = duplicate_candidate_for_round(data, fingerprint, candidate_round)
         if candidate_id
           data.fetch("exact_duplicate_sources").fetch(candidate_id) << source
         else
           candidate = add_candidate_to_data!(
-            data, angle, attempt, finding, round: data.fetch("revise_round") + 1
+            data, angle, attempt, finding, round: candidate_round
           )
           candidate_id = candidate.fetch("id")
           data.fetch("exact_duplicate_map")[fingerprint] = candidate_id
@@ -2608,8 +2663,8 @@ module AdversarialReview
         invalid_result!("duplicate_group", "semantic group ID already exists", {"group_ids" => collisions})
       end
       groups.each do |group|
-        expected_angles = group.fetch("candidate_ids").map do |candidate_id|
-          applicable_by_id.fetch(candidate_id).fetch("angle")
+        expected_angles = group.fetch("candidate_ids").flat_map do |candidate_id|
+          candidate_source_angles(data, applicable_by_id.fetch(candidate_id))
         end.uniq.sort
         unless group.fetch("source_angles").uniq.sort == expected_angles
           invalid_result!(
@@ -3002,12 +3057,8 @@ module AdversarialReview
           "state" => "pending",
           "reported" => false,
           "round" => data.fetch("revise_round"),
-          "sources" => candidates.map do |candidate|
-            {
-              "candidate_id" => candidate.fetch("id"),
-              "angle" => candidate.fetch("angle"),
-              "attempt" => candidate.fetch("attempt")
-            }
+          "sources" => candidates.flat_map do |candidate|
+            candidate_sources(data, candidate)
           end
         )
       end
@@ -3025,6 +3076,34 @@ module AdversarialReview
 
     def records_by_id(records)
       records.each_with_object({}) { |record, indexed| indexed[record.fetch("id")] = record }
+    end
+
+    def duplicate_candidate_for_round(data, fingerprint, round)
+      candidate_id = data.fetch("exact_duplicate_map")[fingerprint]
+      candidate = data.fetch("candidates").find do |item|
+        item.fetch("id") == candidate_id
+      end if candidate_id
+      candidate && candidate.fetch("round") == round ? candidate_id : nil
+    end
+
+    def candidate_source_angles(data, candidate)
+      candidate_sources(data, candidate).map { |source| source.fetch("angle") }.uniq.sort
+    end
+
+    def candidate_sources(data, candidate)
+      sources = data.fetch("exact_duplicate_sources").fetch(candidate.fetch("id"), []).map do |source|
+        {
+          "candidate_id" => candidate.fetch("id"),
+          "angle" => source.fetch("angle"),
+          "attempt" => source.fetch("attempt")
+        }
+      end
+      sources << {
+        "candidate_id" => candidate.fetch("id"),
+        "angle" => candidate.fetch("angle"),
+        "attempt" => candidate.fetch("attempt")
+      }
+      sources.uniq.sort_by { |source| [source.fetch("angle"), source.fetch("attempt")] }
     end
 
     def apply_attack_result!(data, task, payload)
@@ -3046,7 +3125,9 @@ module AdversarialReview
           "round" => task.fetch("round", data.fetch("revise_round")),
           "finding_index" => index
         }
-        retained_id = data.fetch("exact_duplicate_map")[fingerprint]
+        retained_id = duplicate_candidate_for_round(
+          data, fingerprint, task.fetch("round", data.fetch("revise_round"))
+        )
         if retained_id
           data.fetch("exact_duplicate_sources").fetch(retained_id) << source
           duplicate_mappings << {

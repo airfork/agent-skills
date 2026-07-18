@@ -112,8 +112,8 @@ module AdversarialReview
       end
       private_class_method :read_authenticated_schema!
 
-      def run(task, run_dir)
-        state = State.load(run_dir)
+      def run(task, run_dir, state: nil)
+        state ||= State.load(run_dir)
         task_path = state.create_task_bundle(task.fetch("task_id")) do |manifest, state_data|
           current_digests = state_data.fetch("current_target_digests")
           canonical_task = validate_task!(task, manifest, state_data)

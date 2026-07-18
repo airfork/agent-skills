@@ -928,6 +928,122 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
+  def test_parent_authority_is_persisted_in_the_authoritative_emitted_record
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      state = AdversarialReview::State.create(
+        File.join(repository, ".git", "parent-authority"), built
+      )
+      advance(state, %w[attacking deduplicating culling awaiting-author])
+      task = AdversarialReview::Prompts.parent_action_task(built, state.to_h)
+
+      state.create_task_bundle(task.fetch("task_id")) { task }
+
+      assert_equal "parent",
+                   state.to_h.dig("emitted_tasks", task.fetch("task_id"), "authority")
+    end
+  end
+
+  def test_generated_candidate_arbiter_task_is_self_sufficient
+    with_ultra_vote_sequence(%w[PROMOTE PROMOTE REFUTE]) do |state, _summary|
+      snapshot = state.to_h
+
+      task = AdversarialReview::Prompts.role_task(
+        state.manifest_snapshot, snapshot, "arbiter"
+      )
+
+      assert_equal "arbiter-batch-candidate-judgment-r1-a1", task.fetch("task_id")
+      assert_equal "candidate-judgment", task.fetch("dispute_kind")
+      assert_equal ["C-tester-1-1"], task.fetch("subject_ids")
+      assert_equal ["C-tester-1-1"],
+                   task.dig("subject_mappings", "C-tester-1-1")
+      evidence = task.fetch("review_evidence")
+      assert_equal "C-tester-1-1", evidence.fetch("candidates").first.fetch("id")
+      assert_equal 3, evidence.dig("judge_votes", "C-tester-1-1").length
+      assert evidence.key?("semantic_groups")
+      assert evidence.key?("author_actions")
+      assert evidence.key?("resolution_checks")
+    end
+  end
+
+  def test_generated_author_resolution_arbiter_task_carries_actions_and_resolution
+    with_author_resolution_dispute("fixed") do |state, _task, finding_id, candidate_id, _run_dir|
+      generated = AdversarialReview::Prompts.role_task(
+        state.manifest_snapshot, state.to_h, "arbiter"
+      )
+
+      assert_equal "arbiter-batch-author-resolution-r1-a1", generated.fetch("task_id")
+      assert_equal "author-resolution", generated.fetch("dispute_kind")
+      assert_equal [finding_id], generated.fetch("subject_ids")
+      assert_equal [candidate_id], generated.dig("subject_mappings", finding_id)
+      assert_equal "fixed", generated.dig("review_evidence", "author_actions", finding_id)
+      assert_equal "contested", generated.dig("review_evidence", "resolution_checks", finding_id)
+    end
+  end
+
+  def test_round_two_exact_rediscovery_creates_a_current_round_candidate
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      state = AdversarialReview::State.create(
+        File.join(repository, ".git", "round-two-rediscovery"), built
+      )
+      state.transition_to("attacking")
+      first_task = AdversarialReview::Prompts.attack_task(built, "tester", 1)
+      state.create_task_bundle(first_task.fetch("task_id")) { first_task }
+      duplicate = result_finding("Same concern in both rounds")
+      state.ingest(first_task.fetch("task_id"), attack_payload_for_task(first_task, [duplicate]))
+      advance(state, %w[deduplicating culling awaiting-author resolving fresh-sweep])
+      second_task = AdversarialReview::Prompts.attack_task(
+        built, "tester", 1, round: 2,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+      state.create_task_bundle(second_task.fetch("task_id")) { second_task }
+
+      summary = state.ingest(
+        second_task.fetch("task_id"), attack_payload_for_task(second_task, [duplicate])
+      )
+
+      refute_equal "C-tester-1-1", summary.fetch("candidate_ids").first
+      assert_equal 2, state.candidate(summary.fetch("candidate_ids").first).fetch("round")
+    end
+  end
+
+  def test_exact_duplicate_angles_survive_dedupe_and_promotion_attribution
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      state = AdversarialReview::State.create(
+        File.join(repository, ".git", "duplicate-source-angles"), built
+      )
+      state.transition_to("attacking")
+      duplicate = result_finding("Shared exact concern")
+      %w[tester assumptions-checker].each do |angle|
+        task = AdversarialReview::Prompts.attack_task(built, angle, 1)
+        state.create_task_bundle(task.fetch("task_id")) { task }
+        state.ingest(task.fetch("task_id"), attack_payload_for_task(task, [duplicate]))
+      end
+      state.transition_to("deduplicating")
+      dedupe_task = AdversarialReview::Prompts.role_task(built, state.to_h, "dedupe")
+      state.create_task_bundle(dedupe_task.fetch("task_id")) { dedupe_task }
+      dedupe_payload = base_result_payload(dedupe_task).merge(
+        "groups" => [{
+          "group_id" => "G-shared", "candidate_ids" => ["C-tester-1-1"],
+          "summary" => "Shared concern", "location" => duplicate.fetch("location"),
+          "source_angles" => %w[assumptions-checker tester]
+        }]
+      )
+      state.ingest(dedupe_task.fetch("task_id"), dedupe_payload)
+      state.transition_to("culling")
+      judge_task = AdversarialReview::Prompts.role_task(built, state.to_h, "judge")
+      state.create_task_bundle(judge_task.fetch("task_id")) { judge_task }
+      state.ingest(judge_task.fetch("task_id"), base_result_payload(judge_task).merge(
+        "verdicts" => [judge_verdict("C-tester-1-1", "PROMOTE", 0.95)], "metrics" => {}
+      ))
+
+      assert_equal %w[assumptions-checker tester],
+                   state.findings.first.fetch("sources").map { |source| source.fetch("angle") }.sort
+    end
+  end
+
   def test_candidate_arbiter_promote_refute_and_unproven_decisions_are_distinct
     expected = {
       "PROMOTE" => "promoted",
@@ -2303,12 +2419,12 @@ class AdversarialReviewStateTest < Minitest::Test
       "prepared" => %w[attacking],
       "attacking" => %w[deduplicating],
       "deduplicating" => %w[culling culling-new-findings],
-      "culling" => %w[awaiting-author complete],
+      "culling" => %w[awaiting-author arbitrating complete],
       "awaiting-author" => %w[resolving],
       "resolving" => %w[fresh-sweep arbitrating complete did-not-converge],
       "fresh-sweep" => %w[deduplicating culling-new-findings],
       "culling-new-findings" => %w[awaiting-author arbitrating complete did-not-converge],
-      "arbitrating" => %w[awaiting-author complete did-not-converge]
+      "arbitrating" => %w[awaiting-author fresh-sweep complete did-not-converge]
     }
 
     assert_equal expected, AdversarialReview::State::TRANSITIONS
@@ -2681,6 +2797,15 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   private
+
+  def attack_payload_for_task(task, findings)
+    base_result_payload(task).merge(
+      "angle" => task.fetch("angle"),
+      "checks_completed" => task.fetch("required_checks"),
+      "findings" => findings,
+      "metrics" => {}
+    )
+  end
 
   def with_ingest_state(stage:, tier: "high", schema: "attack", task_overrides: {},
                         candidate_findings: [])

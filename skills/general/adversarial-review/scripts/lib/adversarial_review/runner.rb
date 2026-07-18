@@ -134,6 +134,10 @@ module AdversarialReview
         )
       end
       verify_executable!(pinned)
+      spawn_environment = controlled_spawn_environment(
+        env, pinned, repository: repository, run_directory: run_directory,
+        config_root: config_root, excluded_roots: excluded_roots
+      )
       command = [pinned.path, *argv.drop(1)]
       started = monotonic_now
       timed_out = false
@@ -145,8 +149,11 @@ module AdversarialReview
       writer = nil
 
       begin
+        # Recheck after interpreter/PATH preparation to minimize the unavoidable
+        # portable-Ruby verify-to-spawn window documented by the adapter contract.
+        verify_executable!(pinned)
         stdin, stdout, stderr, wait_thread = Open3.popen3(
-          env, [pinned.path, pinned.path], *command.drop(1),
+          spawn_environment, [pinned.path, pinned.path], *command.drop(1),
           chdir: canonical_chdir,
           unsetenv_others: true,
           pgroup: true
@@ -266,6 +273,45 @@ module AdversarialReview
       raise SecurityError.new("invalid_executable", "selected executable was not found")
     end
     private_class_method :executable_path
+
+    def controlled_spawn_environment(environment, executable, repository:, run_directory:,
+                                     config_root:, excluded_roots:)
+      interpreter = env_shebang_interpreter(executable)
+      return environment unless interpreter
+
+      helper = resolve_executable(
+        interpreter, repository: repository, run_directory: run_directory,
+        config_root: config_root, excluded_roots: excluded_roots
+      )
+      verify_executable!(helper)
+      controlled_path = [File.dirname(helper.path), "/usr/bin", "/bin"].uniq
+                        .join(File::PATH_SEPARATOR)
+      environment.merge("PATH" => controlled_path)
+    end
+    private_class_method :controlled_spawn_environment
+
+    def env_shebang_interpreter(executable)
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      line = nil
+      File.open(executable.path, flags) do |file|
+        opened = file.stat
+        unless executable_metadata_matches?(opened, executable)
+          raise SecurityError.new(
+            "executable_changed", "selected executable changed before interpreter resolution"
+          )
+        end
+        line = file.gets(4_096)
+        line.force_encoding(Encoding::BINARY) if line
+      end
+      match = line && line.match(
+        /\A#!\s*\/usr\/bin\/env[ \t]+([A-Za-z0-9_.+-]+)[ \t]*(?:\r?\n|\z)/n
+      )
+      match && match[1]
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM, Errno::ELOOP
+      raise SecurityError.new("executable_changed", "selected executable changed before interpreter resolution")
+    end
+    private_class_method :env_shebang_interpreter
 
     def identity(path)
       before = File.lstat(path)

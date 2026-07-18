@@ -135,7 +135,15 @@ module AdversarialReview
       round = state_data.fetch("revise_round")
       digests = state_data.fetch("current_target_digests")
       targets, inventory = current_targets_and_inventory(manifest, digests)
-      suffix = kind == "judge" && voter_id ? "-#{voter_id}" : ""
+      context_pointers = context_records(manifest)
+      arbiter_fields = kind == "arbiter" ? arbiter_task_fields(state_data) : nil
+      suffix = if kind == "judge" && voter_id
+                 "-#{voter_id}"
+               elsif arbiter_fields
+                 "-#{arbiter_fields.fetch("dispute_kind")}"
+               else
+                 ""
+               end
       schema = "assets/schemas/#{kind}.json"
       task = task_contract_fields(manifest, schema, []).merge(
         "schema_version" => 1,
@@ -148,8 +156,8 @@ module AdversarialReview
         "attempt" => attempt,
         "targets" => targets,
         "inventory" => inventory,
-        "context_pointers" => context_records(manifest),
-        "applicable_guidance" => guidance_records(context_records(manifest)),
+        "context_pointers" => context_pointers,
+        "applicable_guidance" => guidance_records(context_pointers),
         "role_contract" => extract_named_sections(judge_rubric_path, REVIEW_SECTIONS.fetch(kind)).join("\n\n"),
         "capability_declaration_template" => Capabilities.template(
           requested_model: manifest.fetch("requested_model"),
@@ -171,6 +179,7 @@ module AdversarialReview
         task["voter_ids"] = ids
         task["expected_voters"] = ids.length
       end
+      task.merge!(arbiter_fields) if arbiter_fields
       task
     rescue KeyError => error
       raise Error, "review state is missing #{error.key.inspect}"
@@ -218,7 +227,10 @@ module AdversarialReview
         candidate.fetch("round") == state_data.fetch("revise_round") && candidate.fetch("state") == "candidate"
       end
       value = case kind
-              when "dedupe" then {"candidates" => round_candidates}
+              when "dedupe" then {
+                "candidates" => round_candidates,
+                "exact_duplicate_sources" => JSON.parse(JSON.generate(state_data.fetch("exact_duplicate_sources")))
+              }
               when "judge" then {
                 "candidates" => round_candidates,
                 "semantic_groups" => state_data.fetch("semantic_groups").select do |_id, group|
@@ -229,14 +241,68 @@ module AdversarialReview
                 "findings" => state_data.fetch("findings"),
                 "author_actions" => state_data.fetch("author_actions")
               }
-              when "arbiter" then {
-                "findings" => state_data.fetch("findings"),
-                "pending_subjects" => state_data.fetch("pending_arbiter_subjects")
-              }
+              when "arbiter" then arbiter_review_evidence(state_data)
               end
       JSON.parse(JSON.generate(value))
     end
     private_class_method :review_evidence
+
+    def arbiter_task_fields(state_data)
+      subjects = state_data.fetch("pending_arbiter_subjects")
+      raise Error, "arbiter task requires pending subjects" if subjects.empty?
+
+      mappings = subjects.each_with_object({}) do |subject_id, result|
+        finding = state_data.fetch("findings").find { |item| item.fetch("id") == subject_id }
+        group = state_data.fetch("semantic_groups")[subject_id]
+        candidate = state_data.fetch("candidates").find { |item| item.fetch("id") == subject_id }
+        mapped = finding && finding.fetch("candidate_ids")
+        mapped ||= group && group.fetch("candidate_ids")
+        mapped ||= [candidate.fetch("id")] if candidate
+        raise Error, "arbiter subject mapping is unavailable" unless mapped && !mapped.empty?
+
+        result[subject_id] = JSON.parse(JSON.generate(mapped.sort))
+      end
+      finding_ids = state_data.fetch("findings").map { |finding| finding.fetch("id") }
+      dispute_kinds = subjects.map do |subject_id|
+        finding_ids.include?(subject_id) ? "author-resolution" : "candidate-judgment"
+      end.uniq
+      raise Error, "arbiter task cannot mix dispute kinds" unless dispute_kinds.length == 1
+
+      {
+        "dispute_kind" => dispute_kinds.first,
+        "subject_ids" => subjects.dup,
+        "subject_mappings" => mappings
+      }
+    end
+    private_class_method :arbiter_task_fields
+
+    def arbiter_review_evidence(state_data)
+      subjects = state_data.fetch("pending_arbiter_subjects")
+      mappings = arbiter_task_fields(state_data).fetch("subject_mappings")
+      candidate_ids = mappings.values.flatten.uniq
+      {
+        "pending_subjects" => subjects.dup,
+        "candidates" => state_data.fetch("candidates").select do |candidate|
+          candidate_ids.include?(candidate.fetch("id"))
+        end,
+        "semantic_groups" => state_data.fetch("semantic_groups").select do |group_id, group|
+          subjects.include?(group_id) || !(group.fetch("candidate_ids") & candidate_ids).empty?
+        end,
+        "judge_votes" => state_data.fetch("judge_votes").select do |subject_id, _votes|
+          subjects.include?(subject_id)
+        end,
+        "findings" => state_data.fetch("findings").select do |finding|
+          subjects.include?(finding.fetch("id")) || !(finding.fetch("candidate_ids") & candidate_ids).empty?
+        end,
+        "author_actions" => state_data.fetch("author_actions").select do |finding_id, _action|
+          subjects.include?(finding_id)
+        end,
+        "resolution_checks" => state_data.fetch("resolution_checks").select do |finding_id, _status|
+          subjects.include?(finding_id)
+        end
+      }
+    end
+    private_class_method :arbiter_review_evidence
 
     def current_targets_and_inventory(manifest, digests)
       root = manifest.fetch("repository").fetch("root")
@@ -403,11 +469,11 @@ module AdversarialReview
         raise Error, "invalid repository root"
       end
       manifest.fetch("context_paths").map do |path|
-        unless safe_relative_path?(path)
+        unless path == "." || safe_relative_path?(path)
           raise Error, "invalid context path"
         end
         resolved = File.realpath(File.join(canonical_root, path))
-        unless resolved.start_with?(canonical_root + File::SEPARATOR)
+        unless resolved == canonical_root || resolved.start_with?(canonical_root + File::SEPARATOR)
           raise Error, "context path escapes repository"
         end
         stat = File.stat(resolved)

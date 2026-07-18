@@ -38,6 +38,7 @@ module AdversarialReview
     ANGLE_STATUSES = %w[completed failed skipped combined].freeze
     CATEGORIES = ["Omission", "Ambiguity", "Inconsistency", "Incorrect fact", "Extraneous"].freeze
     SEVERITIES = %w[CRITICAL HIGH MEDIUM LOW].freeze
+    SYSTEM_SOURCE_ANGLES = %w[resolution].freeze
     MAX_REPORTED_FINDINGS = 50
     OVERFLOW_REPRESENTATIVE_LIMIT = 5
     # A persisted finding's required JSON keys, scalar values, and non-empty sources
@@ -59,6 +60,10 @@ module AdversarialReview
       mode = validate_enum!("mode", source.fetch("mode"), %w[critique revise])
       tier = validate_enum!("tier", source.fetch("tier"), %w[default high ultra])
       output = validate_enum!("output", source.fetch("output"), %w[chat file both])
+      terminal_stage = validate_enum!(
+        "terminal_stage", source.fetch("terminal_stage", "complete"),
+        %w[complete did-not-converge]
+      )
       started_at = validate_timestamp!("started_at", source.fetch("started_at"))
       ended_at = validate_timestamp!("ended_at", source.fetch("ended_at"))
       if Time.iso8601(ended_at) < Time.iso8601(started_at)
@@ -82,7 +87,9 @@ module AdversarialReview
         requested_effort: source.fetch("requested_effort")
       )
       usage = canonical_usage(source.fetch("usage"))
-      all_findings = canonical_findings(source, run_id, angles.map { |angle| angle.fetch("name") })
+      all_findings = canonical_findings(
+        source, run_id, angles.map { |angle| angle.fetch("name") } + SYSTEM_SOURCE_ANGLES
+      )
       findings = all_findings.select { |finding| finding.fetch("reported") }
                              .map { |finding| finding.reject { |key, _value| key == "reported" } }
       actions = canonical_actions(source.fetch("author_actions"), all_findings)
@@ -96,7 +103,8 @@ module AdversarialReview
         source.fetch("overflow"), source.fetch("overflow_evidence_gaps"), all_findings
       )
       ordinary_verdict = verdict_for(
-        mode, findings, evidence_gaps, overflow, overflow_evidence_gaps
+        mode, findings, evidence_gaps, overflow, overflow_evidence_gaps,
+        terminal_stage: terminal_stage
       )
       capability_gate = Capabilities.gate(
         capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
@@ -119,6 +127,7 @@ module AdversarialReview
         "mode" => mode,
         "tier" => tier,
         "output" => output,
+        "terminal_stage" => terminal_stage,
         "verdict" => verdict,
         "findings" => findings,
         "metrics" => canonical_metrics(source.fetch("metrics"), findings, overflow),
@@ -148,7 +157,10 @@ module AdversarialReview
           "angles" => angles,
           "capabilities" => capabilities,
           "retries" => angles.sum { |angle| angle.fetch("retries") },
-          "usage" => usage
+          "usage" => usage,
+          "system_sources" => all_findings.flat_map { |finding| finding.fetch("source_angles") }
+                                          .select { |angle| SYSTEM_SOURCE_ANGLES.include?(angle) }
+                                          .uniq.sort
         },
         "resolution_checks" => reported_resolutions
       }
@@ -197,6 +209,7 @@ module AdversarialReview
       {
         "schema_version" => value.fetch("schema_version"),
         "run_id" => value.fetch("run_id"),
+        "terminal_stage" => value.fetch("terminal_stage"),
         "verdict" => value.fetch("verdict"),
         "findings" => deep_copy(value.fetch("findings")),
         "metrics" => deep_copy(value.fetch("metrics")),
@@ -685,7 +698,7 @@ module AdversarialReview
       }
     end
 
-    def verdict_for(mode, findings, evidence_gaps, overflow, overflow_gaps)
+    def verdict_for(mode, findings, evidence_gaps, overflow, overflow_gaps, terminal_stage: "complete")
       return "REPORT ONLY - #{findings.length} #{findings.length == 1 ? "finding" : "findings"}" if mode == "critique"
 
       open = findings.count { |finding| %w[pending contested stuck].include?(finding.fetch("state")) }
@@ -698,6 +711,11 @@ module AdversarialReview
         end
       end
       open += overflow_blockers
+      if terminal_stage == "did-not-converge"
+        return "DID NOT CONVERGE - #{open} findings remain open" if open.positive?
+
+        return "DID NOT CONVERGE - lifecycle invariants remain unresolved"
+      end
       return "DID NOT CONVERGE - #{open} findings remain open" if open.positive?
       return "PASSED WITH OPEN QUESTIONS" unless evidence_gaps.empty?
 
@@ -1035,7 +1053,7 @@ module AdversarialReview
     def validate_render_summary!(value)
       require_hash!(value, "summary")
       required = %w[
-        schema_version run_id mode tier output verdict findings metrics changelog
+        schema_version run_id mode tier output terminal_stage verdict findings metrics changelog
         author_actions rejected_findings evidence_gaps open_questions overflow overflow_evidence_gaps
         degraded_capabilities provenance resolution_checks
       ]
@@ -1046,6 +1064,9 @@ module AdversarialReview
       mode = validate_enum!("mode", value.fetch("mode"), %w[critique revise])
       validate_enum!("tier", value.fetch("tier"), %w[default high ultra])
       validate_enum!("output", value.fetch("output"), %w[chat file both])
+      terminal_stage = validate_enum!(
+        "terminal_stage", value.fetch("terminal_stage"), %w[complete did-not-converge]
+      )
       findings = validate_render_findings!(value.fetch("findings"), run_id, "reported")
       if findings.length > MAX_REPORTED_FINDINGS
         invalid!("invalid_summary", "render findings exceed the reporting cap")
@@ -1115,7 +1136,12 @@ module AdversarialReview
       unless provenance.fetch("angles") == angles
         invalid!("invalid_summary", "render summary angle order is not canonical")
       end
-      recorded_angles = angles.map { |angle| angle.fetch("name") }
+      system_sources = provenance.fetch("system_sources")
+      unless system_sources.is_a?(Array) && system_sources == system_sources.uniq.sort &&
+             (system_sources - SYSTEM_SOURCE_ANGLES).empty?
+        invalid!("invalid_summary", "render summary system sources are invalid")
+      end
+      recorded_angles = angles.map { |angle| angle.fetch("name") } + system_sources
       findings.each do |finding|
         unknown = finding.fetch("source_angles") - recorded_angles
         unless unknown.empty?
@@ -1142,7 +1168,8 @@ module AdversarialReview
         invalid!("invalid_summary", "render summary retry total is invalid")
       end
       ordinary_verdict = verdict_for(
-        mode, findings, evidence_gaps, overflow, overflow_evidence_gaps
+        mode, findings, evidence_gaps, overflow, overflow_evidence_gaps,
+        terminal_stage: terminal_stage
       )
       gate = Capabilities.gate(
         capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict

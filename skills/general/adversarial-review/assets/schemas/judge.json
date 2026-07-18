@@ -97,7 +97,7 @@
           }
         }
       },
-      "maxItems": 256
+      "maxItems": 4096
     },
     "metrics": {
       "type": "object",

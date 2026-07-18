@@ -44,9 +44,9 @@ module AdversarialReview
         argv = [
           @pinned_executable.path, "-p", "--mode", "ask", "--sandbox", "enabled",
           "--workspace", active_repository, "--model", @requested_model,
-          "--output-format", "stream-json", *effort_arguments, prompt
+          "--output-format", "stream-json", *effort_arguments
         ]
-        result = run_direct(argv: argv, stdin_data: "")
+        result = run_direct(argv: argv, stdin_data: prompt)
         [result, parse_result(result)]
       end
 

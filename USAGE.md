@@ -50,8 +50,9 @@ REVIEW_REPO="/absolute/path/to/reviewed/repository"
 ```
 
 Resolve `AR_SKILL_DIR` from the skill loaded by the host, not from the reviewed
-checkout. Ruby 2.6 or newer is required. Run any subcommand with `--help` for
-parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
+checkout. Ruby 2.6 or newer on a POSIX host exposing `openat`, `linkat`,
+`renameat`, and `unlinkat` is required; use the manual fallback on unsupported
+hosts. Run any subcommand with `--help` for parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
 `--tier ultra`, `--report-only` to `--mode critique --output both`, and
 `--chat-only` to `--output chat`.
 

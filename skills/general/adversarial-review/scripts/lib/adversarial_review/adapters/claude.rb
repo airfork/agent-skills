@@ -39,9 +39,9 @@ module AdversarialReview
           "--permission-mode", "plan", "--tools", ALLOWED_TOOLS.join(","),
           "--model", @requested_model, "--effort", @requested_effort,
           "--verbose", "--output-format", "stream-json", "--json-schema",
-          JSON.generate(active_schema), prompt
+          JSON.generate(active_schema)
         ]
-        result = run_direct(argv: argv, stdin_data: "")
+        result = run_direct(argv: argv, stdin_data: prompt)
         [result, parse_result(result)]
       end
 

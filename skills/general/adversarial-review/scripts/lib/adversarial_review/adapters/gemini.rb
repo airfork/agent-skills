@@ -31,7 +31,21 @@ module AdversarialReview
       end
 
       def child_environment(source_env: ENV, isolated_home: nil, isolated_config_root: nil)
-        environment = super
+        source = environment_hash(source_env)
+        environment = super(source_env: source, isolated_home: isolated_home,
+                            isolated_config_root: isolated_config_root)
+        adc_path = source["GOOGLE_APPLICATION_CREDENTIALS"]
+        unless adc_path
+          gcloud_root = source["CLOUDSDK_CONFIG"]
+          gcloud_root ||= File.join(source["HOME"], ".config", "gcloud") if source["HOME"]
+          candidate = File.join(gcloud_root, "application_default_credentials.json") if gcloud_root
+          adc_path = candidate if candidate && File.file?(candidate)
+        end
+        if adc_path
+          environment["GOOGLE_APPLICATION_CREDENTIALS"] = validated_external_path(
+            adc_path, "GOOGLE_APPLICATION_CREDENTIALS", :file
+          )
+        end
         root = @active_gemini_cli_home || isolated_config_root
         environment["GEMINI_CLI_HOME"] = validated_isolated_root(root, "Gemini config root") if root
         environment
@@ -53,10 +67,10 @@ module AdversarialReview
       def invoke_prompt(prompt)
         prepare_invocation_config
         argv = [
-          @pinned_executable.path, "--prompt", prompt, "--model", @requested_model,
+          @pinned_executable.path, "--prompt", "", "--model", @requested_model,
           "--output-format", "json", "--sandbox"
         ]
-        result = run_direct(argv: argv, stdin_data: "")
+        result = run_direct(argv: argv, stdin_data: prompt)
         [result, parse_result(result)]
       end
 
@@ -112,7 +126,7 @@ module AdversarialReview
         return nil unless result.is_a?(Runner::Result) && result.exit_status == 0 && !result.timed_out
 
         envelope = JSON.parse(result.stdout, object_class: DuplicateRejectingHash)
-        unless envelope.is_a?(Hash) && envelope.keys.sort == %w[response startup stats]
+        unless envelope.is_a?(Hash) && %w[response startup stats].all? { |key| envelope.key?(key) }
           raise JSON::ParserError, "Gemini response envelope is invalid"
         end
         startup = envelope["startup"]
@@ -122,8 +136,8 @@ module AdversarialReview
         response = envelope["response"]
         stats = envelope["stats"]
         session_id = startup["session_id"]
-        unless response.is_a?(Hash) && response.keys.sort == %w[session_id structured_output] &&
-               stats.is_a?(Hash) && stats.keys.sort == %w[session_id usage] &&
+        unless response.is_a?(Hash) && %w[session_id structured_output].all? { |key| response.key?(key) } &&
+               stats.is_a?(Hash) && %w[session_id usage].all? { |key| stats.key?(key) } &&
                nonempty_text?(session_id) && response["session_id"] == session_id &&
                stats["session_id"] == session_id
           raise JSON::ParserError, "Gemini response or stats session binding is invalid"

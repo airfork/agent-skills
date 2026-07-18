@@ -9,7 +9,7 @@ description: >-
 
 # Adversarial Review
 
-Require Ruby 2.6 or newer and repository spec/plan files. Load `platform-adapters.md` only for executor selection or adapter troubleshooting.
+Require Ruby 2.6 or newer on a POSIX host with descriptor-relative filesystem calls, plus repository spec/plan files. Load `platform-adapters.md` only for executor selection or adapter troubleshooting.
 Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging.
 
 ## Invoke

@@ -87,6 +87,13 @@ class AdversarialReviewSchemaTest < Minitest::Test
     assert_empty AdversarialReview::Schema.validate("judge", valid_judge)
   end
 
+  def test_judge_schema_can_cover_the_full_authoritative_candidate_limit
+    schema = JSON.parse(File.read(File.join(SKILL, "assets", "schemas", "judge.json")))
+
+    assert_equal AdversarialReview::State::MAX_STATE_ITEMS,
+                 schema.dig("properties", "verdicts", "maxItems")
+  end
+
   def test_author_actions_schema_accepts_complete_actions
     assert_empty AdversarialReview::Schema.validate("author-actions", valid_author_actions)
   end

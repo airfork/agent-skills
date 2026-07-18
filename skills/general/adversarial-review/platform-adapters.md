@@ -19,11 +19,21 @@ is only `behavioral`. It replaces only an ordinary `PASSED`. `REPORT ONLY`,
 `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict.
 Retained verdicts disclose degraded capabilities separately.
 
-The public CLI supplies `parallel_dispatch` as `unavailable`, and the required
-capability gate makes the direct adapter result ineligible before reviewed
-content. The direct adapter classes are implemented and fixture-conformant for
-embedding orchestrators that provide caller-supplied real dispatch evidence.
-Generic bundles are intended for host-native parallelism.
+The public CLI records serial dispatch truthfully with `parallel_dispatch` as `unavailable`.
+For default/high direct Codex and Claude runs, parallelism is
+advisory rather than a hard eligibility field: all other safety and identity
+capabilities must pass, and the final report still discloses degraded parallel
+telemetry. Ultra keeps parallel dispatch as a hard requirement. Cursor and
+Gemini remain direct-ineligible until their real runtime contracts are verified.
+Generic bundles are the portable path for host-native parallelism.
+
+The runner verifies and digests the selected executable outside the reviewed
+repository, run directory, and isolated configuration roots immediately before
+spawn. Portable Ruby cannot bind `exec` to that verified descriptor on every
+supported POSIX host, so direct mode assumes the trusted CLI installation is
+not concurrently replaced by another same-UID process during the final
+verify-to-spawn window. Use Generic handoffs when that local trust boundary is
+not acceptable.
 
 Automatic generic fallback is available only for `--executor auto`, and only
 before reviewed content. Its authorization is fixed before any external attempt,
@@ -115,11 +125,15 @@ replacing arbitrary run ancestors or the whole run tree.
 Do not describe the reviewer as a security sandbox beyond the capabilities its
 runtime attestation proves.
 
-Direct children receive locale variables plus only the adapter credential
+Direct children receive locale variables, explicit proxy variables, validated
+external `SSL_CERT_FILE`/`SSL_CERT_DIR` paths, plus only the adapter credential
 allowlist: Codex `OPENAI_API_KEY|CODEX_API_KEY`; Claude
 `ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN|CLAUDE_CODE_OAUTH_TOKEN`; Cursor
 `CURSOR_API_KEY`; Gemini
 `GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_GENAI_USE_VERTEXAI|GOOGLE_CLOUD_PROJECT|GOOGLE_CLOUD_LOCATION`.
+Gemini may additionally receive a validated external
+`GOOGLE_APPLICATION_CREDENTIALS` path or an isolated copy of the current gcloud
+ADC file.
 A permitted credential remains visible to that child and descendants it starts;
 the allowlist limits forwarding but is not credential isolation.
 

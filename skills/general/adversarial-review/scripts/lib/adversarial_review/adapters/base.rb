@@ -5,6 +5,14 @@ module AdversarialReview
   module Adapters
     class Base
       LOCALE_VARIABLES = %w[LANG LC_ALL LC_CTYPE].freeze
+      PROXY_VARIABLES = %w[
+        HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY
+        http_proxy https_proxy all_proxy no_proxy
+      ].freeze
+      PRIVATE_CA_PATHS = {
+        "SSL_CERT_FILE" => :file,
+        "SSL_CERT_DIR" => :directory
+      }.freeze
       Decision = Struct.new(
         :status, :execution_allowed, :ordinary_result, :reason,
         keyword_init: true
@@ -129,7 +137,8 @@ module AdversarialReview
 
       def configure_direct(executable:, repository:, model:, effort:, role_schema:,
                            schema_name:, prompt:, tier: "default", timeout_seconds: 120,
-                           source_env: ENV, run_directory: nil, config_root: nil)
+                           source_env: ENV, run_directory: nil, config_root: nil,
+                           prior_session_ids: [])
         unless executable.is_a?(String) && !executable.empty? &&
                model.is_a?(String) && !model.empty? &&
                effort.is_a?(String) && !effort.empty? &&
@@ -137,7 +146,9 @@ module AdversarialReview
                schema_name.is_a?(String) && !schema_name.empty? &&
                prompt.is_a?(String) && !prompt.empty? &&
                TIERS.include?(tier) && timeout_seconds.is_a?(Numeric) &&
-               timeout_seconds.positive?
+               timeout_seconds.positive? && prior_session_ids.is_a?(Array) &&
+               prior_session_ids.uniq.length == prior_session_ids.length &&
+               prior_session_ids.all? { |id| id.is_a?(String) && !id.empty? }
           raise ArgumentError, "direct adapter configuration is invalid"
         end
         canonical_repository = File.realpath(repository)
@@ -157,6 +168,7 @@ module AdversarialReview
         @source_env = source_env
         @run_directory = run_directory
         @configured_config_root = config_root
+        @prior_session_ids = prior_session_ids.dup.freeze
         @runtime_provenance_records = nil
         @capability_probe = nil
         @execution_mutex ||= Mutex.new
@@ -253,7 +265,7 @@ module AdversarialReview
           raise ArgumentError, "environment source and credential allowlist are invalid"
         end
         source = environment_hash(source_env)
-        allowed = (LOCALE_VARIABLES + credential_variables).uniq
+        allowed = (LOCALE_VARIABLES + credential_variables + PROXY_VARIABLES).uniq
         environment = allowed.each_with_object({}) do |name, result|
           value = source[name]
           result[name] = value if value.is_a?(String)
@@ -265,6 +277,10 @@ module AdversarialReview
           environment["XDG_CONFIG_HOME"] = validated_isolated_root(
             isolated_config_root, "config root"
           )
+        end
+        PRIVATE_CA_PATHS.each do |name, kind|
+          value = source[name]
+          environment[name] = validated_external_path(value, name, kind) if value
         end
         environment
       end
@@ -322,7 +338,9 @@ module AdversarialReview
           begin
             normalized_capabilities = @last_normalized_capabilities ||
               unavailable_capabilities("execution capability envelope missing")
-            capability_gate = Capabilities.gate(normalized_capabilities, "PASS")
+            capability_gate = Capabilities.gate(
+              normalized_capabilities, "PASS", required: hard_required_capabilities
+            )
             @last_normalized_capabilities = normalized_capabilities
           rescue Capabilities::Error
             return failed_execution("capability_attestation_invalid", attempts, results, usage)
@@ -492,7 +510,7 @@ module AdversarialReview
         @active_attempt = nil
         @last_active_phase = nil
         @last_active_attempt = nil
-        @direct_session_ids = {}
+        @direct_session_ids = prior_session_id_map
         @runtime_provenance_records["preflight"] = nil
       end
 
@@ -556,8 +574,15 @@ module AdversarialReview
           "failure" => nil,
           "candidate_attempts" => []
         }
-        @direct_session_ids = {}
+        @direct_session_ids = prior_session_id_map
       end
+
+      def prior_session_id_map
+        (@prior_session_ids || []).each_with_object({}) do |session_id, result|
+          result[session_id] = {"phase" => "prior-task", "attempt" => nil}
+        end
+      end
+      private :prior_session_id_map
 
       def initialize_preflight_repository!
         git = Runner.resolve_executable(
@@ -641,7 +666,7 @@ module AdversarialReview
         return "runtime_selection_mismatch" unless decision.execution_allowed
         normalized = @last_normalized_capabilities ||
           unavailable_capabilities("preflight capability envelope missing")
-        gate = Capabilities.gate(normalized, "PASS")
+        gate = Capabilities.gate(normalized, "PASS", required: hard_required_capabilities)
         return "capabilities_degraded" unless gate.fetch("capability_status") == "CAPABILITIES SATISFIED"
         return "structured_output_unattested" unless direct_payload_valid?(envelope["payload"])
         nil
@@ -720,14 +745,25 @@ module AdversarialReview
       end
 
       def valid_usage(value)
-        return {} unless value.is_a?(Hash) &&
-                         value.keys.all? { |key| USAGE_FIELDS.include?(key) } &&
-                         value.values.all? { |amount| amount.is_a?(Integer) && amount >= 0 }
-        value.dup
+        return {} unless value.is_a?(Hash)
+        recognized = value.each_with_object({}) do |(key, amount), result|
+          next unless USAGE_FIELDS.include?(key)
+          return {} unless amount.is_a?(Integer) && amount >= 0
+          result[key] = amount
+        end
+        recognized
       end
 
       def valid_usage?(usage)
-        usage.is_a?(Hash) && !usage.empty? && valid_usage(usage) == usage
+        usage.is_a?(Hash) && !valid_usage(usage).empty?
+      end
+
+      def hard_required_capabilities
+        required = Capabilities::FIELDS.dup
+        if %w[codex claude].include?(adapter_name) && tier != "ultra"
+          required.delete("parallel_dispatch")
+        end
+        required
       end
 
       def parse_json_line_objects(text, label, max_objects: nil)
@@ -944,6 +980,39 @@ module AdversarialReview
         canonical
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM
         raise ArgumentError, "isolated #{label} is unavailable"
+      end
+
+      def validated_external_path(path, label, kind)
+        unless path.is_a?(String) && path.start_with?(File::SEPARATOR)
+          raise ArgumentError, "#{label} must be an absolute path"
+        end
+        canonical = File.realpath(path)
+        stat = File.stat(canonical)
+        valid_kind = kind == :file ? stat.file? : stat.directory?
+        raise ArgumentError, "#{label} has the wrong path type" unless valid_kind
+        controlled_roots = [
+          @repository, @run_directory, @configured_config_root, @direct_root,
+          @isolated_home, @isolated_config_root
+        ].compact
+        if controlled_roots.any? { |root| path_within_root?(canonical, root) }
+          raise ArgumentError, "#{label} must be outside review-controlled directories"
+        end
+        canonical
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM
+        raise ArgumentError, "#{label} is unavailable"
+      end
+
+      def path_within_root?(path, root)
+        return false unless File.exist?(root)
+        root_stat = File.stat(File.realpath(root))
+        cursor = File.realpath(path)
+        loop do
+          current = File.stat(cursor)
+          return true if current.dev == root_stat.dev && current.ino == root_stat.ino
+          parent = File.dirname(cursor)
+          return false if parent == cursor
+          cursor = parent
+        end
       end
 
       def successful_process?(result)

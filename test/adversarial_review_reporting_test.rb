@@ -58,6 +58,25 @@ class AdversarialReviewReportingTest < Minitest::Test
     assert_equal ["fresh_context"], summary.fetch("degraded_capabilities")
   end
 
+  def test_did_not_converge_terminal_stage_cannot_render_passed
+    source = resolved_revise_source.merge("terminal_stage" => "did-not-converge")
+
+    summary = AdversarialReview::Reporting.summary(source)
+
+    assert_match(/\ADID NOT CONVERGE\b/, summary.fetch("verdict"))
+    assert_equal "did-not-converge", summary.fetch("terminal_stage")
+  end
+
+  def test_resolution_discovered_source_has_explicit_system_provenance
+    source = summary_source
+    source.dig("findings", 0, "sources", 0)["angle"] = "resolution"
+
+    summary = AdversarialReview::Reporting.summary(source)
+
+    assert_includes summary.dig("findings", 0, "source_angles"), "resolution"
+    assert_equal ["resolution"], summary.dig("provenance", "system_sources")
+  end
+
   def test_each_behavioral_or_unavailable_safety_boundary_suppresses_pass
     AdversarialReview::Capabilities::SAFETY_BOUNDARIES.product(
       %w[behavioral unavailable]
