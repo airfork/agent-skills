@@ -41,13 +41,19 @@ agents execute its read-only task bundles.
 and equivalent natural language map to the checked-in executable:
 
 ```bash
-skills/general/adversarial-review/scripts/adversarial-review start \
-  --repository . --spec docs/spec.md --plan docs/plan.md \
+AR_SKILL_DIR="/absolute/path/to/installed/adversarial-review"
+REVIEW_REPO="/absolute/path/to/reviewed/repository"
+"$AR_SKILL_DIR/scripts/adversarial-review" start \
+  --repository "$REVIEW_REPO" --spec docs/spec.md --plan docs/plan.md \
   --tier default --mode revise --output both \
   --executor auto --model MODEL --effort EFFORT
 ```
 
-Run the executable or any subcommand with `--help` for parser-level syntax.
+Resolve `AR_SKILL_DIR` from the skill loaded by the host, not from the reviewed
+checkout. Ruby 2.6 or newer is required. Run any subcommand with `--help` for
+parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
+`--tier ultra`, `--report-only` to `--mode critique --output both`, and
+`--chat-only` to `--output chat`.
 
 ### Options
 
@@ -72,18 +78,24 @@ The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
 | `--ultra` | alias | Exactly `--tier ultra`. |
 
 There is no quick/low tier and no silent model, effort, tier, or vendor
-downgrade. Direct adapters must attest fresh context, canonical repository,
-read-only policy, requested and observed model/effort, structured output,
-session binding, and usage. Failed or unavailable direct capability probes
-produce generic task bundles with explicit degradation.
+downgrade. The public CLI declares `parallel_dispatch` unavailable, so its
+required gate selects Generic before reviewed content. Direct adapter classes
+are fixture-conformant for embedding orchestrators that supply real dispatch
+evidence; the public CLI does not claim direct execution. Generic bundles are
+intended for host-native parallelism.
+
+Automatic generic fallback applies only to `--executor auto` at the initial
+pre-content boundary with zero prior external attempts. Explicit direct
+selection never falls back. Capability failures stop with exit `4`; execution
+or invalid-result failures stop with exit `5`. No post-content failure changes
+vendor; the run stays resumable and its executor stays pinned.
 
 ### Lifecycle
 
 1. Run `start`; retain the returned `run_dir` and task paths.
 2. For each generic reviewer task, return its closed-schema result and capability
    declaration with `ingest --run-dir RUN --task ID --result RESULT.json
-   --capabilities CAPABILITIES.json`. Direct adapters dispatch validated tasks
-   serially.
+   --capabilities CAPABILITIES.json`.
 3. Run `continue --run-dir RUN` until more results or parent actions are needed.
    Submit parent-only `FIXED|REJECTED` actions with `continue --actions
    ACTIONS.json`; reviewers never edit targets.
@@ -94,7 +106,14 @@ produce generic task bundles with explicit degradation.
 Reports contain immutable candidate/finding IDs, `PROMOTE|REFUTE|UNPROVEN`
 dispositions, source angles, current target digests, complete capability and
 executor/CLI/model/effort provenance, retries, timing, and usage metrics when
-exposed. Running a review never installs global links or agent configuration.
+exposed. `DEGRADED CAPABILITIES` replaces an ordinary pass when any required
+capability is unavailable or a required safety boundary is only behavioral; it
+is separate from convergence outcomes. Running a review never installs global
+links or agent configuration.
+
+If Ruby is unavailable, use the bounded manual fallback in the skill: follow
+its attack/judge references and schemas, preserve IDs and parent authority,
+disclose degraded scripting capabilities, and do not invent durable state.
 
 ## `code-review`
 

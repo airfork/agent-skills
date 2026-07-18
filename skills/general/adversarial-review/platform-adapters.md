@@ -14,9 +14,25 @@ capabilities: `fresh_context`, `repository_access`, `read_only`,
 `parallel_dispatch`. A failed or missing observation selects Generic Adapter
 with a degraded capability record; it never becomes an ordinary direct result.
 
-Direct execution currently rejects `--jobs` greater than 1. Generic execution
-emits independent task bundles so the parent host can schedule safe parallel
-work. `--ultra` is Claude-only for direct execution. On any non-Claude host,
+Use `DEGRADED CAPABILITIES` when any required capability is `unavailable` or a
+required safety boundary (`fresh_context`, `repository_access`, or `read_only`)
+is only `behavioral`. This capability verdict is distinct from `PASSED`,
+`PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes.
+
+The public CLI supplies `parallel_dispatch` as `unavailable`, and the required
+capability gate blocks direct execution before reviewed content; the public CLI therefore selects Generic Adapter before content. The direct adapter classes are implemented and fixture-conformant for embedding orchestrators that provide caller-supplied real dispatch evidence. Generic bundles are intended for host-native parallelism.
+
+Automatic generic fallback is available only for `--executor auto`, and only
+before reviewed content. Its authorization is fixed before any external attempt,
+while the durable selection intent records zero external attempts. A private eligibility probe may then be
+the first external call; its pre-content failure completes that already-authorized
+fallback. No second attempt may switch vendor. Explicit direct selection never falls back.
+Capability or eligibility failure stops with exit `4`; execution or invalid
+result failure stops with exit `5`. After reviewed content, either class stops
+without fallback. The run remains resumable and the selected executor remains pinned.
+
+The parser rejects direct `--jobs` greater than 1. Generic execution emits
+independent task bundles. `--ultra` is Claude-only for direct execution. On any non-Claude host,
 `--executor auto --tier ultra` selects generic; it never silently runs `high`.
 
 ## Generic Adapter

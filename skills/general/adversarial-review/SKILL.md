@@ -9,58 +9,65 @@ description: >-
 
 # Adversarial Review
 
-Run the portable control plane; do not reconstruct its schemas, prompts, state,
-IDs, or reports. Accept repository spec/plan files only.
-
-Use [attack-angles.md](attack-angles.md) for coverage,
-[judge-rubric.md](judge-rubric.md) for verdicts, and
-[platform-adapters.md](platform-adapters.md) for executor gates. Run
-`scripts/adversarial-review --help` or subcommand help for syntax.
+Require Ruby 2.6 or newer and repository spec/plan files. Run the control plane;
+do not recreate its state or outputs. Load details from
+[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
+[platform-adapters.md](platform-adapters.md).
 
 ## Invoke
 
-Map host skill invocation and equivalent natural language to:
+Resolve the executable from the loaded skill, never from the reviewed checkout:
 
 ```bash
-skills/general/adversarial-review/scripts/adversarial-review start \
-  --repository . --spec docs/spec.md --plan docs/plan.md \
-  --tier default --mode revise --output both \
-  --executor auto --model MODEL --effort EFFORT
+AR_SKILL_DIR="/absolute/path/to/directory-containing-this-SKILL.md"
+REVIEW_REPO="/absolute/path/to/reviewed/repository"
+"$AR_SKILL_DIR/scripts/adversarial-review" start \
+  --repository "$REVIEW_REPO" --spec docs/spec.md --plan docs/plan.md \
+  --tier default --mode revise --output both --executor auto \
+  --model MODEL --effort EFFORT
 ```
 
-The exact choices are `--executor auto|codex|claude|cursor|gemini|generic` and
-`--output chat|file|both`. The default is `--mode revise --output both`.
-`--report-only` is `--mode critique --output both`; `--chat-only` is `--output chat`;
-`--ultra` is `--tier ultra`. `--report PATH` overrides the sibling report.
+Map host invocations: `--high` maps to `--tier high`; `--ultra` maps to `--tier ultra`; `--report-only` maps to `--mode critique --output both`;
+`--chat-only` maps to `--output chat`. Choices are
+`--executor auto|codex|claude|cursor|gemini|generic` and
+`--output chat|file|both`. The default is `--mode revise --output both`. Run the
+executable or subcommand with `--help` for other options.
 
 For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file.
 Repository writes require an explicit `--report-only`, an explicit request to revise or fix the documents, or an explicit `$adversarial-review` invocation.
 
 ## Non-Negotiables
 
-- Require fresh read-only reviewer tasks and closed JSON. Reject stale digests
-  and unverifiable capabilities.
-- Never silently change executor vendor, tier, model, or effort. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier.
+- Never silently change vendor, tier, model, or effort. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier.
   If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback.
-- Treat `generic` as first-class. Disclose unavailable capabilities and metrics.
-- The parent alone applies `FIXED|REJECTED` actions and may edit only reviewed
-  files. Preserve justified rejection; reviewers never edit.
+- Require fresh read-only tasks, digests, closed JSON, immutable IDs,
+  and evidence-bearing capabilities.
+- The parent alone applies `FIXED|REJECTED` actions. Reviewers never edit. Limit
+  parent edits to reviewed files; preserve rejection.
 - Running the control plane does not install or change global skill links, agent definitions, or user configuration.
 
 ## Run
 
-1. Start; retain `run_dir` and immutable task IDs/digests.
-2. Execute generic bundles in fresh read-only contexts, then `ingest` each
-   schema result and capability declaration. Verified direct adapters dispatch.
-3. Call `continue --run-dir RUN_DIR` until results, parent actions, or terminal
-   state. Submit decisions only with `continue --actions ACTIONS.json`.
-4. In revise mode, complete resolution and the round-two fresh sweep. Stop after
-   two revision rounds. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
+1. Start; retain `run_dir` and tasks. The public CLI uses Generic bundles for
+   fresh read-only host-native parallel work.
+2. `ingest` each result/declaration. `continue` until results, actions, or
+   terminal state; submit decisions only via `continue --actions ACTIONS.json`.
+3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
    `PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding.
-5. Use `status --run-dir RUN_DIR --json` to resume. Return generated output.
+4. Use `status --run-dir RUN_DIR --json` to resume. Return generated output.
+
+## Ruby-Unavailable Fallback
+
+When Ruby is unavailable, do not invent durable state. Manually follow
+[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
+`assets/schemas/`; preserve immutable IDs, `UNPROVEN` evidence gaps,
+and parent-only decisions. State: `Scripting unavailable; capabilities degraded.`
+Disclose missing automation, never switch to a weaker direct executor, and
+never claim scripted crash recovery or resumability.
 
 ## Outcomes
 
-Report stable IDs, source angles, `UNPROVEN` gaps, capability verdicts, digests,
-executor/CLI/model/effort provenance, retries, timing, and exposed usage.
-Critique mode never edits targets. The parent owns every fix/rejection.
+Use `DEGRADED CAPABILITIES` when any required capability is `unavailable` or a
+required safety boundary is only `behavioral`. This capability verdict is
+distinct from `PASSED`, `PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes.
+Return the script's stable IDs, provenance, and usage. Critique mode never edits targets.

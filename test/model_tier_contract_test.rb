@@ -147,8 +147,8 @@ class ModelTierContractTest < Minitest::Test
       assert_includes code_skill, sentence
       assert_includes code_adapter, sentence
     end
-    assert_includes adversarial_skill, "`--report-only` is `--mode critique --output both`"
-    assert_includes adversarial_skill, "`--chat-only` is `--output chat`"
+    assert_includes adversarial_skill, "`--report-only` maps to `--mode critique --output both`"
+    assert_includes adversarial_skill, "`--chat-only` maps to `--output chat`"
     assert_includes adversarial_skill, "Critique mode never edits targets."
   end
 
@@ -312,11 +312,11 @@ class ModelTierContractTest < Minitest::Test
     manifest = YAML.load_file(File.join(REPO_UNDER_TEST, "skills.yaml"))
     metadata = manifest.fetch("skills").find { |entry| entry.fetch("name") == "adversarial-review" }
 
-    assert_includes skill, "scripts/adversarial-review start"
+    assert_includes skill, '"$AR_SKILL_DIR/scripts/adversarial-review" start'
     assert_includes skill, "--executor auto|codex|claude|cursor|gemini|generic"
     assert_includes skill, "--output chat|file|both"
-    assert_includes skill, "`--report-only` is `--mode critique --output both`"
-    assert_includes skill, "`--chat-only` is `--output chat`"
+    assert_includes skill, "`--report-only` maps to `--mode critique --output both`"
+    assert_includes skill, "`--chat-only` maps to `--output chat`"
     assert_includes skill, "The default is `--mode revise --output both`"
     assert_includes skill, "DID NOT CONVERGE"
     assert_includes skill, "The parent alone applies `FIXED|REJECTED` actions"
@@ -334,12 +334,12 @@ class ModelTierContractTest < Minitest::Test
     assert_includes adapters, "machine-readable runtime attestation"
     assert_includes adapters, "requested and observed model and effort"
     assert_includes adapters, "Claude-only"
-    assert_includes adapters, "Direct execution currently rejects `--jobs` greater than 1"
+    assert_includes adapters, "The parser rejects direct `--jobs` greater than 1"
     assert_includes adapters, "malicious same-UID local administrator"
 
     assert_includes usage, "--executor auto|codex|claude|cursor|gemini|generic"
     assert_includes usage, "--output chat|file|both"
-    assert_includes commands, "skills/general/adversarial-review/scripts/adversarial-review start"
+    assert_includes commands, "/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start"
     refute_includes commands, "rtk skills/general/adversarial-review/scripts/adversarial-review"
     assert_match(/script-backed portable control plane/i, catalog)
 
@@ -347,6 +347,62 @@ class ModelTierContractTest < Minitest::Test
     assert metadata.dig("install", "cursor", "enabled")
     assert_equal "deep", metadata.fetch("recommended_model_tier")
     assert_equal "ultracode", metadata.fetch("heavy_model_tier")
+  end
+
+  def test_adversarial_review_documents_installed_paths_and_fail_closed_boundaries
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    usage = read("USAGE.md")
+    commands = read("COMMANDS.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+
+    assert_includes skill, 'AR_SKILL_DIR="/absolute/path/to/directory-containing-this-SKILL.md"'
+    assert_includes skill, 'REVIEW_REPO="/absolute/path/to/reviewed/repository"'
+    assert_includes skill, '"$AR_SKILL_DIR/scripts/adversarial-review" start'
+    assert_includes skill, '--repository "$REVIEW_REPO"'
+    refute_includes skill, "skills/general/adversarial-review/scripts/adversarial-review start"
+
+    assert_includes usage, 'AR_SKILL_DIR="/absolute/path/to/installed/adversarial-review"'
+    assert_includes usage, '--repository "$REVIEW_REPO"'
+    assert_includes commands, "/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start --repository /absolute/path/to/reviewed/repository"
+    refute_includes commands, "skills/general/adversarial-review/scripts/adversarial-review start"
+
+    auto_boundary = /automatic generic fallback.*`--executor auto`.*before reviewed content.*before any external attempt/im
+    assert_match auto_boundary, adapters
+    assert_match(/explicit direct.*exit `4`.*resumable.*pinned/im, adapters)
+    assert_match(/reviewed content.*exit `5`.*resumable.*pinned/im, adapters)
+
+    assert_includes adapters, "`parallel_dispatch` as `unavailable`"
+    assert_includes adapters, "the public CLI therefore selects Generic Adapter before content"
+    assert_includes adapters, "fixture-conformant"
+    assert_includes adapters, "caller-supplied real dispatch evidence"
+    assert_includes adapters, "Generic bundles are intended for host-native parallelism."
+    refute_match(/public CLI.*direct.*serial/i, adapters)
+    refute_includes usage, "Direct adapters dispatch validated tasks serially."
+  end
+
+  def test_adversarial_review_documents_host_aliases_manual_fallback_and_degraded_verdict
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    usage = read("USAGE.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+
+    assert_includes skill, "`--high` maps to `--tier high`"
+    assert_includes skill, "`--ultra` maps to `--tier ultra`"
+    assert_includes skill, "`--report-only` maps to `--mode critique --output both`"
+    assert_includes skill, "`--chat-only` maps to `--output chat`"
+
+    assert_includes skill, "Ruby 2.6 or newer"
+    assert_includes skill, "When Ruby is unavailable"
+    assert_match(/attack-angles\.md.*judge-rubric\.md.*assets\/schemas/m, skill)
+    assert_match(/immutable IDs.*`UNPROVEN`.*parent-only decisions/m, skill)
+    assert_includes skill, "Scripting unavailable; capabilities degraded."
+    assert_includes skill, "do not invent durable state"
+    assert_includes skill, "never switch to a weaker direct executor"
+
+    [skill, usage, adapters].each do |text|
+      assert_includes text, "DEGRADED CAPABILITIES"
+    end
+    assert_match(/required capability.*`unavailable`.*safety boundary.*`behavioral`/im, skill)
+    assert_match(/distinct from `PASSED`, `PASSED WITH OPEN QUESTIONS`, and revise-mode convergence outcomes/im, skill)
   end
 
   def test_codex_model_inheritance_is_structurally_guarded
