@@ -1626,6 +1626,81 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_public_cli_report_only_lifecycle_completes_with_findings_without_author_actions
+    contents = "# Product spec\n\nTODO: rollback ownership is unspecified.\n"
+    with_repository(files: {"docs/spec.md" => contents}) do |repository|
+      run_dir = File.join(repository, ".git", "report-only-lifecycle-run")
+      capability_path = File.join(repository, ".git", "report-only-capabilities.json")
+      File.write(capability_path, "{}\n")
+
+      stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--report-only", "--executor", "generic", "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+      assert_equal "attacking", JSON.parse(stdout).fetch("stage")
+
+      finding_injected = false
+      ingest_pending_tasks(run_dir, capability_path) do |task|
+        result = empty_result_for(task)
+        if !finding_injected && task.fetch("schema") == "assets/schemas/attack.json"
+          result["findings"] = [review_finding("Rollback has no named owner.")]
+          finding_injected = true
+        end
+        result
+      end
+      candidate = AdversarialReview::State.load(run_dir).to_h.fetch("candidates").first
+
+      stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
+      assert status.success?, stderr
+      assert_equal "deduplicating", JSON.parse(stdout).fetch("stage")
+      ingest_pending_tasks(run_dir, capability_path) do |task|
+        empty_result_for(task).merge(
+          "groups" => [{
+            "group_id" => "G-report-only-rollback",
+            "candidate_ids" => [candidate.fetch("id")],
+            "summary" => candidate.fetch("summary"),
+            "location" => candidate.fetch("location"),
+            "source_angles" => [candidate.fetch("angle")]
+          }]
+        )
+      end
+
+      stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
+      assert status.success?, stderr
+      assert_equal "culling", JSON.parse(stdout).fetch("stage")
+      ingest_pending_tasks(run_dir, capability_path) do |task|
+        empty_result_for(task).merge(
+          "verdicts" => [{
+            "candidate_id" => candidate.fetch("id"),
+            "disposition" => "PROMOTE", "confidence" => 0.95,
+            "category" => "Omission", "severity" => "HIGH",
+            "evidence" => "No rollback owner is named in the target.",
+            "consequence" => "Recovery can stall during an incident."
+          }]
+        )
+      end
+
+      stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
+      assert status.success?, stderr
+      response = JSON.parse(stdout)
+      assert_equal "complete", response.fetch("stage")
+      assert_equal "REPORT ONLY - 1 finding", response.fetch("verdict")
+      assert_equal "REPORT ONLY - 1 finding", response.dig("summary", "verdict")
+
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      assert_equal "critique", snapshot.fetch("mode")
+      assert_equal "pending", snapshot.fetch("findings").first.fetch("state")
+      assert_empty snapshot.fetch("author_actions")
+      assert_empty snapshot.fetch("resolution_checks")
+      forbidden_tasks = snapshot.fetch("emitted_tasks").values.any? do |task|
+        %w[author-actions resolution].include?(task.fetch("kind"))
+      end
+      refute forbidden_tasks
+      assert_equal contents, File.binread(File.join(repository, "docs/spec.md"))
+    end
+  end
+
   def test_public_cli_nonzero_revise_lifecycle_refreshes_targets_and_runs_fresh_sweep
     with_repository(files: {"docs/spec.md" => "# Product spec\n\nTODO: rollback ownership is unspecified.\n"}) do |repository|
       run_dir = File.join(repository, ".git", "nonzero-lifecycle-run")

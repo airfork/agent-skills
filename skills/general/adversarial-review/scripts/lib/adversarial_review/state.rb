@@ -1783,21 +1783,23 @@ module AdversarialReview
           blockers << "judge-roster-incomplete"
         end
       end
-      data.fetch("findings").each do |finding|
-        finding_id = finding.fetch("id")
-        unless finding.fetch("reported")
-          if %w[CRITICAL HIGH].include?(finding.fetch("severity"))
-            blockers << "overflow-blocker:#{finding_id}"
-          elsif !data.fetch("overflow_evidence_gaps").key?(finding_id)
-            blockers << "overflow-evidence-gap:#{finding_id}"
+      if data.fetch("mode") == "revise"
+        data.fetch("findings").each do |finding|
+          finding_id = finding.fetch("id")
+          unless finding.fetch("reported")
+            if %w[CRITICAL HIGH].include?(finding.fetch("severity"))
+              blockers << "overflow-blocker:#{finding_id}"
+            elsif !data.fetch("overflow_evidence_gaps").key?(finding_id)
+              blockers << "overflow-evidence-gap:#{finding_id}"
+            end
+            next
           end
-          next
+          action = data.fetch("author_actions")[finding_id]
+          resolution = data.fetch("resolution_checks")[finding_id]
+          blockers << "author-action:#{finding_id}" unless valid_author_action_snapshot?(action)
+          blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(resolution)
+          blockers << "terminal-pair:#{finding_id}" if terminal_pairing(action, resolution) == :invalid
         end
-        action = data.fetch("author_actions")[finding_id]
-        resolution = data.fetch("resolution_checks")[finding_id]
-        blockers << "author-action:#{finding_id}" unless valid_author_action_snapshot?(action)
-        blockers << "resolution:#{finding_id}" unless %w[resolved rejected].include?(resolution)
-        blockers << "terminal-pair:#{finding_id}" if terminal_pairing(action, resolution) == :invalid
       end
       blockers
     end

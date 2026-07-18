@@ -1475,7 +1475,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_completion_requires_a_terminal_author_action
-    with_promoted_state("mode" => "critique") do |state, finding_id, _run_dir|
+    with_promoted_state("mode" => "revise") do |state, finding_id, _run_dir|
       error = assert_completion_blocked(state)
 
       assert_includes error.details.fetch("blockers"), "author-action:#{finding_id}"
