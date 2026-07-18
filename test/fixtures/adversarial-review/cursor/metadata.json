@@ -1,0 +1,8 @@
+{
+  "cli": "adversarial-review Cursor attestation contract v1",
+  "help_surface_version": "cursor-agent contract-vNext",
+  "capture_command": "not a live capture; deterministic synthetic future contract fixture for fake-cli conformance tests",
+  "fixture_kind": "synthetic-future-contract",
+  "installed_help_probe": "current-help-probe.json",
+  "sanitized": true
+}

@@ -1,0 +1,8 @@
+{
+  "capture_command": "command -v gemini; availability probe only, no model invocation or reviewed content",
+  "captured_version": null,
+  "direct_eligible": false,
+  "installed": false,
+  "missing_contracts": ["CLI unavailable for help/version and runtime attestation probes"],
+  "sanitized": true
+}

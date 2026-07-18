@@ -11,6 +11,16 @@ require_relative "support/adversarial_review_helper"
 class AdversarialReviewAdaptersTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def test_cursor_adapter_constant_is_loaded
+    assert_equal "AdversarialReview::Adapters::Cursor",
+                 AdversarialReview::Adapters::Cursor.name
+  end
+
+  def test_gemini_adapter_constant_is_loaded
+    assert_equal "AdversarialReview::Adapters::Gemini",
+                 AdversarialReview::Adapters::Gemini.name
+  end
+
   def test_runner_uses_an_argv_array_and_preserves_stdin
     with_repository(files: {"docs/spec.md" => "# Spec\n"}) do |repository|
       Dir.mktmpdir("adversarial-review-bin") do |bin|
@@ -531,17 +541,45 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_direct_adapter_fixtures_are_sanitized_and_labelled
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       metadata = JSON.parse(File.read(adapter_fixture(provider, "metadata.json")))
       assert_equal true, metadata.fetch("sanitized"), provider
       assert_includes metadata.fetch("fixture_kind"), "contract", provider
       assert_kind_of String, metadata.fetch("capture_command"), provider
-      fixtures = provider == "codex" ?
-        %w[accepted.jsonl missing-attestation.jsonl] :
-        %w[accepted-contract.jsonl claude-2.1.212-missing-attestation.jsonl]
+      fixtures = {
+        "codex" => %w[accepted.jsonl missing-attestation.jsonl],
+        "claude" => %w[accepted-contract.jsonl claude-2.1.212-missing-attestation.jsonl],
+        "cursor" => %w[accepted-contract.jsonl missing-attestation.jsonl current-help-probe.json],
+        "gemini" => %w[accepted-contract.json missing-attestation.json current-help-probe.json]
+      }.fetch(provider)
       fixtures.each do |fixture|
         refute_empty File.read(adapter_fixture(provider, fixture)), "#{provider}/#{fixture}"
       end
+    end
+  end
+
+  def test_installed_cursor_and_gemini_probe_fixtures_fail_closed_without_runtime_attestation
+    cursor = JSON.parse(File.read(adapter_fixture("cursor", "current-help-probe.json")))
+    gemini = JSON.parse(File.read(adapter_fixture("gemini", "current-help-probe.json")))
+
+    assert_equal "2026.07.16-899851b", cursor.fetch("captured_version")
+    assert_equal false, cursor.fetch("direct_eligible")
+    assert_includes cursor.fetch("missing_contracts"), "machine-readable runtime effort attestation"
+    assert_equal false, gemini.fetch("installed")
+    assert_equal false, gemini.fetch("direct_eligible")
+  end
+
+  def test_installed_cursor_help_surface_is_ineligible_before_review_content
+    current_help = "-p --mode --sandbox --workspace --model --output-format"
+    result, records = run_direct_adapter_case(
+      "cursor", help_text: current_help, cli_version: "2026.07.16-899851b"
+    )
+
+    assert_equal "generic", result.status
+    assert_equal "capability_probe_failed", result.error_code
+    assert_equal ["help"], records.map { |record| record.fetch("kind") }
+    records.each do |record|
+      refute_includes record.fetch("argv").join(" "), "REVIEWED SECRET"
     end
   end
 
@@ -564,6 +602,275 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                     "Direct execution requires a caller-supplied `dispatch_capability` observation; adapters never infer or fabricate parallel dispatch."
     assert_includes plan,
                     "Codex final-message output must update the precreated `0600` file in place. Atomic replacement, symlinks, identity changes, and oversized output are rejected fail closed."
+  end
+
+  def test_cursor_adapter_probes_then_runs_with_exact_argv_and_provenance
+    with_repository(files: {"docs/spec.md" => "# Reviewed secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-bin") do |bin|
+        log = File.join(bin, "cursor-calls.jsonl")
+        payload = direct_role_payload
+        fake = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: payload,
+          stream: File.read(adapter_fixture("cursor", "accepted-contract.jsonl")),
+          observed_model: "cursor-model-x", observed_effort: "high"
+        )
+        prompt = "REVIEWED SECRET: inspect docs/spec.md"
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: fake, repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: prompt, tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"],
+          dispatch_capability: observed_dispatch
+        )
+
+        assert_equal "complete", result.status
+        assert_equal payload, result.payload
+        assert_equal 80, result.usage.fetch("total_tokens")
+        assert_normalized_capabilities(result.capabilities, "cursor complete")
+        records = fake_cli_records(log)
+        assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+        preflight, execution = records.select { |record| record.fetch("kind") == "run" }
+        refute_includes preflight.fetch("argv").join(" "), "REVIEWED SECRET"
+        assert_equal false, preflight.fetch("relative_review_visible")
+        assert_equal prompt, execution.fetch("argv").last
+        assert_equal [
+          "-p", "--mode", "ask", "--sandbox", "enabled", "--workspace",
+          File.realpath(repository), "--model", "cursor-model-x", "--output-format",
+          "stream-json", "--effort", "high", prompt
+        ], execution.fetch("argv")
+        provenance = result.runtime_provenance.fetch("executions").fetch(0)
+        assert_equal "cursor-agent contract-vNext", provenance.fetch("cli_version")
+        assert_equal "cursor-session-2", provenance.fetch("session_id")
+        assert_equal File.realpath(repository), provenance.fetch("workdir")
+      end
+    end
+  end
+
+  def test_gemini_adapter_uses_exact_argv_and_private_ephemeral_configuration
+    with_repository(files: {"docs/spec.md" => "# Reviewed secret\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-gemini-bin") do |bin|
+        log = File.join(bin, "gemini-calls.jsonl")
+        payload = direct_role_payload
+        fake = write_direct_adapter_fake(
+          bin, provider: "gemini", log: log, payload: payload,
+          stream: File.read(adapter_fixture("gemini", "accepted-contract.json")),
+          observed_model: "gemini-model-x", observed_effort: "high"
+        )
+        prompt = "REVIEWED SECRET: inspect docs/spec.md"
+        adapter = AdversarialReview::Adapters::Gemini.new(
+          executable: fake, repository: repository, model: "gemini-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: prompt, tier: "high", timeout_seconds: 2,
+          source_env: {"GEMINI_API_KEY" => "test-key", "TOP_SECRET" => "must-not-leak"}
+        )
+
+        result = adapter.execute(
+          required_checks: ["assumption-coverage"],
+          dispatch_capability: observed_dispatch
+        )
+
+        assert_equal "complete", result.status
+        assert_equal payload, result.payload
+        assert_equal 80, result.usage.fetch("total_tokens")
+        assert_normalized_capabilities(result.capabilities, "gemini complete")
+        records = fake_cli_records(log)
+        assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+        preflight, execution = records.select { |record| record.fetch("kind") == "run" }
+        refute_includes preflight.fetch("argv").join(" "), "REVIEWED SECRET"
+        assert_equal false, preflight.fetch("relative_review_visible")
+        assert_equal [
+          "--prompt", prompt, "--model", "gemini-model-x",
+          "--output-format", "json", "--sandbox"
+        ], execution.fetch("argv")
+        assert_equal({
+          "agents" => {"active" => "adversarial-review", "ephemeral" => true},
+          "model" => {"effort" => "high", "name" => "gemini-model-x"},
+          "output" => {"format" => "json"},
+          "sandbox" => true,
+          "tools" => {"allowed" => %w[read_file search_file_content glob]},
+          "workspace" => File.realpath(repository)
+        }, execution.fetch("settings"))
+        assert_equal({
+          "description" => "Read-only adversarial review role",
+          "instructions" => "Inspect repository content without modifying files or running commands.",
+          "name" => "adversarial-review",
+          "tools" => %w[read_file search_file_content glob]
+        }, execution.fetch("agent_definition"))
+        assert_equal 0o700, execution.fetch("config_mode")
+        assert_equal 0o600, execution.fetch("settings_mode")
+        assert_equal 0o600, execution.fetch("agent_mode")
+        refute execution.fetch("env").key?("TOP_SECRET")
+        assert_equal "test-key", execution.fetch("env").fetch("GEMINI_API_KEY")
+        provenance = result.runtime_provenance.fetch("executions").fetch(0)
+        assert_equal "gemini-cli contract-vNext", provenance.fetch("cli_version")
+        assert_equal "gemini-session-2", provenance.fetch("session_id")
+      end
+    end
+  end
+
+  def test_cursor_and_gemini_fall_back_before_review_content_for_each_unattested_property
+    cursor = accepted_direct_stream("cursor")
+    gemini = accepted_direct_stream("gemini")
+    cases = {
+      "cursor" => {
+        "fresh" => {stream: cursor.sub('"fresh":true', '"fresh":false')},
+        "workspace" => {stream: cursor.sub('"workspace":"$CWD"', '"workspace":"/wrong"')},
+        "mode" => {stream: cursor.sub('"mode":"ask"', '"mode":"agent"')},
+        "sandbox" => {stream: cursor.sub('"sandbox":"enabled"', '"sandbox":"disabled"')},
+        "read only" => {stream: cursor.sub('"read_only":true', '"read_only":false')},
+        "model" => {stream: cursor, observed_model: "wrong-model"},
+        "effort" => {stream: cursor, observed_effort: "low"},
+        "output format" => {stream: cursor.sub('"output_format":"stream-json"', '"output_format":"text"')},
+        "structured output" => {stream: cursor, payloads: [{"ok" => false}]},
+        "usage" => {stream: without_usage(cursor)}
+      },
+      "gemini" => {
+        "fresh" => {stream: gemini.sub('"fresh":true', '"fresh":false')},
+        "workspace" => {stream: gemini.sub('"workspace":"$CWD"', '"workspace":"/wrong"')},
+        "sandbox" => {stream: gemini.sub('"sandbox":true', '"sandbox":false')},
+        "config root" => {stream: gemini.sub('"config_root":"$CONFIG_ROOT"', '"config_root":"/wrong"')},
+        "ephemeral agents" => {stream: gemini.sub('"agents_ephemeral":true', '"agents_ephemeral":false')},
+        "agent" => {stream: gemini.sub('"agent":"adversarial-review"', '"agent":"other"')},
+        "tools" => {stream: gemini.sub('["read_file","search_file_content","glob"]', '["read_file","run_shell_command"]')},
+        "model" => {stream: gemini, observed_model: "wrong-model"},
+        "effort" => {stream: gemini, observed_effort: "low"},
+        "output format" => {stream: gemini.sub('"output_format":"json"', '"output_format":"text"')},
+        "structured output" => {stream: gemini, payloads: [{"ok" => false}]},
+        "usage" => {stream: without_usage(gemini)}
+      }
+    }
+
+    cases.each do |provider, provider_cases|
+      provider_cases.each do |property, options|
+        assert_direct_preflight_fallback(provider, property, options)
+      end
+    end
+  end
+
+  def test_cursor_protocol_rejects_duplicates_order_mixed_sessions_and_event_overflow
+    startup, terminal = accepted_direct_stream("cursor").lines
+    progress = JSON.generate("type" => "progress") + "\n"
+    malformed = {
+      "duplicate startup" => startup + startup + terminal,
+      "duplicate terminal" => startup + terminal + terminal,
+      "terminal first" => terminal + startup,
+      "event after terminal" => startup + terminal + progress,
+      "mixed terminal session" => startup + terminal.sub('"$SESSION_ID"', '"other-session"'),
+      "event overflow" => startup + (progress * 1_025) + terminal
+    }
+
+    malformed.each do |label, stream|
+      result, records = run_direct_adapter_case("cursor", stream: stream)
+      assert_equal "generic", result.status, label
+      assert_equal "runtime_attestation_missing", result.error_code, label
+      assert_equal %w[help version run], records.map { |record| record.fetch("kind") }, label
+    end
+  end
+
+  def test_gemini_protocol_rejects_duplicate_keys_shape_mixed_sessions_and_output_overflow
+    accepted = accepted_direct_stream("gemini")
+    malformed = {
+      "duplicate startup" => accepted.sub(/\A\{/, '{"startup":{},'),
+      "missing startup" => accepted.sub('"type":"startup"', '"type":"other"'),
+      "mixed response session" => accepted.sub(
+        '"response":{"session_id":"$SESSION_ID"',
+        '"response":{"session_id":"other-session"'
+      ),
+      "mixed stats session" => accepted.sub(
+        '"stats":{"session_id":"$SESSION_ID"',
+        '"stats":{"session_id":"other-session"'
+      ),
+      "unexpected envelope field" => accepted.sub(/}\s*\z/, ',"extra":true}'),
+      "output overflow" => accepted.sub(/}\s*\z/, ",\"padding\":\"#{"x" * 1_048_576}\"}")
+    }
+
+    malformed.each do |label, stream|
+      result, records = run_direct_adapter_case("gemini", stream: stream)
+      assert_equal "generic", result.status, label
+      assert_includes %w[runtime_attestation_missing process_output_truncated], result.error_code, label
+      assert_equal %w[help version run], records.map { |record| record.fetch("kind") }, label
+    end
+  end
+
+  def test_cursor_and_gemini_require_version_fixtured_effort_contracts
+    {"cursor" => "cursor-agent 9.9.9", "gemini" => "gemini-cli 9.9.9"}.each do |provider, version|
+      result, records = run_direct_adapter_case(provider, cli_version: version)
+
+      assert_equal "generic", result.status, provider
+      assert_equal "process_failed", result.error_code, provider
+      assert_equal %w[help version], records.map { |record| record.fetch("kind") }, provider
+    end
+  end
+
+  def test_cursor_and_gemini_missing_help_capabilities_do_not_execute
+    {"cursor" => "-p --model", "gemini" => "--prompt --model"}.each do |provider, help|
+      result, records = run_direct_adapter_case(provider, help_text: help)
+
+      assert_equal "generic", result.status, provider
+      assert_equal "capability_probe_failed", result.error_code, provider
+      assert_equal ["help"], records.map { |record| record.fetch("kind") }, provider
+    end
+  end
+
+  def test_cursor_falls_back_from_unqualified_agent_to_secure_cursor_agent_candidate
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-fallback") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        accepted = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        File.rename(accepted, File.join(bin, "cursor-agent"))
+        write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high", help_text: "-p --model"
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", result.status
+        records = fake_cli_records(log)
+        assert_equal %w[help help version run run], records.map { |record| record.fetch("kind") }
+        assert_equal File.realpath(File.join(bin, "cursor-agent")),
+                     result.runtime_provenance.fetch("executions").fetch(0).fetch("executable")
+        refute_includes records.fetch(0).fetch("argv").join(" "), "REVIEWED SECRET"
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_cursor_and_gemini_never_downgrade_ultra_to_high
+    %w[cursor gemini].each do |provider|
+      result, records = run_direct_adapter_case(provider, tier: "ultra")
+
+      assert_equal "generic", result.status, provider
+      assert_equal "unsupported_tier", result.error_code, provider
+      assert_empty records, provider
+    end
+  end
+
+  def test_cursor_and_gemini_require_caller_observed_dispatch
+    %w[cursor gemini].each do |provider|
+      result, records = run_direct_adapter_case(provider, dispatch_capability: nil)
+
+      assert_equal "generic", result.status, provider
+      assert_equal "capabilities_degraded", result.error_code, provider
+      assert_equal "unavailable", result.capabilities.dig("parallel_dispatch", "status"), provider
+      assert_equal %w[help version run], records.map { |record| record.fetch("kind") }, provider
+    end
   end
 
   def test_codex_adapter_probes_then_runs_with_exact_argv_and_provenance
@@ -849,7 +1156,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_direct_adapter_requires_caller_observed_parallel_dispatch
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       missing, missing_records = run_direct_adapter_case(
         provider, dispatch_capability: nil
       )
@@ -870,7 +1177,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_direct_adapter_accepts_a_normalized_caller_dispatch_record
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       result, = run_direct_adapter_case(
         provider, dispatch_capability: enforced_capabilities
       )
@@ -908,19 +1215,19 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_valid_preflight_usage_survives_attestation_failure
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       result, = run_direct_adapter_case(
         provider, stream: accepted_direct_stream(provider), observed_model: "wrong-model"
       )
 
       assert_equal "generic", result.status, provider
-      expected = provider == "codex" ? 57 : 50
+      expected = {"codex" => 57, "claude" => 50, "cursor" => 40, "gemini" => 40}.fetch(provider)
       assert_equal expected, result.usage.fetch("total_tokens"), provider
     end
   end
 
   def test_preflight_execution_and_repair_usage_are_counted_once_each
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       accepted = accepted_direct_stream(provider)
       invalid = direct_role_payload.merge("schema_version" => 2)
       result, = run_direct_adapter_case(
@@ -929,7 +1236,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         payloads: [{"ok" => true}, invalid, direct_role_payload]
       )
 
-      expected = provider == "codex" ? 171 : 150
+      expected = {"codex" => 171, "claude" => 150, "cursor" => 120, "gemini" => 120}.fetch(provider)
       assert_equal "complete", result.status, provider
       assert_equal expected, result.usage.fetch("total_tokens"), provider
     end
@@ -1001,7 +1308,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     refute_includes AdversarialReview::Adapters::Base.public_instance_methods, :execute_serial
     assert_includes AdversarialReview::Adapters::Base.private_instance_methods, :execute_serial
 
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       with_direct_adapter(
         provider, streams: Array.new(4, accepted_direct_stream(provider)),
         session_ids: %w[preflight-one execution-one preflight-two execution-two],
@@ -1025,7 +1332,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_serial_early_failure_cannot_expose_prior_execution_state
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       with_direct_adapter(provider) do |adapter, _log, fake|
         success = adapter.execute(
           required_checks: ["assumption-coverage"], dispatch_capability: observed_dispatch
@@ -1045,7 +1352,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_direct_adapters_return_normalized_capabilities_on_version_failure
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       result, records = run_direct_adapter_case(provider, version_text: "")
 
       assert_equal "generic", result.status, provider
@@ -1112,7 +1419,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_direct_adapter_rejects_a_reused_execution_session
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       stream = accepted_direct_stream(provider)
       result, = run_direct_adapter_case(
         provider, streams: [stream, stream], session_ids: %w[reused reused],
@@ -1126,7 +1433,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_repair_attempt_must_use_a_third_fresh_session
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       stream = accepted_direct_stream(provider)
       invalid = direct_role_payload.merge("schema_version" => 2)
       result, records = run_direct_adapter_case(
@@ -1144,7 +1451,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_failed_execution_provenance_keeps_preflight_separate_and_names_attempt
-    %w[codex claude].each do |provider|
+    %w[codex claude cursor gemini].each do |provider|
       accepted = accepted_direct_stream(provider)
       missing = missing_direct_stream(provider)
       result, = run_direct_adapter_case(
@@ -1170,13 +1477,22 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def accepted_direct_stream(provider)
-    name = provider == "codex" ? "accepted.jsonl" : "accepted-contract.jsonl"
+    name = {
+      "codex" => "accepted.jsonl",
+      "claude" => "accepted-contract.jsonl",
+      "cursor" => "accepted-contract.jsonl",
+      "gemini" => "accepted-contract.json"
+    }.fetch(provider)
     File.read(adapter_fixture(provider, name))
   end
 
   def missing_direct_stream(provider)
-    name = provider == "codex" ?
-      "missing-attestation.jsonl" : "claude-2.1.212-missing-attestation.jsonl"
+    name = {
+      "codex" => "missing-attestation.jsonl",
+      "claude" => "claude-2.1.212-missing-attestation.jsonl",
+      "cursor" => "missing-attestation.jsonl",
+      "gemini" => "missing-attestation.json"
+    }.fetch(provider)
     File.read(adapter_fixture(provider, name))
   end
 
@@ -1212,10 +1528,23 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                               observed_model: nil, observed_effort: nil,
                               observed_models: nil, observed_efforts: nil,
                               session_ids: nil, payloads: nil, cli_version: nil,
-                              version_text: nil, dispatch_capability: :observed)
-    selected_model = observed_model ||
-      (provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8")
-    selected_effort = observed_effort || (provider == "codex" ? "xhigh" : "high")
+                              version_text: nil, help_text: nil,
+                              dispatch_capability: :observed)
+    requested_models = {
+      "codex" => "gpt-5.6-sol", "claude" => "claude-opus-4-8",
+      "cursor" => "cursor-model-x", "gemini" => "gemini-model-x"
+    }
+    requested_efforts = {
+      "codex" => "xhigh", "claude" => "high", "cursor" => "high", "gemini" => "high"
+    }
+    classes = {
+      "codex" => AdversarialReview::Adapters::Codex,
+      "claude" => AdversarialReview::Adapters::Claude,
+      "cursor" => AdversarialReview::Adapters::Cursor,
+      "gemini" => AdversarialReview::Adapters::Gemini
+    }
+    selected_model = observed_model || requested_models.fetch(provider)
+    selected_effort = observed_effort || requested_efforts.fetch(provider)
     selected_streams = streams || [stream || accepted_direct_stream(provider)]
     captured = nil
     with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
@@ -1227,14 +1556,12 @@ class AdversarialReviewAdaptersTest < Minitest::Test
           observed_model: selected_model, observed_effort: selected_effort,
           observed_models: observed_models, observed_efforts: observed_efforts,
           session_ids: session_ids, payloads: payloads, cli_version: cli_version,
-          version_text: version_text
+          version_text: version_text, help_text: help_text
         )
-        klass = provider == "codex" ?
-          AdversarialReview::Adapters::Codex : AdversarialReview::Adapters::Claude
+        klass = classes.fetch(provider)
         adapter = klass.new(
-          executable: fake, repository: repository, model: provider == "codex" ?
-            "gpt-5.6-sol" : "claude-opus-4-8",
-          effort: provider == "codex" ? "xhigh" : "high",
+          executable: fake, repository: repository, model: requested_models.fetch(provider),
+          effort: requested_efforts.fetch(provider),
           role_schema: attack_role_schema, schema_name: "attack",
           prompt: "REVIEWED SECRET: inspect docs/spec.md", tier: tier,
           timeout_seconds: 2
@@ -1258,15 +1585,25 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         fake = write_direct_adapter_fake(
           bin, provider: provider, log: log, payload: direct_role_payload,
           stream: selected_streams.fetch(0), streams: selected_streams,
-          observed_model: provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8",
+          observed_model: {
+            "codex" => "gpt-5.6-sol", "claude" => "claude-opus-4-8",
+            "cursor" => "cursor-model-x", "gemini" => "gemini-model-x"
+          }.fetch(provider),
           observed_effort: provider == "codex" ? "xhigh" : "high",
           session_ids: session_ids, payloads: payloads, run_delay: run_delay
         )
-        klass = provider == "codex" ?
-          AdversarialReview::Adapters::Codex : AdversarialReview::Adapters::Claude
+        klass = {
+          "codex" => AdversarialReview::Adapters::Codex,
+          "claude" => AdversarialReview::Adapters::Claude,
+          "cursor" => AdversarialReview::Adapters::Cursor,
+          "gemini" => AdversarialReview::Adapters::Gemini
+        }.fetch(provider)
         adapter = klass.new(
           executable: fake, repository: repository,
-          model: provider == "codex" ? "gpt-5.6-sol" : "claude-opus-4-8",
+          model: {
+            "codex" => "gpt-5.6-sol", "claude" => "claude-opus-4-8",
+            "cursor" => "cursor-model-x", "gemini" => "gemini-model-x"
+          }.fetch(provider),
           effort: provider == "codex" ? "xhigh" : "high",
           role_schema: attack_role_schema, schema_name: "attack",
           prompt: "REVIEWED SECRET: inspect docs/spec.md", tier: "high",
@@ -1320,14 +1657,27 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                                 observed_models: nil, observed_efforts: nil,
                                 session_ids: nil, payloads: nil, cli_version: nil,
                                 version_text: nil, run_delay: 0)
-    default_help = if provider == "codex"
+    default_help = case provider
+    when "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
-    else
+    when "claude"
       "  -p, --print\n  --bare\n  --no-session-persistence\n  --permission-mode\n  --tools\n  --model\n  --effort\n  --verbose\n  --output-format\n  --json-schema\n"
+    when "cursor"
+      "-p --mode --sandbox --workspace --model --output-format --effort"
+    when "gemini"
+      "--prompt --model --output-format --sandbox"
+    else
+      raise ArgumentError, "unknown fake direct provider: #{provider}"
     end
-    version = cli_version || (provider == "codex" ?
-      "codex-cli contract-vNext" : "Claude Code contract-vNext")
-    name = provider == "codex" ? "codex" : "claude"
+    default_versions = {
+      "codex" => "codex-cli contract-vNext",
+      "claude" => "Claude Code contract-vNext",
+      "cursor" => "cursor-agent contract-vNext",
+      "gemini" => "gemini-cli contract-vNext"
+    }
+    version = cli_version || default_versions.fetch(provider)
+    name = {"codex" => "codex", "claude" => "claude",
+            "cursor" => "agent", "gemini" => "gemini"}.fetch(provider)
     body = <<~RUBY
       \#!#{RbConfig.ruby}
       require "json"
@@ -1342,7 +1692,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       help_text = #{(help_text || default_help).inspect}
       version_text = #{version_text.nil? ? version.inspect : version_text.inspect}
       help_call = (provider == "codex" && ARGV == ["exec", "--help"]) ||
-                  (provider == "claude" && ARGV == ["--help"])
+                  (%w[claude cursor gemini].include?(provider) && ARGV == ["--help"])
       version_call = ARGV == ["--version"]
       kind = help_call ? "help" : (version_call ? "version" : "run")
       stdin_text = STDIN.read
@@ -1385,12 +1735,27 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES
         nil
       end
+      settings = agent_definition = nil
+      config_mode = settings_mode = agent_mode = nil
+      if provider == "gemini" && ENV["GEMINI_CLI_HOME"]
+        config_root = ENV.fetch("GEMINI_CLI_HOME")
+        settings_path = File.join(config_root, "settings.json")
+        agent_path = File.join(config_root, "agents", "adversarial-review.json")
+        settings = JSON.parse(File.read(settings_path)) if File.file?(settings_path)
+        agent_definition = JSON.parse(File.read(agent_path)) if File.file?(agent_path)
+        config_mode = File.stat(config_root).mode & 0o777
+        settings_mode = File.stat(settings_path).mode & 0o777 if File.file?(settings_path)
+        agent_mode = File.stat(agent_path).mode & 0o777 if File.file?(agent_path)
+      end
       record = {
         "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
         "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload,
         "relative_review_visible" => !relative_review_contents.nil?,
         "git_repository" => git_repository,
-        "output_preexisting" => output_preexisting, "output_mode" => output_mode
+        "output_preexisting" => output_preexisting, "output_mode" => output_mode,
+        "settings" => settings, "agent_definition" => agent_definition,
+        "config_mode" => config_mode, "settings_mode" => settings_mode,
+        "agent_mode" => agent_mode
       }
       File.open(log, "a", 0o600) { |file| file.puts(JSON.generate(record)) }
       if !git_repository
@@ -1405,6 +1770,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                            .gsub("$OBSERVED_MODEL", observed_model)
                            .gsub("$OBSERVED_EFFORT", observed_effort)
                            .gsub("$SESSION_ID", session_id)
+                           .gsub("$CONFIG_ROOT", ENV.fetch("GEMINI_CLI_HOME", ""))
                            .gsub("$ROLE_RESPONSE", payload)
         STDOUT.write(rendered)
       end

@@ -1,0 +1,1 @@
+{"startup":{"type":"startup","session_id":"$SESSION_ID","workspace":"$CWD","model":"$OBSERVED_MODEL","sandbox":true,"output_format":"json"},"response":{"session_id":"$SESSION_ID","structured_output":$ROLE_RESPONSE},"stats":{"session_id":"$SESSION_ID","usage":{"input_tokens":29,"output_tokens":11,"total_tokens":40}}}
