@@ -186,14 +186,69 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       "VENDOR_API_KEY" => "credential"
     }
 
-    env = klass.new.child_environment(
-      source_env: source, isolated_home: "/isolated/home"
-    )
+    AdversarialReview::Runner.with_isolated_directory do |home|
+      AdversarialReview::Runner.with_isolated_directory do |config|
+        env = klass.new.child_environment(
+          source_env: source, isolated_home: home, isolated_config_root: config
+        )
 
-    assert_equal({
-      "HOME" => "/isolated/home", "LANG" => "en_US.UTF-8", "LC_ALL" => "C",
-      "VENDOR_API_KEY" => "credential"
-    }, env)
+        assert_equal({
+          "HOME" => File.realpath(home), "LANG" => "en_US.UTF-8", "LC_ALL" => "C",
+          "VENDOR_API_KEY" => "credential",
+          "XDG_CONFIG_HOME" => File.realpath(config)
+        }, env)
+      end
+    end
+  end
+
+  def test_child_environment_accepts_the_default_env_mapping_on_ruby_2_6
+    env = AdversarialReview::Adapters::Base.new.child_environment
+
+    assert_equal [], env.keys - AdversarialReview::Adapters::Base::LOCALE_VARIABLES
+    env.each do |key, value|
+      assert_kind_of String, key
+      assert_kind_of String, value
+    end
+    refute env.key?("PATH")
+    refute env.key?("RUBYOPT")
+  end
+
+  def test_child_environment_accepts_a_read_only_each_pair_mapping
+    mapping = Object.new
+    mapping.define_singleton_method(:each_pair) do |&block|
+      [["LANG", "C"], ["PATH", "/not-forwarded"]].each(&block)
+    end
+
+    env = AdversarialReview::Adapters::Base.new.child_environment(source_env: mapping)
+
+    assert_equal({"LANG" => "C"}, env)
+  end
+
+  def test_child_environment_accepts_a_read_only_to_h_mapping
+    mapping = Object.new
+    mapping.define_singleton_method(:to_h) do
+      {"LC_ALL" => "C", "RUBYOPT" => "not-forwarded"}.freeze
+    end
+
+    env = AdversarialReview::Adapters::Base.new.child_environment(source_env: mapping)
+
+    assert_equal({"LC_ALL" => "C"}, env)
+  end
+
+  def test_child_environment_rejects_noncanonical_or_insecure_isolated_roots
+    Dir.mktmpdir("adversarial-review-home") do |parent|
+      insecure = File.join(parent, "insecure")
+      Dir.mkdir(insecure, 0o755)
+      symlink = File.join(parent, "home-link")
+      File.symlink(insecure, symlink)
+      base = AdversarialReview::Adapters::Base.new
+
+      assert_raises(ArgumentError) { base.child_environment(isolated_home: insecure) }
+      assert_raises(ArgumentError) { base.child_environment(isolated_home: symlink) }
+      assert_raises(ArgumentError) do
+        base.child_environment(isolated_config_root: File.join(parent, "missing"))
+      end
+    end
   end
 
   def test_one_repair_for_invalid_format_and_usage_capture

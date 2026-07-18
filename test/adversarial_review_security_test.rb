@@ -1,6 +1,7 @@
 require "minitest/autorun"
 require "fileutils"
 require "tmpdir"
+require "timeout"
 
 SKILL = File.expand_path("../skills/general/adversarial-review", __dir__) unless defined?(SKILL)
 $LOAD_PATH.unshift(File.join(SKILL, "scripts", "lib"))
@@ -62,6 +63,43 @@ class AdversarialReviewSecurityTest < Minitest::Test
     end
   end
 
+  def test_controlled_root_detection_uses_identity_for_case_variant_spelling
+    Dir.mktmpdir("AdversarialReviewCaseRoot") do |controlled|
+      parent = File.dirname(controlled)
+      variant = File.join(parent, File.basename(controlled).swapcase)
+      begin
+        actual = File.stat(controlled)
+        variant_stat = File.stat(variant)
+      rescue Errno::ENOENT
+        skip "filesystem is case-sensitive"
+      end
+      unless [actual.dev, actual.ino] == [variant_stat.dev, variant_stat.ino]
+        skip "case variant does not resolve to the same directory"
+      end
+      fake = write_fake_executable(controlled)
+
+      error = assert_raises(AdversarialReview::Runner::SecurityError) do
+        AdversarialReview::Runner.resolve_executable(fake, excluded_roots: [variant])
+      end
+      assert_equal "controlled_executable", error.code
+    end
+  end
+
+  def test_controlled_root_detection_follows_a_symlink_alias_by_identity
+    Dir.mktmpdir("adversarial-review-root") do |parent|
+      controlled = File.join(parent, "controlled")
+      Dir.mkdir(controlled)
+      alias_path = File.join(parent, "alias")
+      File.symlink(controlled, alias_path)
+      fake = write_fake_executable(controlled)
+
+      error = assert_raises(AdversarialReview::Runner::SecurityError) do
+        AdversarialReview::Runner.resolve_executable(fake, excluded_roots: [alias_path])
+      end
+      assert_equal "controlled_executable", error.code
+    end
+  end
+
   def test_rejects_repo_run_and_config_executables
     Dir.mktmpdir("adversarial-review-roots") do |root|
       %w[repository run config].each do |name|
@@ -96,6 +134,23 @@ class AdversarialReviewSecurityTest < Minitest::Test
         )
       end
       assert_equal "executable_changed", error.code
+    end
+  end
+
+  def test_executable_metadata_is_rejected_before_a_fifo_can_block_hashing
+    Dir.mktmpdir("adversarial-review-bin") do |bin|
+      fake = write_fake_executable(bin)
+      pinned = AdversarialReview::Runner.resolve_executable(fake)
+      File.unlink(fake)
+      success = system("/usr/bin/mkfifo", fake)
+      raise "mkfifo fixture failed" unless success
+
+      error = Timeout.timeout(0.5) do
+        assert_raises(AdversarialReview::Runner::SecurityError) do
+          AdversarialReview::Runner.verify_executable!(pinned)
+        end
+      end
+      assert_kind_of AdversarialReview::Runner::SecurityError, error
     end
   end
 
@@ -140,6 +195,37 @@ class AdversarialReviewSecurityTest < Minitest::Test
     end
   end
 
+  def test_runner_rejects_nan_and_infinite_time_bounds
+    [Float::NAN, Float::INFINITY, -Float::INFINITY].each do |value|
+      assert_raises(AdversarialReview::Runner::Error) do
+        AdversarialReview::Runner.run(
+          argv: ruby_script("exit 0"), stdin_data: "", timeout_seconds: value
+        )
+      end
+      assert_raises(AdversarialReview::Runner::Error) do
+        AdversarialReview::Runner.run(
+          argv: ruby_script("exit 0"), stdin_data: "", timeout_seconds: 1,
+          termination_grace_seconds: value
+        )
+      end
+    end
+  end
+
+  def test_no_argument_executable_with_shell_metacharacters_never_uses_a_shell
+    Dir.mktmpdir("adversarial-review-metachar") do |directory|
+      log = File.join(directory, "log.jsonl")
+      fake = write_fake_executable(directory, name: "selected;touch injected")
+      result = AdversarialReview::Runner.run(
+        argv: [fake], stdin_data: "", timeout_seconds: 2,
+        chdir: directory, env: {"FAKE_CLI_LOG" => log}
+      )
+
+      assert_equal 0, result.exit_status
+      assert_equal 1, fake_cli_records(log).length
+      refute File.exist?(File.join(directory, "injected"))
+    end
+  end
+
   def test_timeout_terminates_the_process_group_and_descendant
     Dir.mktmpdir("adversarial-review-process") do |directory|
       child_pid_file = File.join(directory, "child.pid")
@@ -174,6 +260,57 @@ class AdversarialReviewSecurityTest < Minitest::Test
     end
   end
 
+  def test_timeout_kills_resistant_descendant_after_leader_and_readers_exit
+    Dir.mktmpdir("adversarial-review-process") do |directory|
+      child_pid_file = File.join(directory, "resistant.pid")
+      script = <<~'RUBY'
+        child_pid_file = ARGV.fetch(0)
+        child = fork do
+          STDOUT.close
+          STDERR.close
+          trap("TERM") { }
+          loop { sleep 0.05 }
+        end
+        File.write(child_pid_file, child.to_s)
+        STDOUT.close
+        STDERR.close
+        trap("TERM") { exit! 0 }
+        loop { sleep 0.05 }
+      RUBY
+      before_threads = Thread.list.length
+      child_pid = nil
+      begin
+        result = AdversarialReview::Runner.run(
+          argv: ruby_script(script) + [child_pid_file], stdin_data: "x" * 2_000_000,
+          timeout_seconds: 0.15, termination_grace_seconds: 0.1
+        )
+        assert_equal true, result.timed_out
+        child_pid = Integer(File.read(child_pid_file))
+        assert_process_exits(child_pid)
+        assert_operator Thread.list.length, :<=, before_threads
+      ensure
+        begin
+          Process.kill("KILL", child_pid) if child_pid
+        rescue Errno::ESRCH
+          nil
+        end
+      end
+    end
+  end
+
+  def test_output_reader_failure_is_explicit_after_child_cleanup
+    failure = proc { |_pipe, _limit| raise "reader exploded" }
+    error = AdversarialReview::Runner.stub(:drain, failure) do
+      assert_raises(AdversarialReview::Runner::Error) do
+        AdversarialReview::Runner.run(
+          argv: ruby_script("exit 0"), stdin_data: "", timeout_seconds: 1
+        )
+      end
+    end
+
+    assert_equal "output_read_failed", error.code
+  end
+
   def test_isolated_directory_and_private_file_modes_and_cleanup
     path = nil
     file_path = nil
@@ -186,5 +323,20 @@ class AdversarialReviewSecurityTest < Minitest::Test
     end
     refute File.exist?(path)
     refute File.exist?(file_path)
+  end
+  private
+
+  def assert_process_exits(pid)
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 1
+    loop do
+      begin
+        Process.kill(0, pid)
+      rescue Errno::ESRCH
+        return
+      end
+      break if Process.clock_gettime(Process::CLOCK_MONOTONIC) >= deadline
+      sleep 0.01
+    end
+    flunk "descendant remained alive after process-group cleanup"
   end
 end

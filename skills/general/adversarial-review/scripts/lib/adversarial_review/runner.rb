@@ -84,7 +84,7 @@ module AdversarialReview
       unless File.directory?(canonical_chdir)
         raise Error.new("invalid_working_directory", "working directory is not a directory")
       end
-      if repository && canonical_chdir != File.realpath(repository)
+      if repository && !same_identity?(canonical_chdir, File.realpath(repository))
         raise SecurityError.new(
           "working_directory_mismatch",
           "child working directory does not match the canonical repository"
@@ -122,13 +122,15 @@ module AdversarialReview
 
       begin
         stdin, stdout, stderr, wait_thread = Open3.popen3(
-          env, *command,
+          env, [pinned.path, pinned.path], *command.drop(1),
           chdir: canonical_chdir,
           unsetenv_others: true,
           pgroup: true
         )
         readers = [stdout, stderr].map do |pipe|
-          Thread.new { drain(pipe, max_output_bytes) }
+          Thread.new { drain(pipe, max_output_bytes) }.tap do |thread|
+            thread.report_on_exception = false
+          end
         end
         writer = Thread.new do
           begin
@@ -151,7 +153,10 @@ module AdversarialReview
                   (wait_thread.alive? || readers.any?(&:alive?) || writer.alive?)
               sleep 0.005
             end
-            terminate_group(wait_thread.pid, "KILL") if wait_thread.alive? || readers.any?(&:alive?)
+            close_quietly(stdin)
+            close_quietly(stdout)
+            close_quietly(stderr)
+            terminate_group(wait_thread.pid, "KILL")
             break
           end
           sleep 0.005
@@ -160,21 +165,33 @@ module AdversarialReview
         close_quietly(stdin)
         close_quietly(stdout) if timed_out
         close_quietly(stderr) if timed_out
-        writer.join(termination_grace_seconds)
-        readers.each { |thread| thread.join(termination_grace_seconds) }
-        wait_thread.join
+        cleanup_seconds = [termination_grace_seconds, 0.1].max
+        writer_finished = finish_worker(writer, cleanup_seconds)
+        reader_statuses = readers.map { |thread| finish_worker(thread, cleanup_seconds) }
+        unless join_quietly(wait_thread, cleanup_seconds)
+          terminate_group(wait_thread.pid, "KILL")
+          unless join_quietly(wait_thread, cleanup_seconds)
+            raise Error.new("process_cleanup_failed", "child could not be reaped after KILL")
+          end
+        end
         process_status = wait_thread.value
+        unless writer_finished || timed_out
+          raise Error.new("stdin_write_failed", "stdin writer did not finish")
+        end
+        unless reader_statuses.all?
+          raise Error.new("output_read_failed", "output reader did not finish")
+        end
         stdout_text, stdout_truncated = thread_capture(readers.fetch(0))
         stderr_text, stderr_truncated = thread_capture(readers.fetch(1))
       ensure
         close_quietly(stdin)
         close_quietly(stdout)
         close_quietly(stderr)
-        writer.join(termination_grace_seconds) if writer
-        readers.each { |thread| thread.join(termination_grace_seconds) }
+        finish_worker(writer, termination_grace_seconds) if writer
+        readers.each { |thread| finish_worker(thread, termination_grace_seconds) }
         if wait_thread && wait_thread.alive?
           terminate_group(wait_thread.pid, "KILL")
-          wait_thread.join
+          join_quietly(wait_thread, [termination_grace_seconds, 0.1].max)
         end
       end
 
@@ -227,16 +244,25 @@ module AdversarialReview
     private_class_method :executable_path
 
     def identity(path)
-      before = File.stat(path)
+      before = File.lstat(path)
+      unless before.file? && !before.symlink? && File.executable?(path)
+        raise SecurityError.new(
+          "invalid_executable_metadata",
+          "selected executable is not a regular executable file"
+        )
+      end
       digest = nil
-      File.open(path, File::RDONLY) do |file|
+      flags = File::RDONLY
+      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+      File.open(path, flags) do |file|
         opened = file.stat
-        unless opened.file? && before.dev == opened.dev && before.ino == opened.ino
+        unless opened.file? && (opened.mode & 0o111).positive? &&
+               before.dev == opened.dev && before.ino == opened.ino
           raise SecurityError.new("executable_changed", "selected executable identity changed while reading")
         end
         digest = Digest::SHA256.file(file).hexdigest
       end
-      after = File.stat(path)
+      after = File.lstat(path)
       unless before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
              before.mtime == after.mtime && before.mode == after.mode
         raise SecurityError.new("executable_changed", "selected executable changed while reading")
@@ -260,9 +286,26 @@ module AdversarialReview
     private_class_method :canonical_root
 
     def path_within?(path, root)
-      path == root || path.start_with?(root + File::SEPARATOR)
+      return false unless File.exist?(root)
+
+      root_stat = File.stat(root)
+      cursor = File.realpath(path)
+      loop do
+        cursor_stat = File.stat(cursor)
+        return true if cursor_stat.dev == root_stat.dev && cursor_stat.ino == root_stat.ino
+        parent = File.dirname(cursor)
+        return false if parent == cursor
+        cursor = parent
+      end
     end
     private_class_method :path_within?
+
+    def same_identity?(left, right)
+      left_stat = File.stat(left)
+      right_stat = File.stat(right)
+      left_stat.dev == right_stat.dev && left_stat.ino == right_stat.ino
+    end
+    private_class_method :same_identity?
 
     def drain(pipe, limit)
       captured = String.new.b
@@ -282,9 +325,15 @@ module AdversarialReview
 
     def thread_capture(thread)
       value = thread.value
-      value.is_a?(Array) ? value : ["", false]
-    rescue StandardError
-      ["", false]
+      unless value.is_a?(Array) && value.length == 2 && value.fetch(0).is_a?(String) &&
+             [true, false].include?(value.fetch(1))
+        raise Error.new("output_read_failed", "output reader returned an invalid result")
+      end
+      value
+    rescue Error
+      raise
+    rescue StandardError => error
+      raise Error.new("output_read_failed", "output reader failed: #{error.class}")
     end
     private_class_method :thread_capture
 
@@ -302,6 +351,23 @@ module AdversarialReview
     end
     private_class_method :close_quietly
 
+    def join_quietly(thread, timeout)
+      thread.join(timeout)
+      !thread.alive?
+    rescue StandardError
+      !thread.alive?
+    end
+    private_class_method :join_quietly
+
+    def finish_worker(thread, timeout)
+      return true if join_quietly(thread, timeout)
+
+      thread.kill
+      join_quietly(thread, 0.1)
+      false
+    end
+    private_class_method :finish_worker
+
     def monotonic_now
       Process.clock_gettime(Process::CLOCK_MONOTONIC)
     end
@@ -315,15 +381,15 @@ module AdversarialReview
       unless stdin_data.is_a?(String)
         raise Error.new("invalid_stdin", "stdin data must be a string")
       end
-      unless timeout_seconds.is_a?(Numeric) && timeout_seconds.positive? &&
-             termination_grace_seconds.is_a?(Numeric) && termination_grace_seconds >= 0
+      unless finite_number?(timeout_seconds) && timeout_seconds.positive? &&
+             finite_number?(termination_grace_seconds) && termination_grace_seconds >= 0
         raise Error.new("invalid_timeout", "timeout and termination grace must be bounded numbers")
       end
       unless max_output_bytes.is_a?(Integer) && max_output_bytes.positive?
         raise Error.new("invalid_output_limit", "output limit must be a positive integer")
       end
       unless env.is_a?(Hash) && env.all? do |key, value|
-               key.is_a?(String) && !key.empty? && value.is_a?(String) && !key.include?("=")
+               valid_environment_entry?(key, value)
              end
         raise Error.new("invalid_environment", "child environment must be an explicit string map")
       end
@@ -336,5 +402,16 @@ module AdversarialReview
       end
     end
     private_class_method :validate_run_arguments!
+
+    def finite_number?(value)
+      value.is_a?(Numeric) && (!value.respond_to?(:finite?) || value.finite?)
+    end
+    private_class_method :finite_number?
+
+    def valid_environment_entry?(key, value)
+      key.is_a?(String) && !key.empty? && !key.include?("=") && !key.include?("\0") &&
+        value.is_a?(String) && !value.include?("\0")
+    end
+    private_class_method :valid_environment_entry?
   end
 end

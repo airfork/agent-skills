@@ -93,21 +93,24 @@ module AdversarialReview
         []
       end
 
-      def child_environment(source_env: ENV, isolated_home: nil)
-        unless source_env.is_a?(Hash) && credential_variables.is_a?(Array) &&
-               credential_variables.all? { |name| name.is_a?(String) && !name.empty? }
+      def child_environment(source_env: ENV, isolated_home: nil, isolated_config_root: nil)
+        unless credential_variables.is_a?(Array) &&
+               credential_variables.all? { |name| valid_environment_name?(name) }
           raise ArgumentError, "environment source and credential allowlist are invalid"
         end
+        source = environment_hash(source_env)
         allowed = (LOCALE_VARIABLES + credential_variables).uniq
         environment = allowed.each_with_object({}) do |name, result|
-          value = source_env[name]
+          value = source[name]
           result[name] = value if value.is_a?(String)
         end
         if isolated_home
-          unless isolated_home.is_a?(String) && isolated_home.start_with?(File::SEPARATOR)
-            raise ArgumentError, "isolated HOME must be an absolute path"
-          end
-          environment["HOME"] = isolated_home
+          environment["HOME"] = validated_isolated_root(isolated_home, "HOME")
+        end
+        if isolated_config_root
+          environment["XDG_CONFIG_HOME"] = validated_isolated_root(
+            isolated_config_root, "config root"
+          )
         end
         environment
       end
@@ -205,6 +208,53 @@ module AdversarialReview
       end
 
       private
+
+      def environment_hash(source)
+        pairs = if source.respond_to?(:each_pair)
+                  source
+                elsif source.respond_to?(:to_h)
+                  source.to_h
+                end
+        unless pairs && pairs.respond_to?(:each_pair)
+          raise ArgumentError, "environment source must provide each_pair or to_h"
+        end
+        result = {}
+        pairs.each_pair do |key, value|
+          unless valid_environment_name?(key) && value.is_a?(String) && !value.include?("\0")
+            raise ArgumentError, "environment keys and values must be strings"
+          end
+          result[key] = value
+        end
+        result
+      end
+
+      def valid_environment_name?(name)
+        name.is_a?(String) && !name.empty? && !name.include?("=") && !name.include?("\0")
+      end
+
+      def validated_isolated_root(path, label)
+        unless path.is_a?(String) && path.start_with?(File::SEPARATOR)
+          raise ArgumentError, "isolated #{label} must be an absolute path"
+        end
+        expected = File.lstat(path)
+        unless expected.directory? && !expected.symlink? && expected.uid == Process.euid &&
+               (expected.mode & 0o777) == 0o700
+          raise ArgumentError, "isolated #{label} must be a private owned directory"
+        end
+        canonical = File.realpath(path)
+        flags = File::RDONLY
+        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        File.open(canonical, flags) do |directory|
+          opened = directory.stat
+          unless opened.directory? && opened.dev == expected.dev && opened.ino == expected.ino &&
+                 opened.uid == Process.euid && (opened.mode & 0o777) == 0o700
+            raise ArgumentError, "isolated #{label} identity or permissions changed"
+          end
+        end
+        canonical
+      rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM
+        raise ArgumentError, "isolated #{label} is unavailable"
+      end
 
       def successful_process?(result)
         result.is_a?(Runner::Result) && !result.timed_out && result.exit_status == 0
