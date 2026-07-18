@@ -70,8 +70,7 @@ module AdversarialReview
       def parse_result(result)
         return nil unless result.is_a?(Runner::Result) && result.exit_status == 0 && !result.timed_out
 
-        events = parse_json_line_objects(result.stdout, "Cursor")
-        raise JSON::ParserError, "Cursor event limit exceeded" if events.length > MAX_EVENTS
+        events = parse_json_line_objects(result.stdout, "Cursor", max_objects: MAX_EVENTS)
         runtime, final = parse_protocol(events)
         verify_event_bindings!(runtime, events.drop(1))
         verify_terminal_binding!(runtime, final)

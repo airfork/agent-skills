@@ -3,13 +3,6 @@ require "json"
 module AdversarialReview
   module Adapters
     class Gemini < Base
-      class DuplicateRejectingHash < Hash
-        def []=(key, value)
-          raise JSON::ParserError, "duplicate Gemini JSON key #{key.inspect}" if key?(key)
-          super
-        end
-      end
-
       REQUIRED_HELP_TOKENS = %w[--prompt --model --output-format --sandbox].freeze
       CREDENTIAL_VARIABLES = %w[
         GEMINI_API_KEY GOOGLE_API_KEY GOOGLE_GENAI_USE_VERTEXAI

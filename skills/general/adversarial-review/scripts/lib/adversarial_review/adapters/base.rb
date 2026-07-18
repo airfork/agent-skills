@@ -14,6 +14,12 @@ module AdversarialReview
         :runner_results, :error_code, :ordinary_result, :runtime_provenance,
         keyword_init: true
       )
+      class DuplicateRejectingHash < Hash
+        def []=(key, value)
+          raise JSON::ParserError, "duplicate JSON key #{key.inspect}" if key?(key)
+          super
+        end
+      end
 
       DIRECT_SUPPORT = {
         "codex" => %w[default high],
@@ -385,6 +391,7 @@ module AdversarialReview
       end
 
       def attempt_precontent_candidate(candidate, index)
+        reset_candidate_state!
         results = []
         usage = {}
         record = {
@@ -458,6 +465,19 @@ module AdversarialReview
           @runtime_provenance_records.fetch("candidate_attempts") << record
           @runtime_provenance_records["preflight"] = nil unless selected
         end
+      end
+
+      def reset_candidate_state!
+        @last_normalized_capabilities = nil
+        @capability_probe = nil
+        @cli_version = nil
+        @pinned_executable = nil
+        @active_phase = "probe"
+        @active_attempt = nil
+        @last_active_phase = nil
+        @last_active_attempt = nil
+        @direct_session_ids = {}
+        @runtime_provenance_records["preflight"] = nil
       end
 
       def candidate_attempt_result(selected, fatal, error_code, results, usage)
@@ -694,17 +714,26 @@ module AdversarialReview
         usage.is_a?(Hash) && !usage.empty? && valid_usage(usage) == usage
       end
 
-      def parse_json_line_objects(text, label)
+      def parse_json_line_objects(text, label, max_objects: nil)
         unless text.is_a?(String) && !text.empty?
           raise JSON::ParserError, "empty #{label} event stream"
         end
-        text.lines.reject { |line| line.strip.empty? }.map do |line|
-          event = JSON.parse(line)
+        unless max_objects.nil? || (max_objects.is_a?(Integer) && max_objects.positive?)
+          raise ArgumentError, "event object limit must be a positive integer"
+        end
+        events = []
+        text.each_line do |line|
+          next if line.strip.empty?
+          if max_objects && events.length >= max_objects
+            raise JSON::ParserError, "#{label} event limit exceeded"
+          end
+          event = JSON.parse(line, object_class: DuplicateRejectingHash)
           unless event.is_a?(Hash)
             raise JSON::ParserError, "#{label} event is not an object"
           end
-          event
+          events << event
         end
+        events
       end
 
       def direct_capabilities(source:, fresh_context:, repository_access:, read_only:,

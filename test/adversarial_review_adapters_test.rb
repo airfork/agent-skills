@@ -791,6 +791,32 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def test_cursor_rejects_duplicate_attestation_keys_even_when_values_match
+    startup, terminal = accepted_direct_stream("cursor").lines
+    duplicate = startup.sub(/}\s*\z/, ',"effort":"$OBSERVED_EFFORT"}') + "\n" + terminal
+
+    result, records = run_direct_adapter_case("cursor", stream: duplicate)
+
+    assert_equal "generic", result.status
+    assert_equal "runtime_attestation_missing", result.error_code
+    assert_equal %w[help version run], records.map { |record| record.fetch("kind") }
+  end
+
+  def test_cursor_event_limit_is_checked_before_parsing_a_later_line
+    adapter = AdversarialReview::Adapters::Cursor.allocate
+    valid_lines = Array.new(AdversarialReview::Adapters::Cursor::MAX_EVENTS, "{}\n").join
+    poison = "{this line must not be parsed}\n"
+
+    error = assert_raises(JSON::ParserError) do
+      adapter.send(
+        :parse_json_line_objects, valid_lines + poison, "Cursor",
+        max_objects: AdversarialReview::Adapters::Cursor::MAX_EVENTS
+      )
+    end
+
+    assert_equal "Cursor event limit exceeded", error.message
+  end
+
   def test_gemini_protocol_rejects_duplicate_keys_shape_mixed_sessions_and_output_overflow
     accepted = accepted_direct_stream("gemini")
     malformed = {
@@ -1151,6 +1177,71 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert attempts.all? do |attempt|
           attempt.fetch("error_code") == "unsupported_version_contract"
         end
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_candidate_failure_does_not_leak_primary_capabilities_and_next_execute_is_fresh
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-candidate-reset") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", executable_name: "cursor-agent", log: log,
+          payload: direct_role_payload, stream: accepted_direct_stream("cursor"),
+          observed_model: "cursor-model-x", observed_effort: "high",
+          help_text: "-p --model", session_ids: %w[candidate-session candidate-execution]
+        )
+        primary_path = write_direct_adapter_fake(
+          bin, provider: "cursor", executable_name: "agent", log: log,
+          payload: direct_role_payload, stream: accepted_direct_stream("cursor"),
+          observed_model: "cursor-model-x", observed_effort: "high",
+          payloads: [direct_role_payload],
+          session_ids: %w[candidate-session candidate-execution]
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        failure = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "generic", failure.status
+        assert_equal "capability_probe_failed", failure.error_code
+        assert_normalized_capabilities(failure.capabilities, "terminal candidate failure")
+        assert failure.capabilities.values.all? do |declaration|
+          declaration.fetch("status") == "unavailable"
+        end
+        assert_nil adapter.capability_probe
+        assert_nil failure.runtime_provenance.fetch("preflight")
+        attempts = failure.runtime_provenance.fetch("candidate_attempts")
+        assert_equal 2, attempts.length
+        assert_equal ["structured_output_unattested", "capability_probe_failed"],
+                     attempts.map { |attempt| attempt.fetch("error_code") }
+        assert_equal File.realpath(primary_path), attempts.fetch(0).fetch("executable")
+        assert_equal File.realpath(alias_path), attempts.fetch(1).fetch("executable")
+        assert_equal "observed", attempts.fetch(0).dig("preflight", "status")
+
+        write_direct_adapter_fake(
+          bin, provider: "cursor", executable_name: "cursor-agent", log: log,
+          payload: direct_role_payload, stream: accepted_direct_stream("cursor"),
+          observed_model: "cursor-model-x", observed_effort: "high",
+          session_ids: %w[candidate-session candidate-execution]
+        )
+        success = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", success.status
+        assert_equal 120, success.usage.fetch("total_tokens")
+        assert_equal File.realpath(File.join(bin, "cursor-agent")),
+                     adapter.capability_probe.fetch("executable")
+        success_statuses = success.runtime_provenance.fetch("candidate_attempts").map do |attempt|
+          attempt.fetch("status")
+        end
+        assert_equal ["rejected", "selected"], success_statuses
       ensure
         ENV["PATH"] = original_path
       end
@@ -1969,7 +2060,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                                 observed_model:, observed_effort:, streams: nil,
                                 observed_models: nil, observed_efforts: nil,
                                 session_ids: nil, payloads: nil, cli_version: nil,
-                                version_text: nil, run_delay: 0, run_exit_statuses: nil)
+                                version_text: nil, run_delay: 0, run_exit_statuses: nil,
+                                executable_name: nil)
     default_help = case provider
     when "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
@@ -1989,8 +2081,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       "gemini" => "gemini-cli contract-vNext"
     }
     version = cli_version || default_versions.fetch(provider)
-    name = {"codex" => "codex", "claude" => "claude",
-            "cursor" => "agent", "gemini" => "gemini"}.fetch(provider)
+    name = executable_name || {"codex" => "codex", "claude" => "claude",
+                               "cursor" => "agent", "gemini" => "gemini"}.fetch(provider)
     body = <<~RUBY
       \#!#{RbConfig.ruby}
       require "json"
