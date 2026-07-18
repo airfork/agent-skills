@@ -166,9 +166,11 @@ module AdversarialReview
           "selected_executor" => manifest["selected_executor"] ||
             (manifest.fetch("requested_executor", "generic") == "auto" ? "generic" :
               manifest.fetch("requested_executor", "generic")),
+          "executor_pinned" => manifest.fetch("requested_executor", "generic") != "auto",
           "jobs" => manifest.fetch("jobs", 1),
           "metadata_required" => manifest.fetch("execution_metadata_required", false),
           "report_path" => manifest["report_path"],
+          "dispatch_attempts" => [],
           "tasks" => {}
         },
         "summary" => nil,
@@ -385,6 +387,12 @@ module AdversarialReview
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         verify_ingested_files!(run_directory, data)
+        unless data.dig("execution", "executor_pinned")
+          raise Error.new(
+            "executor_not_pinned", "task bundles cannot be emitted before executor selection is pinned",
+            {"task_id" => task_id}, 3
+          )
+        end
         Atomic.with_relative_directory(
           run_directory, "tasks", code: "unsafe_task_path", expected_identity: @tasks_identity
         ) { |_tasks_directory| nil }
@@ -463,7 +471,8 @@ module AdversarialReview
           result = yield(
             deep_freeze(deep_copy(manifest)),
             deep_freeze(deep_copy(data)),
-            deep_freeze(emitted)
+            deep_freeze(emitted),
+            _emitted_bytes.dup.freeze
           )
         end
       end
@@ -851,15 +860,44 @@ module AdversarialReview
         raise Error.new("invalid_executor", "selected executor is invalid", {"executor" => executor}, 3)
       end
       mutate! do |data|
-        selected = data.fetch("execution").fetch("selected_executor")
-        next if selected == executor
-        unless executor == "generic" && data.fetch("ingested_results").empty?
+        execution = data.fetch("execution")
+        selected = execution.fetch("selected_executor")
+        if execution.fetch("executor_pinned")
+          next if selected == executor
           raise Error.new(
             "executor_already_pinned", "selected executor cannot change after it is pinned",
             {"selected_executor" => selected, "requested" => executor}, 3
           )
         end
-        data.fetch("execution")["selected_executor"] = executor
+        unless executor == selected || executor == "generic"
+          raise Error.new(
+            "invalid_executor_pin", "unbound executor may pin only its selected candidate or generic fallback",
+            {"selected_executor" => selected, "requested" => executor}, 3
+          )
+        end
+        execution["selected_executor"] = executor
+        execution["executor_pinned"] = true
+      end
+      self
+    end
+
+    def record_dispatch_attempt!(task_id:, executor:, status:, error_code:, phase:,
+                                 content_sent:, prompt_bytes:)
+      validate_task_id!(task_id)
+      unless Manifest::EXECUTORS.include?(executor) && executor != "auto" &&
+             %w[complete failed fallback].include?(status) &&
+             (error_code.nil? || (error_code.is_a?(String) && !error_code.empty?)) &&
+             %w[probe preflight execution].include?(phase) &&
+             [true, false].include?(content_sent) &&
+             prompt_bytes.is_a?(Integer) && prompt_bytes.positive?
+        raise Error.new("invalid_dispatch_attempt", "dispatch attempt evidence is malformed", {}, 3)
+      end
+      mutate! do |data|
+        data.fetch("execution").fetch("dispatch_attempts") << {
+          "task_id" => task_id, "executor" => executor, "status" => status,
+          "error_code" => error_code, "phase" => phase,
+          "content_sent" => content_sent, "prompt_bytes" => prompt_bytes
+        }
       end
       self
     end
@@ -914,24 +952,26 @@ module AdversarialReview
           raise Error.new("missing_author_actions", "target refresh requires complete parent actions", {"finding_ids" => missing}, 3)
         end
         target_paths = manifest.fetch("targets").map { |target| target.fetch("path") }
-        declared = data.fetch("author_actions").values.flat_map do |action|
-          action.is_a?(Hash) && action.fetch("status") == "fixed" ? action.fetch("changed_paths", []) : []
-        end.uniq.sort
+        fixed_actions = data.fetch("author_actions").values.select do |action|
+          action.is_a?(Hash) && action.fetch("status") == "fixed"
+        end
+        declared = fixed_actions.flat_map { |action| action.fetch("changed_paths", []) }.uniq.sort
         live = live_target_digests!(manifest)
         changed = target_paths.select do |path|
           live.fetch(path) != data.fetch("current_target_digests").fetch(path)
         end.sort
-        declared_targets = (declared & target_paths).sort
-        unless changed == declared_targets && !changed.empty?
+        unless changed == declared && (fixed_actions.empty? || !changed.empty?)
           raise Error.new(
             "author_change_mismatch", "live target changes do not match declared parent action paths",
-            {"changed_targets" => changed, "declared_target_paths" => declared_targets}, 3
+            {"changed_targets" => changed, "declared_target_paths" => declared}, 3
           )
         end
-        data["current_target_digests"] = deep_copy(live)
-        data.fetch("target_digest_history") << deep_copy(live)
-        data["fresh_sweep_required"] = true
-        data["fresh_sweep_completed"] = false
+        unless changed.empty?
+          data["current_target_digests"] = deep_copy(live)
+          data.fetch("target_digest_history") << deep_copy(live)
+          data["fresh_sweep_required"] = true
+          data["fresh_sweep_completed"] = false
+        end
         data.fetch("events") << {"type" => "target-refresh", "changed_targets" => changed}
         result = {"changed_targets" => changed, "current_target_digests" => deep_copy(live)}
       end
@@ -1070,14 +1110,37 @@ module AdversarialReview
         raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
       end
       execution = data.fetch("execution")
-      unless execution.is_a?(Hash) && execution.keys.sort == %w[jobs metadata_required report_path selected_executor tasks] &&
+      unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts executor_pinned jobs metadata_required report_path selected_executor tasks] &&
              Manifest::EXECUTORS.include?(execution["selected_executor"]) && execution["selected_executor"] != "auto" &&
+             [true, false].include?(execution["executor_pinned"]) &&
              execution["jobs"].is_a?(Integer) && execution["jobs"].positive? &&
              [true, false].include?(execution["metadata_required"]) &&
              (execution["report_path"].nil? || execution["report_path"].is_a?(String)) &&
              execution["tasks"].is_a?(Hash) &&
              (data["summary"].nil? || data["summary"].is_a?(Hash))
         raise Error.new("invalid_state", "persisted execution metadata is invalid", {}, 3)
+      end
+      valid_dispatch_attempts = execution.fetch("dispatch_attempts").is_a?(Array) &&
+        execution.fetch("dispatch_attempts").all? do |attempt|
+          attempt.is_a?(Hash) &&
+            attempt.keys.sort == %w[content_sent error_code executor phase prompt_bytes status task_id] &&
+            attempt["task_id"].is_a?(String) && RUN_ID.match?(attempt["task_id"]) &&
+            Manifest::EXECUTORS.include?(attempt["executor"]) && attempt["executor"] != "auto" &&
+            %w[complete failed fallback].include?(attempt["status"]) &&
+            (attempt["error_code"].nil? ||
+             (attempt["error_code"].is_a?(String) && !attempt["error_code"].empty?)) &&
+            %w[probe preflight execution].include?(attempt["phase"]) &&
+            [true, false].include?(attempt["content_sent"]) &&
+            attempt["prompt_bytes"].is_a?(Integer) && attempt["prompt_bytes"].positive?
+        end
+      unless valid_dispatch_attempts
+        raise Error.new("invalid_state", "persisted dispatch attempt evidence is invalid", {}, 3)
+      end
+      if execution.fetch("executor_pinned") == false &&
+         (manifest.fetch("requested_executor", "generic") != "auto" ||
+          !data.fetch("emitted_tasks").empty? || !data.fetch("ingested_results").empty? ||
+          !execution.fetch("tasks").empty? || !execution.fetch("dispatch_attempts").empty?)
+        raise Error.new("invalid_state", "unpinned executor state already contains task evidence", {}, 3)
       end
       valid_execution_tasks = execution.fetch("tasks").all? do |task_id, record|
         next false unless data.fetch("emitted_tasks").key?(task_id) && record.is_a?(Hash) &&
@@ -2397,25 +2460,19 @@ module AdversarialReview
         votes = data.fetch("judge_votes").fetch(subject_id).select do |vote|
           vote.fetch("vote_group_id") == vote_group_id
         end
-        promote_votes = votes.select { |vote| vote.fetch("effective_disposition") == "PROMOTE" }
-        refute_votes = votes.select { |vote| vote.fetch("effective_disposition") == "REFUTE" }
-        conflicting_ballot = votes.group_by { |vote| vote.fetch("voter_id") }.any? do |_voter, ballot|
-          ballot.map { |vote| vote.fetch("effective_disposition") }.uniq.length > 1
-        end
-        has_unproven = votes.any? do |vote|
-          vote.fetch("effective_disposition") == "UNPROVEN"
-        end
-        if has_unproven || conflicting_ballot
-          pending << subject_id
-        elsif promote_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
+        voter_count = votes.map { |vote| vote.fetch("voter_id") }.uniq.length
+        next if voter_count < expected_voters
+
+        dispositions = votes.map { |vote| vote.fetch("effective_disposition") }.uniq
+        if dispositions == ["PROMOTE"]
           promotion_groups << promotion_group_from_verdicts(
-            data, subject_id, promote_votes, applicable_by_id
+            data, subject_id, votes, applicable_by_id
           )
-        elsif refute_votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= 2
+        elsif dispositions == ["REFUTE"]
           ids = votes.map { |vote| vote.fetch("candidate_id") }.uniq.sort
           ids.each { |id| applicable_by_id.fetch(id)["state"] = "refuted" }
           refuted_ids.concat(ids)
-        elsif votes.map { |vote| vote.fetch("voter_id") }.uniq.length >= expected_voters
+        else
           pending << subject_id
           add_evidence_gap!(
             data, task, subject_id,
@@ -2457,8 +2514,8 @@ module AdversarialReview
       else
         count = task.fetch("expected_voters", 3)
       end
-      unless count.is_a?(Integer) && count >= 2
-        invalid_result!("invalid_vote_identity", "ultra expected voter count must be at least two")
+      unless count == 3
+        invalid_result!("invalid_vote_identity", "ultra expected voter count must be exactly three")
       end
       count
     end

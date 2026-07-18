@@ -200,7 +200,20 @@ module AdversarialReview
         ingest_summary = state.ingest(action_tasks.first, read_json_file(options.fetch(:actions)))
         return response(state).merge("task_id" => action_tasks.first, "ingest" => ingest_summary)
       end
-      return response(state) unless pending_task_ids(snapshot).empty?
+      unless pending_task_ids(snapshot).empty?
+        reviewer_pending = pending_task_ids(snapshot).reject do |task_id|
+          snapshot.dig("emitted_tasks", task_id, "authority") == "parent"
+        end
+        if DIRECT_EXECUTORS.include?(selected) && !reviewer_pending.empty?
+          reviewer_pending.each do |task_id|
+            task = nil
+            state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+            dispatch_task(state, task, selected, env, fallback_generic: false)
+          end
+          resume_stage_dispatch(state, selected, env)
+        end
+        return response(state)
+      end
 
       case snapshot.fetch("stage")
       when "attacking"
@@ -242,11 +255,15 @@ module AdversarialReview
           selected = dispatch_role_task(state, "arbiter", selected, env,
                                         fallback_generic: fallback_generic)
         elsif latest.fetch("fresh_sweep_required") && !latest.fetch("fresh_sweep_completed")
-          state.transition_to("fresh-sweep")
-          selected = dispatch_attack_tasks(
-            state, selected, env,
-            fallback_generic: manifest.fetch("requested_executor") == "auto"
-          )
+          if latest.fetch("revise_round") >= 2
+            state.transition_to("did-not-converge")
+          else
+            state.transition_to("fresh-sweep")
+            selected = dispatch_attack_tasks(
+              state, selected, env,
+              fallback_generic: manifest.fetch("requested_executor") == "auto"
+            )
+          end
         else
           state.transition_to("complete")
         end
@@ -281,7 +298,11 @@ module AdversarialReview
       %i[run_dir task result capabilities].each { |name| require_option!(options, name) }
       state = State.load(options.fetch(:run_dir))
       task = nil
-      state.read_task_bundle(options.fetch(:task)) { |_manifest, _data, value| task = value }
+      task_bytes = nil
+      state.read_task_bundle(options.fetch(:task)) do |_manifest, _data, value, bytes|
+        task = value
+        task_bytes = bytes
+      end
       if task["authority"] == "parent"
         raise Error.new("invalid_authority", "parent author actions must use continue --actions", 3)
       end
@@ -291,7 +312,7 @@ module AdversarialReview
       declaration = attestation.fetch("capabilities")
       state.record_task_execution(
         task.fetch("task_id"), authority: "reviewer", capabilities: declaration,
-        usage: {"prompt_bytes" => JSON.generate(task).bytesize},
+        usage: {"prompt_bytes" => task_bytes.bytesize},
         attempts: task.fetch("attempt"),
         runtime_provenance: {
           "adapter" => "generic", "capability_gate" => attestation.reject { |key, _| key == "capabilities" }
@@ -343,7 +364,7 @@ module AdversarialReview
              else
                first = manifest.fetch("targets").first.fetch("path")
                stem = File.basename(first, File.extname(first))
-               File.join(root, "#{stem}-review.md")
+               File.join(root, File.dirname(first), "#{stem}-review.md")
              end
       unless File.absolute_path(path) == path
         raise Error.new("invalid_report", "report path must be absolute after resolution", 2)
@@ -398,30 +419,85 @@ module AdversarialReview
     end
 
     def dispatch_task(state, task, selected, env, fallback_generic: false)
+      snapshot = state.to_h
+      already_emitted = snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
+      return selected if snapshot.fetch("ingested_results").key?(task.fetch("task_id"))
+
       if selected == "generic"
+        state.pin_executor!("generic") unless snapshot.dig("execution", "executor_pinned")
         Adapters::Generic.new.run(task, state_run_dir(state))
         return selected
       end
 
-      state.create_task_bundle(task.fetch("task_id")) { task }
+      pinned = snapshot.dig("execution", "executor_pinned")
+      state.create_task_bundle(task.fetch("task_id")) { task } if pinned && !already_emitted
       result = execute_direct(state, task, selected, env)
+      prompt_bytes = JSON.generate(task).bytesize
+      phase = dispatch_phase(result)
       unless result.status == "complete" && result.payload
-        if fallback_generic && Adapters::Base.eligibility_error?(result.error_code)
+        eligible = Adapters::Base.eligibility_error?(result.error_code)
+        if fallback_generic && eligible && phase != "execution" && !pinned
+          state.pin_executor!("generic")
           Adapters::Generic.new.run(task, state_run_dir(state))
+          state.record_dispatch_attempt!(
+            task_id: task.fetch("task_id"), executor: selected, status: "fallback",
+            error_code: result.error_code, phase: phase, content_sent: false,
+            prompt_bytes: prompt_bytes
+          )
           return "generic"
         end
-        status = Adapters::Base.eligibility_error?(result.error_code) ? 4 : 5
+        state.pin_executor!(selected) unless pinned
+        unless already_emitted
+          state.create_task_bundle(task.fetch("task_id")) { task }
+        end
+        state.record_dispatch_attempt!(
+          task_id: task.fetch("task_id"), executor: selected, status: "failed",
+          error_code: result.error_code, phase: phase, content_sent: phase == "execution",
+          prompt_bytes: prompt_bytes
+        )
+        status = eligible ? 4 : 5
         code = status == 4 ? "capability_blocked" : "adapter_execution_failed"
         raise Error.new(code, "#{selected} adapter could not produce an eligible result", status,
                         {"executor" => selected, "reason" => result.error_code})
       end
+      state.pin_executor!(selected) unless pinned
+      state.create_task_bundle(task.fetch("task_id")) { task } unless already_emitted
+      state.record_dispatch_attempt!(
+        task_id: task.fetch("task_id"), executor: selected, status: "complete",
+        error_code: nil, phase: "execution", content_sent: true, prompt_bytes: prompt_bytes
+      )
+      # Count the reviewed task JSON once; adapter preflight and repair attempts do not
+      # resubmit a different authoritative bundle and therefore do not multiply this value.
+      usage = (result.usage || {}).merge("prompt_bytes" => prompt_bytes)
       state.record_task_execution(
         task.fetch("task_id"), authority: "reviewer", capabilities: result.capabilities,
-        usage: result.usage || {}, attempts: result.attempts || 1,
+        usage: usage, attempts: result.attempts || 1,
         runtime_provenance: result.runtime_provenance || {}
       )
       state.ingest(task.fetch("task_id"), result.payload)
       selected
+    end
+
+    def dispatch_phase(result)
+      phase = result.runtime_provenance.to_h.dig("failure", "phase")
+      %w[probe preflight execution].include?(phase) ? phase :
+        (result.status == "complete" ? "execution" : "probe")
+    end
+
+    def resume_stage_dispatch(state, selected, env)
+      fallback = false
+      case state.to_h.fetch("stage")
+      when "attacking", "fresh-sweep"
+        dispatch_attack_tasks(state, selected, env, fallback_generic: fallback)
+      when "deduplicating"
+        dispatch_role_task(state, "dedupe", selected, env, fallback_generic: fallback)
+      when "culling", "culling-new-findings"
+        dispatch_judge_tasks(state, selected, env, fallback_generic: fallback)
+      when "resolving"
+        dispatch_role_task(state, "resolution", selected, env, fallback_generic: fallback)
+      when "arbitrating"
+        dispatch_role_task(state, "arbiter", selected, env, fallback_generic: fallback)
+      end
     end
 
     def execute_direct(state, task, selected, env)
@@ -444,8 +520,8 @@ module AdversarialReview
       adapter.execute(
         required_checks: [],
         dispatch_capability: {
-          "status" => "behavioral",
-          "evidence" => "caller schedules each role in a separate isolated process with concurrency limit 1",
+          "status" => "unavailable",
+          "evidence" => "portable CLI dispatch is serial and does not provide parallel role execution",
           "source" => "portable CLI dispatch loop"
         }
       )
@@ -571,10 +647,13 @@ module AdversarialReview
       usage = aggregate_usage(reviewer_records)
       runtime = aggregate_runtime(reviewer_records)
       started_at = run_started_at(manifest.fetch("run_id"))
+      current_targets, current_inventory = Prompts.current_targets_and_inventory(
+        manifest, snapshot.fetch("current_target_digests")
+      )
       {
         "schema_version" => 1,
         "run_id" => manifest.fetch("run_id"),
-        "targets" => manifest.fetch("targets"),
+        "targets" => current_targets,
         "repository" => manifest.fetch("repository"),
         "started_at" => started_at,
         "ended_at" => Time.now.utc.iso8601,
@@ -600,8 +679,22 @@ module AdversarialReview
         "evidence_gaps" => snapshot.fetch("evidence_gaps"),
         "overflow" => snapshot.fetch("overflow"),
         "overflow_evidence_gaps" => snapshot.fetch("overflow_evidence_gaps"),
-        "metrics" => manifest.fetch("starting_metrics")
+        "metrics" => comparison_metrics(manifest.fetch("starting_metrics"), current_inventory)
       }
+    end
+
+    def comparison_metrics(starting, inventory)
+      current = {
+        "target_count" => inventory.length,
+        "word_count" => inventory.sum { |item| item.fetch("word_count") },
+        "line_count" => inventory.sum { |item| item.fetch("line_count") },
+        "unresolved_placeholder_count" => inventory.sum { |item| item.fetch("placeholder_count") }
+      }
+      starting.keys.sort.each_with_object({}) do |name, metrics|
+        metrics["starting_#{name}"] = starting.fetch(name)
+        metrics["current_#{name}"] = current.fetch(name)
+        metrics["delta_#{name}"] = current.fetch(name) - starting.fetch(name)
+      end
     end
 
     def aggregate_capabilities(records, manifest)

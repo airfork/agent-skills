@@ -16,6 +16,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       capability_probe_failed version_probe_failed unsupported_tier
       unsupported_version_contract unsupported_effort_contract capabilities_degraded
       runtime_selection_mismatch structured_output_unattested
+      runtime_attestation_missing session_reused
     ].each do |code|
       assert AdversarialReview::Adapters::Base.eligibility_error?(code), code
     end

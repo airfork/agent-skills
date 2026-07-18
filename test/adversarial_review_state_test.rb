@@ -36,6 +36,8 @@ class AdversarialReviewStateTest < Minitest::Test
 
       execution = AdversarialReview::State.load(run_dir).to_h.fetch("execution")
       assert_equal "generic", execution.fetch("selected_executor")
+      assert_equal true, execution.fetch("executor_pinned")
+      assert_empty execution.fetch("dispatch_attempts")
       assert_equal 3, execution.fetch("jobs")
       assert_equal built.fetch("report_path"), execution.fetch("report_path")
       record = execution.fetch("tasks").fetch(task.fetch("task_id"))
@@ -45,6 +47,38 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_raises(AdversarialReview::State::Error) do
         state.pin_executor!("claude")
       end
+    end
+  end
+
+  def test_auto_executor_pins_once_and_persists_dispatch_attempt_evidence
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = AdversarialReview::Manifest.build(
+        repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+        output: "chat", executor: "auto", model: "reviewer-model", effort: "high"
+      )
+      built["selected_executor"] = "codex"
+      state = AdversarialReview::State.create(File.join(repository, ".git", "auto-pin"), built)
+      assert_equal false, state.to_h.dig("execution", "executor_pinned")
+      task = AdversarialReview::Prompts.attack_task(built, "tester", 1)
+      error = assert_raises(AdversarialReview::State::Error) do
+        state.create_task_bundle(task.fetch("task_id")) { task }
+      end
+      assert_equal "executor_not_pinned", error.code
+      assert_empty state.to_h.fetch("emitted_tasks")
+
+      state.pin_executor!("generic")
+      state.record_dispatch_attempt!(
+        task_id: "attack-tester-r1-a1", executor: "codex", status: "fallback",
+        error_code: "runtime_attestation_missing", phase: "preflight",
+        content_sent: false, prompt_bytes: 100
+      )
+
+      execution = state.to_h.fetch("execution")
+      assert_equal "generic", execution.fetch("selected_executor")
+      assert_equal true, execution.fetch("executor_pinned")
+      assert_equal 1, execution.fetch("dispatch_attempts").length
+      assert_equal false, execution.fetch("dispatch_attempts").first.fetch("content_sent")
+      assert_raises(AdversarialReview::State::Error) { state.pin_executor!("codex") }
     end
   end
 
@@ -75,6 +109,34 @@ class AdversarialReviewStateTest < Minitest::Test
                    snapshot.fetch("current_target_digests")
       assert_equal true, snapshot.fetch("fresh_sweep_required")
       assert_raises(AdversarialReview::State::Error) { state.refresh_targets_after_actions! }
+    end
+  end
+
+  def test_refresh_after_rejection_only_actions_accepts_unchanged_targets_without_fresh_sweep
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      built = build_ingest_manifest(repository)
+      run_dir = File.join(repository, ".git", "rejection-only-refresh")
+      state = AdversarialReview::State.create(run_dir, built)
+      state.transition_to("attacking")
+      candidate = state.ingest_candidate("tester", 1, result_finding("Incorrect ownership concern"))
+      advance(state, %w[deduplicating culling])
+      state.promote([promotion_group("G-001", candidate.fetch("id"), "HIGH", 0.9,
+                                     "docs/spec.md", 1)])
+      state.transition_to("awaiting-author")
+      state.record_author_action(
+        state.findings.first.fetch("id"),
+        {"status" => "rejected", "rationale" => "The concern is factually incorrect.",
+         "changed_paths" => []}
+      )
+
+      refreshed = state.refresh_targets_after_actions!
+
+      assert_empty refreshed.fetch("changed_targets")
+      snapshot = state.to_h
+      assert_equal 1, snapshot.fetch("target_digest_history").length
+      assert_equal false, snapshot.fetch("fresh_sweep_required")
+      assert_equal snapshot.fetch("target_digest_history").first,
+                   snapshot.fetch("current_target_digests")
     end
   end
 
@@ -209,101 +271,54 @@ class AdversarialReviewStateTest < Minitest::Test
     end
   end
 
-  def test_ultra_judge_waits_for_two_independent_promote_votes
-    with_ingest_state(
-      stage: "culling",
-      schema: "judge",
-      tier: "ultra",
-      candidate_findings: [result_finding("Missing rollback owner")],
-      task_overrides: {
-        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1", "expected_voters" => 2
-      }
-    ) do |state, _run_dir, first_task|
-      first_payload = base_result_payload(first_task).merge(
-        "verdicts" => [judge_verdict("C-tester-1-1", "PROMOTE", 0.9)],
-        "metrics" => {}
-      )
-
-      first_summary = state.ingest(first_task.fetch("task_id"), first_payload)
-
-      assert_empty first_summary.fetch("promoted_ids")
+  def test_ultra_judge_records_two_promote_ballots_without_finalizing
+    with_ultra_vote_sequence(%w[PROMOTE PROMOTE], expected_voters: 3) do |state, summary|
+      assert_empty summary.fetch("promoted_ids")
       assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-
-      second_task = emit_result_task(
-        state,
-        "judge",
-        "task_id" => "judge-batch-r1-a2",
-        "vote_group_id" => "VG-cull-1",
-        "voter_id" => "voter-2",
-        "expected_voters" => 2
-      )
-      second_payload = base_result_payload(second_task).merge(
-        "verdicts" => [judge_verdict("C-tester-1-1", "PROMOTE", 0.95)],
-        "metrics" => {}
-      )
-
-      second_summary = state.ingest(second_task.fetch("task_id"), second_payload)
-
-      assert_equal 1, second_summary.fetch("promoted_ids").length
-      assert_equal "promoted", state.candidate("C-tester-1-1").fetch("state")
       assert_equal 2, state.to_h.dig("judge_votes", "C-tester-1-1").length
+      assert_empty state.to_h.fetch("pending_arbiter_subjects")
     end
   end
 
-  def test_ultra_judge_refutes_only_after_two_independent_refute_votes
-    with_ultra_vote_pair("REFUTE", "REFUTE") do |state, summary|
+  def test_ultra_judge_promotes_only_after_three_unanimous_independent_votes
+    with_ultra_vote_sequence(%w[PROMOTE PROMOTE PROMOTE]) do |state, summary|
+      assert_equal 1, summary.fetch("promoted_ids").length
+      assert_equal "promoted", state.candidate("C-tester-1-1").fetch("state")
+      assert_equal 3, state.to_h.dig("judge_votes", "C-tester-1-1").length
+      assert_empty state.to_h.fetch("pending_arbiter_subjects")
+    end
+  end
+
+  def test_ultra_judge_refutes_only_after_three_unanimous_independent_votes
+    with_ultra_vote_sequence(%w[REFUTE REFUTE REFUTE]) do |state, summary|
       assert_equal ["C-tester-1-1"], summary.fetch("refuted_candidate_ids")
       assert_equal "refuted", state.candidate("C-tester-1-1").fetch("state")
       assert_empty state.to_h.fetch("pending_arbiter_subjects")
     end
   end
 
-  def test_ultra_judge_promote_unproven_split_requires_arbitration
-    with_ultra_vote_pair("PROMOTE", "UNPROVEN") do |state, summary|
+  def test_ultra_judge_split_ballot_requires_arbitration_after_all_three_votes
+    with_ultra_vote_sequence(%w[PROMOTE PROMOTE REFUTE]) do |state, summary|
       assert_empty summary.fetch("promoted_ids")
       assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
       assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
     end
   end
 
-  def test_ultra_judge_refute_unproven_split_requires_arbitration
-    with_ultra_vote_pair("REFUTE", "UNPROVEN") do |state, summary|
-      assert_empty summary.fetch("refuted_candidate_ids")
-      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
-      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-    end
-  end
-
-  def test_ultra_judge_promote_refute_split_without_agreement_requires_arbitration
-    with_ultra_vote_pair("PROMOTE", "REFUTE") do |state, _summary|
-      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
-      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-    end
-  end
-
-  def test_ultra_judge_rejects_a_duplicate_voter_without_mutation
-    with_ultra_vote_pair("PROMOTE", "PROMOTE", second_voter: "voter-1", expect_error: true) do |state, error, before|
-      assert_equal "duplicate_voter", error.code
-      assert_equal before, state.to_h
-      assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-    end
-  end
-
-  def test_ultra_three_vote_promote_unproven_promote_requires_arbitration
+  def test_ultra_judge_unproven_ballot_requires_arbitration_after_all_three_votes
     with_ultra_vote_sequence(%w[PROMOTE UNPROVEN PROMOTE]) do |state, summary|
       assert_empty summary.fetch("promoted_ids")
       assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
       assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-      assert_equal 3, state.to_h.dig("judge_votes", "C-tester-1-1").length
+      assert_equal 1, state.to_h.fetch("evidence_gaps").length
     end
   end
 
-  def test_ultra_three_vote_refute_unproven_refute_requires_arbitration
-    with_ultra_vote_sequence(%w[REFUTE UNPROVEN REFUTE]) do |state, summary|
-      assert_empty summary.fetch("refuted_candidate_ids")
-      assert_equal ["C-tester-1-1"], state.to_h.fetch("pending_arbiter_subjects")
+  def test_ultra_judge_rejects_a_duplicate_voter_without_mutation
+    with_ultra_duplicate_voter do |state, error, before|
+      assert_equal "duplicate_voter", error.code
+      assert_equal before, state.to_h
       assert_equal "candidate", state.candidate("C-tester-1-1").fetch("state")
-      assert_equal 3, state.to_h.dig("judge_votes", "C-tester-1-1").length
     end
   end
 
@@ -2707,19 +2722,19 @@ class AdversarialReviewStateTest < Minitest::Test
     )
   end
 
-  def with_ultra_vote_pair(first_disposition, second_disposition, second_voter: "voter-2",
-                           expect_error: false)
+  def with_ultra_duplicate_voter
     with_ingest_state(
       stage: "culling",
       schema: "judge",
       tier: "ultra",
       candidate_findings: [result_finding("Missing rollback owner")],
       task_overrides: {
-        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1", "expected_voters" => 2
+        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1",
+        "voter_ids" => %w[voter-1 voter-2 voter-3], "expected_voters" => 3
       }
     ) do |state, _run_dir, first_task|
       first_payload = base_result_payload(first_task).merge(
-        "verdicts" => [ultra_verdict("C-tester-1-1", first_disposition)],
+        "verdicts" => [ultra_verdict("C-tester-1-1", "PROMOTE")],
         "metrics" => {}
       )
       state.ingest(first_task.fetch("task_id"), first_payload)
@@ -2728,23 +2743,19 @@ class AdversarialReviewStateTest < Minitest::Test
         "judge",
         "task_id" => "judge-batch-r1-a2",
         "vote_group_id" => "VG-cull-1",
-        "voter_id" => second_voter,
-        "expected_voters" => 2
+        "voter_id" => "voter-1",
+        "voter_ids" => %w[voter-1 voter-2 voter-3],
+        "expected_voters" => 3
       )
       second_payload = base_result_payload(second_task).merge(
-        "verdicts" => [ultra_verdict("C-tester-1-1", second_disposition)],
+        "verdicts" => [ultra_verdict("C-tester-1-1", "PROMOTE")],
         "metrics" => {}
       )
-      if expect_error
-        before = state.to_h
-        error = assert_raises(AdversarialReview::State::InvalidResult) do
-          state.ingest(second_task.fetch("task_id"), second_payload)
-        end
-        yield state, error, before
-      else
-        summary = state.ingest(second_task.fetch("task_id"), second_payload)
-        yield state, summary
+      before = state.to_h
+      error = assert_raises(AdversarialReview::State::InvalidResult) do
+        state.ingest(second_task.fetch("task_id"), second_payload)
       end
+      yield state, error, before
     end
   end
 
@@ -2776,14 +2787,15 @@ class AdversarialReviewStateTest < Minitest::Test
     result
   end
 
-  def with_ultra_vote_sequence(dispositions)
+  def with_ultra_vote_sequence(dispositions, expected_voters: 3)
     with_ingest_state(
       stage: "culling",
       schema: "judge",
       tier: "ultra",
       candidate_findings: [result_finding("Missing rollback owner")],
       task_overrides: {
-        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1", "expected_voters" => dispositions.length
+        "vote_group_id" => "VG-cull-1", "voter_id" => "voter-1",
+        "voter_ids" => %w[voter-1 voter-2 voter-3], "expected_voters" => expected_voters
       }
     ) do |state, _run_dir, first_task|
       summary = nil
@@ -2797,7 +2809,8 @@ class AdversarialReviewStateTest < Minitest::Test
                    "task_id" => "judge-batch-r1-a#{index + 1}",
                    "vote_group_id" => "VG-cull-1",
                    "voter_id" => "voter-#{index + 1}",
-                   "expected_voters" => dispositions.length
+                   "voter_ids" => %w[voter-1 voter-2 voter-3],
+                   "expected_voters" => expected_voters
                  )
                end
         payload = base_result_payload(task).merge(

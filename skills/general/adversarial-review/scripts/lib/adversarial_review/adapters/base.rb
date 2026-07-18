@@ -47,6 +47,7 @@ module AdversarialReview
         capability_attestation_invalid independent_vote_unattested
         runner_error preflight_failed preflight_attestation_invalid
         runtime_model_mismatch runtime_effort_mismatch dispatch_capability_invalid
+        runtime_attestation_missing session_reused
       ].freeze
 
       class << self
