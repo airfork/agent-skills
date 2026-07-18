@@ -66,16 +66,28 @@ class AdversarialReviewStateTest < Minitest::Test
       assert_equal "executor_not_pinned", error.code
       assert_empty state.to_h.fetch("emitted_tasks")
 
-      state.pin_executor!("generic")
-      state.record_dispatch_attempt!(
+      state.begin_selection_intent!(
+        task_id: task.fetch("task_id"), requested_executor: "auto",
+        candidate_executor: "codex", vendor: "codex", model: "reviewer-model",
+        effort: "high", stage: "prepared"
+      )
+      intent = state.to_h.dig("execution", "selection_intent")
+      assert_equal "active", intent.fetch("status")
+      assert_equal 0, intent.fetch("external_attempts")
+      state.create_task_bundle(task.fetch("task_id")) { task }
+      state.mark_selection_call_started!(task.fetch("task_id"))
+      assert_equal 1, state.to_h.dig("execution", "selection_intent", "external_attempts")
+      state.finalize_selection_intent!(
         task_id: "attack-tester-r1-a1", executor: "codex", status: "fallback",
         error_code: "runtime_attestation_missing", phase: "preflight",
-        content_sent: false, prompt_bytes: 100
+        content_sent: false, prompt_bytes: 100, selected_executor: "generic"
       )
 
       execution = state.to_h.fetch("execution")
       assert_equal "generic", execution.fetch("selected_executor")
       assert_equal true, execution.fetch("executor_pinned")
+      assert_equal "terminal", execution.dig("selection_intent", "status")
+      assert_equal "generic", execution.dig("selection_intent", "outcome_executor")
       assert_equal 1, execution.fetch("dispatch_attempts").length
       assert_equal false, execution.fetch("dispatch_attempts").first.fetch("content_sent")
       assert_raises(AdversarialReview::State::Error) { state.pin_executor!("codex") }

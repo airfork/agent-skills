@@ -155,12 +155,16 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
-  def test_first_precontent_eligibility_failure_pins_auto_to_all_generic_before_task_emission
+  def test_first_precontent_eligibility_failure_atomically_pins_generic_before_handoff
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "atomic-generic-fallback")
       calls = 0
-      failed = lambda do |_state, _task, _selected, _env|
+      failed = lambda do |state, task, _selected, _env|
         calls += 1
+        snapshot = state.to_h
+        assert_equal "active", snapshot.dig("execution", "selection_intent", "status")
+        assert snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
+        assert File.file?(File.join(run_dir, "tasks", "#{task.fetch("task_id")}.auth.json"))
         direct_execution_failure("runtime_attestation_missing", "preflight")
       end
       payload = AdversarialReview::CLI.stub(:execute_direct, failed) do
@@ -176,6 +180,8 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal 1, calls
       snapshot = AdversarialReview::State.load(run_dir).to_h
       assert_equal true, snapshot.dig("execution", "executor_pinned")
+      assert_equal "terminal", snapshot.dig("execution", "selection_intent", "status")
+      assert_equal "generic", snapshot.dig("execution", "selection_intent", "outcome_executor")
       assert_equal 1, snapshot.dig("execution", "dispatch_attempts").length
       assert_equal "fallback", snapshot.dig("execution", "dispatch_attempts", 0, "status")
       assert_equal false, snapshot.dig("execution", "dispatch_attempts", 0, "content_sent")
@@ -189,8 +195,13 @@ class AdversarialReviewCliTest < Minitest::Test
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "atomic-direct-resume")
       calls = 0
-      sequence = lambda do |_state, task, _selected, _env|
+      sequence = lambda do |state, task, _selected, _env|
         calls += 1
+        if calls == 1
+          snapshot = state.to_h
+          assert_equal "active", snapshot.dig("execution", "selection_intent", "status")
+          assert snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
+        end
         calls == 1 ? direct_execution_success(task) :
           direct_execution_failure("runtime_attestation_missing", "preflight")
       end
@@ -237,6 +248,81 @@ class AdversarialReviewCliTest < Minitest::Test
         assert_equal task_file_bytes - 1,
                      resumed.dig("execution", "tasks", task_id, "usage", "prompt_bytes")
       end
+    end
+  end
+
+  def test_interrupted_first_direct_selection_resumes_same_task_vendor_and_exact_attack_roster
+    %i[after_intent after_task during_call orphan_completion].each do |boundary|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        state, run_dir, first_task = interrupted_selection_state(repository, boundary)
+        assert_equal 7, state.manifest_snapshot.fetch("enabled_tasks").length
+        calls = []
+        resume = lambda do |_state, task, selected, _env|
+          calls << [task.fetch("task_id"), selected]
+          direct_execution_success(task)
+        end
+
+        payload = AdversarialReview::CLI.stub(:execute_direct, resume) do
+          AdversarialReview::CLI.continue_run(
+            ["--run-dir", run_dir],
+            env: {"ADVERSARIAL_REVIEW_HOST" => "gemini"}, program_path: CLI
+          )
+        end
+
+        snapshot = AdversarialReview::State.load(run_dir).to_h
+        assert_equal "attacking", payload.fetch("stage"), boundary
+        assert_equal "codex", payload.fetch("selected_executor"), boundary
+        assert_equal "codex", snapshot.dig("execution", "selection_intent", "vendor"), boundary
+        assert_equal "terminal", snapshot.dig("execution", "selection_intent", "status"), boundary
+        assert_equal 7, snapshot.fetch("emitted_tasks").values.count { |task| task.fetch("kind") == "attack" }, boundary
+        assert_equal 7, snapshot.fetch("ingested_results").length, boundary
+        assert_equal snapshot.fetch("emitted_tasks").keys.sort,
+                     snapshot.fetch("ingested_results").keys.sort, boundary
+        assert_equal first_task.fetch("task_id"),
+                     snapshot.dig("execution", "selection_intent", "task_id"), boundary
+        expected_calls = boundary == :orphan_completion ? 6 : 7
+        assert_equal expected_calls, calls.length, boundary
+        assert calls.all? { |_task_id, selected| selected == "codex" }, boundary
+      end
+    end
+  end
+
+  def test_attacking_with_zero_tasks_dispatches_exact_roster_instead_of_advancing
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = AdversarialReview::Manifest.build(
+        repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+        output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+      )
+      run_dir = File.join(repository, ".git", "zero-task-attack-roster")
+      state = AdversarialReview::State.create(run_dir, manifest)
+      state.transition_to("attacking")
+
+      payload = AdversarialReview::CLI.continue_run(
+        ["--run-dir", run_dir], env: {}, program_path: CLI
+      )
+
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      assert_equal "attacking", payload.fetch("stage")
+      assert_equal 7, payload.fetch("pending_batch_size")
+      assert_equal 7, snapshot.fetch("emitted_tasks").length
+      assert_empty snapshot.fetch("ingested_results")
+    end
+  end
+
+  def test_direct_adapter_entry_rejects_missing_durable_task_authorization
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      state = direct_dispatch_state(repository, "unauthorized-direct", "codex")
+      manifest = state.manifest_snapshot
+      task = AdversarialReview::Prompts.attack_task(
+        manifest, manifest.fetch("enabled_tasks").first, 1,
+        current_digests: state.to_h.fetch("current_target_digests")
+      )
+
+      error = assert_raises(AdversarialReview::CLI::Error) do
+        AdversarialReview::CLI.execute_direct(state, task, "codex", {})
+      end
+
+      assert_equal "selection_call_not_authorized", error.code
     end
   end
 
@@ -2054,6 +2140,46 @@ class AdversarialReviewCliTest < Minitest::Test
     state = AdversarialReview::State.create(File.join(repository, ".git", run_name), manifest)
     state.transition_to("attacking")
     state
+  end
+
+  def interrupted_selection_state(repository, boundary)
+    manifest = AdversarialReview::Manifest.build(
+      repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+      output: "chat", executor: "auto", model: "codex-review", effort: "high"
+    )
+    manifest["selected_executor"] = "codex"
+    run_dir = File.join(repository, ".git", "selection-#{boundary}")
+    state = AdversarialReview::State.create(run_dir, manifest)
+    state.transition_to("attacking")
+    angle = manifest.fetch("enabled_tasks").first
+    task = AdversarialReview::Prompts.attack_task(
+      manifest, angle, 1, round: 1,
+      current_digests: state.to_h.fetch("current_target_digests")
+    )
+    state.begin_selection_intent!(
+      task_id: task.fetch("task_id"), requested_executor: "auto",
+      candidate_executor: "codex", vendor: "codex", model: "codex-review",
+      effort: "high", stage: "attacking"
+    )
+    unless boundary == :after_intent
+      state.create_task_bundle(task.fetch("task_id")) { task }
+    end
+    if %i[during_call orphan_completion].include?(boundary)
+      state.mark_selection_call_started!(task.fetch("task_id"))
+    end
+    if boundary == :orphan_completion
+      capabilities = AdversarialReview::Capabilities.normalize(
+        complete_capability_declaration("enforced"),
+        requested_model: "codex-review", requested_effort: "high"
+      )
+      state.record_task_execution(
+        task.fetch("task_id"), authority: "reviewer", capabilities: capabilities,
+        usage: {"prompt_bytes" => JSON.generate(task).bytesize}, attempts: 1,
+        runtime_provenance: {"adapter" => "direct", "executor" => "codex"}
+      )
+      state.ingest(task.fetch("task_id"), empty_result_for(task))
+    end
+    [state, run_dir, task]
   end
 
   def ingest_state_semantic_group(state, candidate, group_id)

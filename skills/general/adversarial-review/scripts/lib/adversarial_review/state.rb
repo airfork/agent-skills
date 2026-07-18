@@ -171,6 +171,7 @@ module AdversarialReview
           "metadata_required" => manifest.fetch("execution_metadata_required", false),
           "report_path" => manifest["report_path"],
           "dispatch_attempts" => [],
+          "selection_intent" => nil,
           "tasks" => {}
         },
         "summary" => nil,
@@ -387,9 +388,12 @@ module AdversarialReview
         data = Atomic.read_json_relative(run_directory, "state.json")
         self.class.validate_snapshot!(manifest, data)
         verify_ingested_files!(run_directory, data)
-        unless data.dig("execution", "executor_pinned")
+        intent = data.dig("execution", "selection_intent")
+        selection_task = intent.is_a?(Hash) && intent["status"] == "active" &&
+          intent["task_id"] == task_id
+        unless data.dig("execution", "executor_pinned") || selection_task
           raise Error.new(
-            "executor_not_pinned", "task bundles cannot be emitted before executor selection is pinned",
+            "executor_not_pinned", "task bundles require a pinned executor or matching selection intent",
             {"task_id" => task_id}, 3
           )
         end
@@ -881,23 +885,99 @@ module AdversarialReview
       self
     end
 
+    def begin_selection_intent!(task_id:, requested_executor:, candidate_executor:, vendor:,
+                                model:, effort:, stage:)
+      validate_task_id!(task_id)
+      intent = {
+        "status" => "active", "requested_executor" => requested_executor,
+        "candidate_executor" => candidate_executor, "vendor" => vendor,
+        "model" => model, "effort" => effort, "stage" => stage,
+        "task_id" => task_id, "external_attempts" => 0,
+        "outcome_executor" => nil, "error_code" => nil, "phase" => nil
+      }
+      mutate! do |data, manifest|
+        execution = data.fetch("execution")
+        unless requested_executor == manifest.fetch("requested_executor") &&
+               candidate_executor == execution.fetch("selected_executor") &&
+               vendor == candidate_executor && candidate_executor != "generic" &&
+               Manifest::EXECUTORS.include?(candidate_executor) &&
+               model == manifest.fetch("requested_model") &&
+               effort == manifest.fetch("requested_effort") && stage == data.fetch("stage")
+          raise Error.new("invalid_selection_intent", "executor selection intent does not match the run", {}, 3)
+        end
+        existing = execution["selection_intent"]
+        if existing
+          next if existing == intent
+          raise Error.new("selection_intent_conflict", "executor selection intent is immutable", {}, 3)
+        end
+        execution["selection_intent"] = intent
+      end
+      self
+    end
+
+    def mark_selection_call_started!(task_id)
+      validate_task_id!(task_id)
+      mutate! do |data|
+        intent = data.dig("execution", "selection_intent")
+        unless intent.is_a?(Hash) && intent["status"] == "active" &&
+               intent["task_id"] == task_id && data.fetch("emitted_tasks").key?(task_id)
+          raise Error.new("selection_call_not_authorized", "external selection call lacks durable intent and task", {}, 3)
+        end
+        intent["external_attempts"] += 1
+      end
+      self
+    end
+
+    def finalize_selection_intent!(task_id:, executor:, status:, error_code:, phase:,
+                                   content_sent:, prompt_bytes:, selected_executor:)
+      validate_task_id!(task_id)
+      validate_dispatch_attempt!(task_id: task_id, executor: executor, status: status,
+                                 error_code: error_code, phase: phase,
+                                 content_sent: content_sent, prompt_bytes: prompt_bytes)
+      mutate! do |data|
+        execution = data.fetch("execution")
+        intent = execution["selection_intent"]
+        unless intent.is_a?(Hash) && intent["task_id"] == task_id &&
+               intent["candidate_executor"] == executor
+          raise Error.new("selection_intent_missing", "selection result lacks its durable intent", {}, 3)
+        end
+        if intent["status"] == "terminal"
+          next if intent["outcome_executor"] == selected_executor
+          raise Error.new("selection_intent_conflict", "terminal selection outcome is immutable", {}, 3)
+        end
+        unless intent["status"] == "active" &&
+               [executor, "generic"].include?(selected_executor) &&
+               (selected_executor != "generic" ||
+                (status == "fallback" && !content_sent && %w[probe preflight].include?(phase)))
+          raise Error.new("invalid_selection_outcome", "selection outcome is not eligible", {}, 3)
+        end
+        if execution.fetch("executor_pinned") && execution.fetch("selected_executor") != selected_executor
+          raise Error.new("executor_already_pinned", "selected executor cannot change after it is pinned", {}, 3)
+        end
+        execution["selected_executor"] = selected_executor
+        execution["executor_pinned"] = true
+        intent["status"] = "terminal"
+        intent["outcome_executor"] = selected_executor
+        intent["error_code"] = error_code
+        intent["phase"] = phase
+        execution.fetch("dispatch_attempts") << dispatch_attempt_record(
+          task_id: task_id, executor: executor, status: status, error_code: error_code,
+          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes
+        )
+      end
+      self
+    end
+
     def record_dispatch_attempt!(task_id:, executor:, status:, error_code:, phase:,
                                  content_sent:, prompt_bytes:)
-      validate_task_id!(task_id)
-      unless Manifest::EXECUTORS.include?(executor) && executor != "auto" &&
-             %w[complete failed fallback].include?(status) &&
-             (error_code.nil? || (error_code.is_a?(String) && !error_code.empty?)) &&
-             %w[probe preflight execution].include?(phase) &&
-             [true, false].include?(content_sent) &&
-             prompt_bytes.is_a?(Integer) && prompt_bytes.positive?
-        raise Error.new("invalid_dispatch_attempt", "dispatch attempt evidence is malformed", {}, 3)
-      end
+      validate_dispatch_attempt!(task_id: task_id, executor: executor, status: status,
+                                 error_code: error_code, phase: phase,
+                                 content_sent: content_sent, prompt_bytes: prompt_bytes)
       mutate! do |data|
-        data.fetch("execution").fetch("dispatch_attempts") << {
-          "task_id" => task_id, "executor" => executor, "status" => status,
-          "error_code" => error_code, "phase" => phase,
-          "content_sent" => content_sent, "prompt_bytes" => prompt_bytes
-        }
+        data.fetch("execution").fetch("dispatch_attempts") << dispatch_attempt_record(
+          task_id: task_id, executor: executor, status: status, error_code: error_code,
+          phase: phase, content_sent: content_sent, prompt_bytes: prompt_bytes
+        )
       end
       self
     end
@@ -1110,7 +1190,7 @@ module AdversarialReview
         raise Error.new("invalid_state", "persisted state collections are invalid", {}, 3)
       end
       execution = data.fetch("execution")
-      unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts executor_pinned jobs metadata_required report_path selected_executor tasks] &&
+      unless execution.is_a?(Hash) && execution.keys.sort == %w[dispatch_attempts executor_pinned jobs metadata_required report_path selected_executor selection_intent tasks] &&
              Manifest::EXECUTORS.include?(execution["selected_executor"]) && execution["selected_executor"] != "auto" &&
              [true, false].include?(execution["executor_pinned"]) &&
              execution["jobs"].is_a?(Integer) && execution["jobs"].positive? &&
@@ -1136,11 +1216,42 @@ module AdversarialReview
       unless valid_dispatch_attempts
         raise Error.new("invalid_state", "persisted dispatch attempt evidence is invalid", {}, 3)
       end
+      intent = execution["selection_intent"]
+      valid_intent = intent.nil? || (
+        intent.is_a?(Hash) &&
+        intent.keys.sort == %w[candidate_executor effort error_code external_attempts model outcome_executor phase requested_executor stage status task_id vendor] &&
+        %w[active terminal].include?(intent["status"]) &&
+        Manifest::EXECUTORS.include?(intent["requested_executor"]) &&
+        intent["requested_executor"] == manifest.fetch("requested_executor") &&
+        Manifest::EXECUTORS.include?(intent["candidate_executor"]) &&
+        !%w[auto generic].include?(intent["candidate_executor"]) &&
+        intent["vendor"] == intent["candidate_executor"] &&
+        intent["model"] == manifest.fetch("requested_model") &&
+        intent["effort"] == manifest.fetch("requested_effort") &&
+        (TRANSITIONS.keys + %w[complete did-not-converge]).include?(intent["stage"]) &&
+        intent["task_id"].is_a?(String) && RUN_ID.match?(intent["task_id"]) &&
+        intent["external_attempts"].is_a?(Integer) && intent["external_attempts"] >= 0 &&
+        (intent["status"] == "active" ?
+          intent.values_at("outcome_executor", "error_code", "phase").all?(&:nil?) :
+          (Manifest::EXECUTORS.include?(intent["outcome_executor"]) &&
+           intent["outcome_executor"] != "auto" &&
+           (intent["error_code"].nil? || intent["error_code"].is_a?(String)) &&
+           %w[probe preflight execution].include?(intent["phase"])))
+      )
+      unless valid_intent
+        raise Error.new("invalid_state", "persisted selection intent is invalid", {}, 3)
+      end
       if execution.fetch("executor_pinned") == false &&
-         (manifest.fetch("requested_executor", "generic") != "auto" ||
-          !data.fetch("emitted_tasks").empty? || !data.fetch("ingested_results").empty? ||
-          !execution.fetch("tasks").empty? || !execution.fetch("dispatch_attempts").empty?)
-        raise Error.new("invalid_state", "unpinned executor state already contains task evidence", {}, 3)
+         manifest.fetch("requested_executor", "generic") != "auto"
+        raise Error.new("invalid_state", "only auto selection may remain unpinned", {}, 3)
+      end
+      if execution.fetch("executor_pinned") == false
+        allowed_ids = intent && intent["status"] == "active" ? [intent["task_id"]] : []
+        evidence_ids = data.fetch("emitted_tasks").keys |
+          data.fetch("ingested_results").keys | execution.fetch("tasks").keys
+        unless (evidence_ids - allowed_ids).empty? && execution.fetch("dispatch_attempts").empty?
+          raise Error.new("invalid_state", "unpinned executor state contains unauthorized task evidence", {}, 3)
+        end
       end
       valid_execution_tasks = execution.fetch("tasks").all? do |task_id, record|
         next false unless data.fetch("emitted_tasks").key?(task_id) && record.is_a?(Hash) &&
@@ -1740,6 +1851,28 @@ module AdversarialReview
         "invalid_task_id", "task ID contains unsafe characters",
         {"task_id" => task_id, "errors" => []}
       )
+    end
+
+    def validate_dispatch_attempt!(task_id:, executor:, status:, error_code:, phase:,
+                                   content_sent:, prompt_bytes:)
+      validate_task_id!(task_id)
+      return if Manifest::EXECUTORS.include?(executor) && executor != "auto" &&
+                %w[complete failed fallback].include?(status) &&
+                (error_code.nil? || (error_code.is_a?(String) && !error_code.empty?)) &&
+                %w[probe preflight execution].include?(phase) &&
+                [true, false].include?(content_sent) &&
+                prompt_bytes.is_a?(Integer) && prompt_bytes.positive?
+
+      raise Error.new("invalid_dispatch_attempt", "dispatch attempt evidence is malformed", {}, 3)
+    end
+
+    def dispatch_attempt_record(task_id:, executor:, status:, error_code:, phase:,
+                                content_sent:, prompt_bytes:)
+      {
+        "task_id" => task_id, "executor" => executor, "status" => status,
+        "error_code" => error_code, "phase" => phase,
+        "content_sent" => content_sent, "prompt_bytes" => prompt_bytes
+      }
     end
 
     def result_schema_name!(task)

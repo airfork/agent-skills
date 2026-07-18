@@ -200,6 +200,12 @@ module AdversarialReview
         ingest_summary = state.ingest(action_tasks.first, read_json_file(options.fetch(:actions)))
         return response(state).merge("task_id" => action_tasks.first, "ingest" => ingest_summary)
       end
+      recover_selection_intent!(state)
+      manifest = state.manifest_snapshot
+      snapshot = state.to_h
+      selected = snapshot.dig("execution", "selected_executor")
+      fallback_generic = manifest.fetch("requested_executor") == "auto" &&
+        snapshot.dig("execution", "tasks").empty?
       unless pending_task_ids(snapshot).empty?
         reviewer_pending = pending_task_ids(snapshot).reject do |task_id|
           snapshot.dig("emitted_tasks", task_id, "authority") == "parent"
@@ -212,6 +218,11 @@ module AdversarialReview
           end
           resume_stage_dispatch(state, selected, env)
         end
+        return response(state)
+      end
+
+      if %w[attacking fresh-sweep].include?(snapshot.fetch("stage")) &&
+         attack_roster_pending?(state, selected, env)
         return response(state)
       end
 
@@ -429,43 +440,57 @@ module AdversarialReview
         return selected
       end
 
+      intent = snapshot.dig("execution", "selection_intent")
+      if intent.nil?
+        manifest = state.manifest_snapshot
+        state.begin_selection_intent!(
+          task_id: task.fetch("task_id"),
+          requested_executor: manifest.fetch("requested_executor"),
+          candidate_executor: selected, vendor: selected,
+          model: manifest.fetch("requested_model"), effort: manifest.fetch("requested_effort"),
+          stage: snapshot.fetch("stage")
+        )
+        snapshot = state.to_h
+        intent = snapshot.dig("execution", "selection_intent")
+      end
       pinned = snapshot.dig("execution", "executor_pinned")
-      state.create_task_bundle(task.fetch("task_id")) { task } if pinned && !already_emitted
+      state.create_task_bundle(task.fetch("task_id")) { task } unless already_emitted
+      if intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
+        state.mark_selection_call_started!(task.fetch("task_id"))
+      end
       result = execute_direct(state, task, selected, env)
       prompt_bytes = JSON.generate(task).bytesize
       phase = dispatch_phase(result)
+      selecting = intent["status"] == "active" && intent["task_id"] == task.fetch("task_id")
       unless result.status == "complete" && result.payload
         eligible = Adapters::Base.eligibility_error?(result.error_code)
-        if fallback_generic && eligible && phase != "execution" && !pinned
-          state.pin_executor!("generic")
-          Adapters::Generic.new.run(task, state_run_dir(state))
-          state.record_dispatch_attempt!(
+        if fallback_generic && eligible && phase != "execution" && selecting && !pinned
+          state.finalize_selection_intent!(
             task_id: task.fetch("task_id"), executor: selected, status: "fallback",
             error_code: result.error_code, phase: phase, content_sent: false,
-            prompt_bytes: prompt_bytes
+            prompt_bytes: prompt_bytes, selected_executor: "generic"
           )
+          Adapters::Generic.new.run(task, state_run_dir(state))
           return "generic"
         end
-        state.pin_executor!(selected) unless pinned
-        unless already_emitted
-          state.create_task_bundle(task.fetch("task_id")) { task }
+        if selecting
+          state.finalize_selection_intent!(
+            task_id: task.fetch("task_id"), executor: selected, status: "failed",
+            error_code: result.error_code, phase: phase, content_sent: phase == "execution",
+            prompt_bytes: prompt_bytes, selected_executor: selected
+          )
+        else
+          state.record_dispatch_attempt!(
+            task_id: task.fetch("task_id"), executor: selected, status: "failed",
+            error_code: result.error_code, phase: phase, content_sent: phase == "execution",
+            prompt_bytes: prompt_bytes
+          )
         end
-        state.record_dispatch_attempt!(
-          task_id: task.fetch("task_id"), executor: selected, status: "failed",
-          error_code: result.error_code, phase: phase, content_sent: phase == "execution",
-          prompt_bytes: prompt_bytes
-        )
         status = eligible ? 4 : 5
         code = status == 4 ? "capability_blocked" : "adapter_execution_failed"
         raise Error.new(code, "#{selected} adapter could not produce an eligible result", status,
                         {"executor" => selected, "reason" => result.error_code})
       end
-      state.pin_executor!(selected) unless pinned
-      state.create_task_bundle(task.fetch("task_id")) { task } unless already_emitted
-      state.record_dispatch_attempt!(
-        task_id: task.fetch("task_id"), executor: selected, status: "complete",
-        error_code: nil, phase: "execution", content_sent: true, prompt_bytes: prompt_bytes
-      )
       # Count the reviewed task JSON once; adapter preflight and repair attempts do not
       # resubmit a different authoritative bundle and therefore do not multiply this value.
       usage = (result.usage || {}).merge("prompt_bytes" => prompt_bytes)
@@ -475,6 +500,18 @@ module AdversarialReview
         runtime_provenance: result.runtime_provenance || {}
       )
       state.ingest(task.fetch("task_id"), result.payload)
+      if selecting
+        state.finalize_selection_intent!(
+          task_id: task.fetch("task_id"), executor: selected, status: "complete",
+          error_code: nil, phase: "execution", content_sent: true,
+          prompt_bytes: prompt_bytes, selected_executor: selected
+        )
+      else
+        state.record_dispatch_attempt!(
+          task_id: task.fetch("task_id"), executor: selected, status: "complete",
+          error_code: nil, phase: "execution", content_sent: true, prompt_bytes: prompt_bytes
+        )
+      end
       selected
     end
 
@@ -500,7 +537,88 @@ module AdversarialReview
       end
     end
 
+    def recover_selection_intent!(state)
+      snapshot = state.to_h
+      intent = snapshot.dig("execution", "selection_intent")
+      return unless intent.is_a?(Hash) && intent["status"] == "active"
+
+      task_id = intent.fetch("task_id")
+      unless snapshot.fetch("emitted_tasks").key?(task_id)
+        task = selection_intent_task(state, intent)
+        state.create_task_bundle(task_id) { task }
+        snapshot = state.to_h
+      end
+      return unless snapshot.fetch("ingested_results").key?(task_id) &&
+                    snapshot.dig("execution", "tasks", task_id)
+
+      task = nil
+      state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+      state.finalize_selection_intent!(
+        task_id: task_id, executor: intent.fetch("candidate_executor"), status: "complete",
+        error_code: nil, phase: "execution", content_sent: true,
+        prompt_bytes: JSON.generate(task).bytesize,
+        selected_executor: intent.fetch("candidate_executor")
+      )
+    end
+
+    def selection_intent_task(state, intent)
+      snapshot = state.to_h
+      manifest = state.manifest_snapshot
+      tasks = manifest.fetch("enabled_tasks").map do |angle|
+        Prompts.attack_task(
+          manifest, angle, 1, round: snapshot.fetch("revise_round"),
+          current_digests: snapshot.fetch("current_target_digests")
+        )
+      end
+      task = tasks.find { |candidate| candidate.fetch("task_id") == intent.fetch("task_id") }
+      return task if task && %w[attacking fresh-sweep].include?(intent.fetch("stage"))
+
+      raise Error.new(
+        "selection_task_unrecoverable", "selection intent does not identify an expected attack task", 3,
+        {"task_id" => intent.fetch("task_id"), "stage" => intent.fetch("stage")}
+      )
+    end
+
+    def attack_roster_pending?(state, selected, env)
+      snapshot = state.to_h
+      manifest = state.manifest_snapshot
+      round = snapshot.fetch("revise_round")
+      expected = manifest.fetch("enabled_tasks").map do |angle|
+        Prompts.attack_task(
+          manifest, angle, 1, round: round,
+          current_digests: snapshot.fetch("current_target_digests")
+        ).fetch("task_id")
+      end
+      observed = snapshot.fetch("emitted_tasks").values.select do |task|
+        task.fetch("kind") == "attack" && task.fetch("round") == round
+      end.map { |task| task.fetch("task_id") }
+      unexpected = observed - expected
+      unless unexpected.empty?
+        raise Error.new("invalid_attack_roster", "attack stage contains unexpected tasks", 3,
+                        {"task_ids" => unexpected.sort})
+      end
+      unless (expected - observed).empty?
+        dispatch_attack_tasks(state, selected, env, fallback_generic: false)
+        return true
+      end
+      expected.any? { |task_id| !snapshot.fetch("ingested_results").key?(task_id) }
+    end
+
     def execute_direct(state, task, selected, env)
+      snapshot = state.to_h
+      intent = snapshot.dig("execution", "selection_intent")
+      authorized_selection = intent.is_a?(Hash) && intent["status"] == "active" &&
+        intent["task_id"] == task.fetch("task_id") && intent["external_attempts"].positive?
+      authorized_pinned = intent.is_a?(Hash) && intent["status"] == "terminal" &&
+        snapshot.dig("execution", "executor_pinned")
+      unless snapshot.fetch("emitted_tasks").key?(task.fetch("task_id")) &&
+             (authorized_selection || authorized_pinned)
+        raise Error.new(
+          "selection_call_not_authorized",
+          "direct execution requires a durable executor intent and authenticated task", 3,
+          {"task_id" => task.fetch("task_id"), "executor" => selected}
+        )
+      end
       manifest = state.manifest_snapshot
       schema_name = task.fetch("schema").sub(%r{\Aassets/schemas/}, "").sub(/\.json\z/, "")
       schema = read_json_file(File.join(AdversarialReview.root, task.fetch("schema")))
