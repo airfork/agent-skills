@@ -33,6 +33,7 @@ module AdversarialReview
         input_tokens cached_input_tokens cache_read_input_tokens
         cache_creation_input_tokens output_tokens reasoning_tokens total_tokens
       ].freeze
+      MAX_EXECUTABLE_CANDIDATES = 2
 
       class << self
         def direct_contracts
@@ -166,44 +167,28 @@ module AdversarialReview
         )
         return direct_failure("unsupported_tier") unless support.execution_allowed
 
-        @pinned_executable = Runner.resolve_executable(
-          @executable_candidate, repository: @repository,
-          run_directory: @run_directory, config_root: @configured_config_root
-        )
         Runner.with_isolated_directory(prefix: "adversarial-review-direct") do |root|
           prepare_isolated_runtime(root)
           @preflight_mode = true
-          @active_phase = "probe"
-          @active_attempt = nil
           probe_results = []
-          help_result = run_probe(help_argv)
-          probe_results << help_result
-          unless successful_process?(help_result) && help_capabilities_present?(help_result.stdout)
-            return direct_failure("capability_probe_failed", probe_results)
+          aggregate_preflight_usage = Hash.new(0)
+          selected = nil
+          last_error = "capability_probe_failed"
+          direct_executable_candidates.each_with_index do |candidate, index|
+            attempt = attempt_precontent_candidate(candidate, index + 1)
+            probe_results.concat(attempt.fetch("runner_results"))
+            merge_usage!(aggregate_preflight_usage, attempt.fetch("usage"))
+            last_error = attempt.fetch("error_code") if attempt["error_code"]
+            if attempt.fetch("selected")
+              selected = attempt
+              break
+            end
+            break if attempt.fetch("fatal")
           end
-          version_result = run_probe([@pinned_executable.path, "--version"])
-          probe_results << version_result
-          unless successful_process?(version_result) && nonempty_text?(version_result.stdout)
-            return direct_failure("version_probe_failed", probe_results)
+          @preflight_usage = aggregate_preflight_usage.to_h
+          unless selected
+            return direct_failure(last_error, probe_results, @preflight_usage)
           end
-          @cli_version = version_result.stdout.strip
-          @capability_probe = {
-            "help_argv" => help_argv.dup,
-            "version_argv" => [@pinned_executable.path, "--version"],
-            "cli_version" => @cli_version,
-            "executable" => @pinned_executable.path
-          }
-
-          @active_phase = "preflight"
-          @active_attempt = 0
-          @last_normalized_capabilities = unavailable_capabilities("preflight attestation missing")
-          preflight_result, preflight_envelope = invoke_prompt(preflight_prompt)
-          probe_results << preflight_result if preflight_result
-          record_runtime_observation(preflight_envelope)
-          capture_envelope_capabilities(preflight_envelope)
-          @preflight_usage = trusted_envelope_usage(preflight_result, preflight_envelope)
-          preflight_error = attestation_error(preflight_result, preflight_envelope)
-          return direct_failure(preflight_error, probe_results) if preflight_error
 
           @preflight_mode = false
           @active_phase = "execution"
@@ -381,6 +366,111 @@ module AdversarialReview
 
       private
 
+      def executable_candidates
+        [@executable_candidate]
+      end
+
+      def version_contract_error
+        nil
+      end
+
+      def direct_executable_candidates
+        candidates = executable_candidates
+        unless candidates.is_a?(Array) && candidates.length.between?(1, MAX_EXECUTABLE_CANDIDATES) &&
+               candidates.uniq.length == candidates.length &&
+               candidates.all? { |candidate| nonempty_text?(candidate) }
+          raise ArgumentError, "direct adapter executable candidates are invalid"
+        end
+        candidates.dup
+      end
+
+      def attempt_precontent_candidate(candidate, index)
+        results = []
+        usage = {}
+        record = {
+          "index" => index,
+          "candidate" => candidate,
+          "status" => "rejected",
+          "error_code" => nil
+        }
+        selected = false
+        fatal = false
+        error_code = nil
+        begin
+          @active_phase = "probe"
+          @active_attempt = nil
+          @pinned_executable = Runner.resolve_executable(
+            candidate, repository: @repository, run_directory: @run_directory,
+            config_root: @configured_config_root
+          )
+          record["executable"] = @pinned_executable.path
+          candidate_help_argv = help_argv
+          record["help_argv"] = candidate_help_argv.dup
+          help_result = run_probe(candidate_help_argv)
+          results << help_result
+          unless successful_process?(help_result) && help_capabilities_present?(help_result.stdout)
+            error_code = "capability_probe_failed"
+            return candidate_attempt_result(selected, fatal, error_code, results, usage)
+          end
+
+          version_argv = [@pinned_executable.path, "--version"]
+          record["version_argv"] = version_argv.dup
+          version_result = run_probe(version_argv)
+          results << version_result
+          unless successful_process?(version_result) && nonempty_text?(version_result.stdout)
+            error_code = "version_probe_failed"
+            return candidate_attempt_result(selected, fatal, error_code, results, usage)
+          end
+          @cli_version = version_result.stdout.strip
+          record["cli_version"] = @cli_version
+          if (contract_error = version_contract_error)
+            error_code = contract_error
+            fatal = true
+            return candidate_attempt_result(selected, fatal, error_code, results, usage)
+          end
+          @capability_probe = {
+            "help_argv" => candidate_help_argv.dup,
+            "version_argv" => version_argv.dup,
+            "cli_version" => @cli_version,
+            "executable" => @pinned_executable.path
+          }
+
+          @active_phase = "preflight"
+          @active_attempt = 0
+          @last_normalized_capabilities = unavailable_capabilities("preflight attestation missing")
+          preflight_result, preflight_envelope = invoke_prompt(preflight_prompt)
+          results << preflight_result if preflight_result
+          record_runtime_observation(preflight_envelope)
+          capture_envelope_capabilities(preflight_envelope)
+          usage = trusted_envelope_usage(preflight_result, preflight_envelope)
+          record["preflight"] = @runtime_provenance_records["preflight"] &&
+            JSON.parse(JSON.generate(@runtime_provenance_records["preflight"]))
+          error_code = attestation_error(preflight_result, preflight_envelope)
+          return candidate_attempt_result(selected, fatal, error_code, results, usage) if error_code
+
+          selected = true
+          record["status"] = "selected"
+          candidate_attempt_result(selected, fatal, nil, results, usage)
+        rescue Runner::Error
+          error_code = "runner_error"
+          candidate_attempt_result(selected, fatal, error_code, results, usage)
+        ensure
+          record["error_code"] = error_code
+          @runtime_provenance_records.fetch("candidate_attempts") << record
+          @runtime_provenance_records["preflight"] = nil unless selected
+        end
+      end
+
+      def candidate_attempt_result(selected, fatal, error_code, results, usage)
+        {
+          "selected" => selected,
+          "fatal" => fatal,
+          "error_code" => error_code,
+          "runner_results" => results,
+          "usage" => usage
+        }
+      end
+
       def reset_execution_state!
         @runtime_provenance_records = nil
         @direct_session_ids = nil
@@ -428,7 +518,8 @@ module AdversarialReview
         @runtime_provenance_records = {
           "preflight" => nil,
           "executions" => [],
-          "failure" => nil
+          "failure" => nil,
+          "candidate_attempts" => []
         }
         @direct_session_ids = {}
       end

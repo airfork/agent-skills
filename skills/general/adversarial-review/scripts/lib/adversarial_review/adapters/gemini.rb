@@ -16,8 +16,11 @@ module AdversarialReview
         GOOGLE_CLOUD_PROJECT GOOGLE_CLOUD_LOCATION
       ].freeze
       ALLOWED_TOOLS = %w[read_file search_file_content glob].freeze
-      VERSION_CONFIG_CONTRACTS = {
-        "gemini-cli contract-vNext" => "thinking-effort-v1"
+      VERSION_EFFORT_CONTRACTS = {
+        "gemini-cli contract-vNext" => {
+          "default" => {"medium" => {"config_effort" => "balanced"}},
+          "high" => {"high" => {"config_effort" => "high"}}
+        }
       }.freeze
       AGENT_DEFINITION = {
         "description" => "Read-only adversarial review role",
@@ -55,8 +58,6 @@ module AdversarialReview
       end
 
       def invoke_prompt(prompt)
-        return [nil, nil] unless VERSION_CONFIG_CONTRACTS.key?(@cli_version)
-
         prepare_invocation_config
         argv = [
           @pinned_executable.path, "--prompt", prompt, "--model", @requested_model,
@@ -77,6 +78,13 @@ module AdversarialReview
         @active_gemini_cli_home = nil
       end
 
+      def version_contract_error
+        version = VERSION_EFFORT_CONTRACTS[@cli_version]
+        return "unsupported_version_contract" unless version
+        return "unsupported_effort_contract" unless version.dig(tier, @requested_effort)
+        nil
+      end
+
       def prepare_invocation_config
         @invocation_sequence = @invocation_sequence.to_i + 1
         @active_gemini_cli_home = File.join(
@@ -85,9 +93,15 @@ module AdversarialReview
         agents = File.join(@active_gemini_cli_home, "agents")
         Dir.mkdir(@active_gemini_cli_home, 0o700)
         Dir.mkdir(agents, 0o700)
+        effort_contract = VERSION_EFFORT_CONTRACTS.fetch(@cli_version)
+                                                   .fetch(tier)
+                                                   .fetch(@requested_effort)
         settings = {
           "agents" => {"active" => "adversarial-review", "ephemeral" => true},
-          "model" => {"effort" => @requested_effort, "name" => @requested_model},
+          "model" => {
+            "effort" => effort_contract.fetch("config_effort"),
+            "name" => @requested_model
+          },
           "output" => {"format" => "json"},
           "sandbox" => true,
           "tools" => {"allowed" => ALLOWED_TOOLS},

@@ -7,30 +7,16 @@ module AdversarialReview
         -p --mode --sandbox --workspace --model --output-format --effort
       ].freeze
       CREDENTIAL_VARIABLES = %w[CURSOR_API_KEY].freeze
-      VERSION_EFFORT_FLAGS = {
-        "cursor-agent contract-vNext" => ["--effort"]
+      VERSION_EFFORT_CONTRACTS = {
+        "cursor-agent contract-vNext" => {
+          "default" => {"medium" => ["--effort", "medium"]},
+          "high" => {"high" => ["--effort", "high"]}
+        }
       }.freeze
       MAX_EVENTS = 1_024
 
       def initialize(executable: "agent", **options)
-        @cursor_configuration = options.merge(executable: executable)
-        @cursor_fallback_candidate = executable == "agent" ? "cursor-agent" : nil
-        @cursor_selection_mutex = Mutex.new
-        configure_direct(**@cursor_configuration)
-      end
-
-      def execute(required_checks: [], dispatch_capability: nil)
-        @cursor_selection_mutex.synchronize do
-          result = super
-          return result unless @cursor_fallback_candidate &&
-                               %w[runner_error capability_probe_failed version_probe_failed].include?(result.error_code)
-
-          fallback = @cursor_fallback_candidate
-          @cursor_fallback_candidate = nil
-          @cursor_configuration = @cursor_configuration.merge(executable: fallback)
-          configure_direct(**@cursor_configuration)
-          super
-        end
+        configure_direct(**options.merge(executable: executable))
       end
 
       def credential_variables
@@ -51,13 +37,14 @@ module AdversarialReview
       end
 
       def invoke_prompt(prompt)
-        effort_flags = VERSION_EFFORT_FLAGS[@cli_version]
-        return [nil, nil] unless effort_flags
+        effort_arguments = VERSION_EFFORT_CONTRACTS.fetch(@cli_version)
+                                                   .fetch(tier)
+                                                   .fetch(@requested_effort)
 
         argv = [
           @pinned_executable.path, "-p", "--mode", "ask", "--sandbox", "enabled",
           "--workspace", active_repository, "--model", @requested_model,
-          "--output-format", "stream-json", *effort_flags, @requested_effort, prompt
+          "--output-format", "stream-json", *effort_arguments, prompt
         ]
         result = run_direct(argv: argv, stdin_data: "")
         [result, parse_result(result)]
@@ -69,6 +56,17 @@ module AdversarialReview
 
       private
 
+      def executable_candidates
+        @executable_candidate == "agent" ? %w[agent cursor-agent] : super
+      end
+
+      def version_contract_error
+        version = VERSION_EFFORT_CONTRACTS[@cli_version]
+        return "unsupported_version_contract" unless version
+        return "unsupported_effort_contract" unless version.dig(tier, @requested_effort)
+        nil
+      end
+
       def parse_result(result)
         return nil unless result.is_a?(Runner::Result) && result.exit_status == 0 && !result.timed_out
 
@@ -76,11 +74,12 @@ module AdversarialReview
         raise JSON::ParserError, "Cursor event limit exceeded" if events.length > MAX_EVENTS
         runtime, final = parse_protocol(events)
         verify_event_bindings!(runtime, events.drop(1))
+        verify_terminal_binding!(runtime, final)
         payload = final["structured_output"]
         usage = final["usage"]
         {
           "payload" => payload,
-          "terminal" => runtime_terminal(runtime),
+          "terminal" => runtime_terminal(final),
           "usage" => usage,
           "capabilities" => runtime_capabilities(runtime, payload, usage),
           "provenance" => runtime_provenance_record(runtime)
@@ -129,13 +128,21 @@ module AdversarialReview
         end
       end
 
-      def runtime_terminal(runtime)
-        return nil unless runtime.is_a?(Hash)
+      def verify_terminal_binding!(runtime, final)
+        %w[session_id model effort].each do |field|
+          unless nonempty_text?(final[field]) && final[field] == runtime[field]
+            raise JSON::ParserError, "Cursor terminal #{field} does not match initialization"
+          end
+        end
+      end
+
+      def runtime_terminal(final)
+        return nil unless final.is_a?(Hash)
         {
           "terminal" => true,
-          "model" => runtime["model"],
-          "effort" => runtime["effort"],
-          "session_id" => runtime["session_id"],
+          "model" => final["model"],
+          "effort" => final["effort"],
+          "session_id" => final["session_id"],
           "independent_vote" => false
         }
       end

@@ -770,6 +770,27 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def test_cursor_terminal_requires_complete_binding_to_initialization
+    accepted = accepted_direct_stream("cursor")
+    malformed = {
+      "missing terminal session" => accepted.sub(/,"session_id":"\$SESSION_ID"(?=,"model")/, ""),
+      "missing terminal model" => accepted.sub(/,"model":"\$OBSERVED_MODEL"(?=,"effort")/, ""),
+      "missing terminal effort" => accepted.sub(/,"effort":"\$OBSERVED_EFFORT"(?=,"structured_output")/, ""),
+      "terminal model mismatch" => accepted.sub(
+        /"model":"\$OBSERVED_MODEL"(?=,"effort":"\$OBSERVED_EFFORT","structured_output")/,
+        '"model":"other-model"'
+      )
+    }
+
+    malformed.each do |label, stream|
+      result, records = run_direct_adapter_case("cursor", stream: stream)
+
+      assert_equal "generic", result.status, label
+      assert_equal "runtime_attestation_missing", result.error_code, label
+      assert_equal %w[help version run], records.map { |record| record.fetch("kind") }, label
+    end
+  end
+
   def test_gemini_protocol_rejects_duplicate_keys_shape_mixed_sessions_and_output_overflow
     accepted = accepted_direct_stream("gemini")
     malformed = {
@@ -800,8 +821,44 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       result, records = run_direct_adapter_case(provider, cli_version: version)
 
       assert_equal "generic", result.status, provider
-      assert_equal "process_failed", result.error_code, provider
+      assert_equal "unsupported_version_contract", result.error_code, provider
       assert_equal %w[help version], records.map { |record| record.fetch("kind") }, provider
+    end
+  end
+
+  def test_cursor_and_gemini_accept_every_version_fixtured_supported_tier
+    %w[cursor gemini].each do |provider|
+      {"default" => "medium", "high" => "high"}.each do |tier, effort|
+        result, records = run_direct_adapter_case(
+          provider, tier: tier, requested_effort: effort, observed_effort: effort
+        )
+
+        assert_equal "complete", result.status, "#{provider}: #{tier}"
+        execution = records.select { |record| record.fetch("kind") == "run" }.last
+        if provider == "cursor"
+          assert_equal ["--effort", effort], execution.fetch("argv")[-3, 2], tier
+        else
+          mapped = tier == "default" ? "balanced" : "high"
+          assert_equal mapped, execution.dig("settings", "model", "effort"), tier
+        end
+      end
+    end
+  end
+
+  def test_cursor_and_gemini_reject_unfixtured_effort_for_each_supported_tier_before_run
+    %w[cursor gemini].each do |provider|
+      %w[default high].each do |tier|
+        result, records = run_direct_adapter_case(
+          provider, tier: tier, requested_effort: "arbitrary",
+          observed_effort: "arbitrary"
+        )
+
+        assert_equal "generic", result.status, "#{provider}: #{tier}"
+        assert_equal "unsupported_effort_contract", result.error_code, "#{provider}: #{tier}"
+        assert_equal %w[help version], records.map { |record| record.fetch("kind") },
+                     "#{provider}: #{tier}"
+        assert_normalized_capabilities(result.capabilities, "#{provider}: #{tier}")
+      end
     end
   end
 
@@ -845,7 +902,123 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal %w[help help version run run], records.map { |record| record.fetch("kind") }
         assert_equal File.realpath(File.join(bin, "cursor-agent")),
                      result.runtime_provenance.fetch("executions").fetch(0).fetch("executable")
+        attempts = result.runtime_provenance.fetch("candidate_attempts")
+        assert_equal 2, attempts.length
+        assert_equal ["rejected", "selected"], attempts.map { |attempt| attempt.fetch("status") }
+        assert_equal "capability_probe_failed", attempts.fetch(0).fetch("error_code")
+        assert_equal File.realpath(File.join(bin, "agent")), attempts.fetch(0).fetch("executable")
+        assert_equal File.realpath(File.join(bin, "cursor-agent")), attempts.fetch(1).fetch("executable")
         refute_includes records.fetch(0).fetch("argv").join(" "), "REVIEWED SECRET"
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_cursor_does_not_retry_alias_after_review_content_submission
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-no-post-content-fallback") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        File.rename(alias_path, File.join(bin, "cursor-agent"))
+        primary_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        klass = Class.new(AdversarialReview::Adapters::Cursor) do
+          attr_reader :content_attempts
+
+          private
+
+          def adapter_name
+            "cursor"
+          end
+
+          def run_direct(argv:, stdin_data:)
+            result = super
+            if argv.last == @prompt
+              @content_attempts = @content_attempts.to_i + 1
+              raise AdversarialReview::Runner::Error.new(
+                "post_content_transport_failure", "transport failed after content submission"
+              )
+            end
+            result
+          end
+        end
+        adapter = klass.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "generic", result.status
+        assert_equal "runner_error", result.error_code
+        assert_equal 40, result.usage.fetch("total_tokens")
+        assert_equal 3, result.runner_results.length
+        assert_equal 1, adapter.content_attempts
+        records = fake_cli_records(log)
+        assert_equal %w[help version run run], records.map { |record| record.fetch("kind") }
+        assert_equal 1, records.count { |record| record.fetch("argv").include?("REVIEWED SECRET") }
+        assert records.all? { |record| record.fetch("executable") == File.realpath(primary_path) }
+        attempts = result.runtime_provenance.fetch("candidate_attempts")
+        assert_equal 1, attempts.length
+        assert_equal "selected", attempts.fetch(0).fetch("status")
+      ensure
+        ENV["PATH"] = original_path
+      end
+    end
+  end
+
+  def test_cursor_can_reject_primary_private_preflight_then_select_alias_before_content
+    with_repository(files: {"docs/spec.md" => "# REVIEWED SECRET\n"}) do |repository|
+      Dir.mktmpdir("adversarial-review-cursor-preflight-fallback") do |bin|
+        log = File.join(bin, "calls.jsonl")
+        alias_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor"), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        File.rename(alias_path, File.join(bin, "cursor-agent"))
+        primary_path = write_direct_adapter_fake(
+          bin, provider: "cursor", log: log, payload: direct_role_payload,
+          stream: accepted_direct_stream("cursor").sub(
+            '"read_only":true', '"read_only":false'
+          ), observed_model: "cursor-model-x",
+          observed_effort: "high"
+        )
+        original_path = ENV["PATH"]
+        ENV["PATH"] = [bin, original_path].compact.join(File::PATH_SEPARATOR)
+        adapter = AdversarialReview::Adapters::Cursor.new(
+          executable: "agent", repository: repository, model: "cursor-model-x",
+          effort: "high", role_schema: attack_role_schema, schema_name: "attack",
+          prompt: "REVIEWED SECRET", tier: "high", timeout_seconds: 2
+        )
+
+        result = adapter.execute(dispatch_capability: observed_dispatch)
+
+        assert_equal "complete", result.status
+        assert_equal 120, result.usage.fetch("total_tokens")
+        records = fake_cli_records(log)
+        assert_equal %w[help version run help version run run],
+                     records.map { |record| record.fetch("kind") }
+        content_records = records.select { |record| record.fetch("argv").include?("REVIEWED SECRET") }
+        assert_equal 1, content_records.length
+        assert_equal File.realpath(File.join(bin, "cursor-agent")),
+                     content_records.fetch(0).fetch("executable")
+        attempts = result.runtime_provenance.fetch("candidate_attempts")
+        assert_equal ["rejected", "selected"], attempts.map { |attempt| attempt.fetch("status") }
+        assert_equal File.realpath(primary_path), attempts.fetch(0).fetch("executable")
+        assert_equal "capabilities_degraded", attempts.fetch(0).fetch("error_code")
+        assert_equal "observed", attempts.fetch(0).dig("preflight", "status")
       ensure
         ENV["PATH"] = original_path
       end
@@ -1343,8 +1516,15 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         assert_equal "complete", success.status, provider
         assert_equal "generic", failure.status, provider
         assert_equal "runner_error", failure.error_code, provider
-        assert_nil failure.runtime_provenance, provider
-        assert_nil adapter.runtime_provenance, provider
+        provenance = failure.runtime_provenance
+        assert_equal provenance, adapter.runtime_provenance, provider
+        assert_nil provenance.fetch("preflight"), provider
+        assert_empty provenance.fetch("executions"), provider
+        assert_equal "runner_error", provenance.dig("failure", "error_code"), provider
+        attempts = provenance.fetch("candidate_attempts")
+        assert_equal 1, attempts.length, provider
+        assert_equal "rejected", attempts.fetch(0).fetch("status"), provider
+        assert_equal "runner_error", attempts.fetch(0).fetch("error_code"), provider
         assert_nil adapter.capability_probe, provider
         assert failure.capabilities.values.all? { |entry| entry.fetch("status") == "unavailable" }, provider
       end
@@ -1529,7 +1709,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                               observed_models: nil, observed_efforts: nil,
                               session_ids: nil, payloads: nil, cli_version: nil,
                               version_text: nil, help_text: nil,
-                              dispatch_capability: :observed)
+                              requested_effort: nil, dispatch_capability: :observed)
     requested_models = {
       "codex" => "gpt-5.6-sol", "claude" => "claude-opus-4-8",
       "cursor" => "cursor-model-x", "gemini" => "gemini-model-x"
@@ -1537,6 +1717,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     requested_efforts = {
       "codex" => "xhigh", "claude" => "high", "cursor" => "high", "gemini" => "high"
     }
+    requested_efforts[provider] = requested_effort if requested_effort
     classes = {
       "codex" => AdversarialReview::Adapters::Codex,
       "claude" => AdversarialReview::Adapters::Claude,
@@ -1656,7 +1837,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
                                 observed_model:, observed_effort:, streams: nil,
                                 observed_models: nil, observed_efforts: nil,
                                 session_ids: nil, payloads: nil, cli_version: nil,
-                                version_text: nil, run_delay: 0)
+                                version_text: nil, run_delay: 0, run_exit_statuses: nil)
     default_help = case provider
     when "codex"
       "--ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox --model --cd --json --output-schema --output-last-message"
@@ -1689,6 +1870,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       observed_efforts = #{(observed_efforts || [observed_effort]).inspect}
       configured_sessions = #{(session_ids || []).inspect}
       configured_payloads = #{(payloads || []).map { |item| JSON.generate(item) }.inspect}
+      run_exit_statuses = #{(run_exit_statuses || []).inspect}
       help_text = #{(help_text || default_help).inspect}
       version_text = #{version_text.nil? ? version.inspect : version_text.inspect}
       help_call = (provider == "codex" && ARGV == ["exec", "--help"]) ||
@@ -1696,8 +1878,12 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       version_call = ARGV == ["--version"]
       kind = help_call ? "help" : (version_call ? "version" : "run")
       stdin_text = STDIN.read
+      executable_path = File.realpath($0)
       prior_runs = if File.exist?(log)
-        File.readlines(log).count { |line| JSON.parse(line)["kind"] == "run" }
+        File.readlines(log).count do |line|
+          entry = JSON.parse(line)
+          entry["kind"] == "run" && entry["executable"] == executable_path
+        end
       else
         0
       end
@@ -1710,7 +1896,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         configured_payloads.fetch([prior_runs, configured_payloads.length - 1].min)
       end
       session_id = if configured_sessions.empty?
-        "#{provider}-session-\#{prior_runs + 1}"
+        prefix = File.basename($0) == "cursor-agent" ? "cursor-alias" : provider
+        "\#{prefix}-session-\#{prior_runs + 1}"
       else
         configured_sessions.fetch([prior_runs, configured_sessions.length - 1].min)
       end
@@ -1749,6 +1936,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
       end
       record = {
         "kind" => kind, "argv" => ARGV, "stdin" => stdin_text,
+        "executable" => executable_path,
         "env" => ENV.to_h, "cwd" => Dir.pwd, "schema_payload" => schema_payload,
         "relative_review_visible" => !relative_review_contents.nil?,
         "git_repository" => git_repository,
@@ -1766,6 +1954,8 @@ class AdversarialReviewAdaptersTest < Minitest::Test
         puts version_text
       else
         sleep #{run_delay.inspect}
+        exit_status = run_exit_statuses.fetch([prior_runs, run_exit_statuses.length - 1].min, 0)
+        exit(exit_status) unless exit_status.zero?
         rendered = template.gsub("$CWD", Dir.pwd)
                            .gsub("$OBSERVED_MODEL", observed_model)
                            .gsub("$OBSERVED_EFFORT", observed_effort)
