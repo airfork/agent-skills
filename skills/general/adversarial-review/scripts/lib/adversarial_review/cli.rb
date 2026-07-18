@@ -217,8 +217,12 @@ module AdversarialReview
       snapshot = state.to_h
       selected = snapshot.dig("execution", "selected_executor")
       fallback_generic = generic_fallback_available?(manifest, snapshot)
-      unless pending_task_ids(snapshot).empty?
-        reviewer_pending = pending_task_ids(snapshot).reject do |task_id|
+      if stage_roster_pending?(state, selected, env, fallback_generic: fallback_generic)
+        return response(state)
+      end
+      current_pending = current_stage_pending_task_ids(snapshot, manifest)
+      unless current_pending.empty?
+        reviewer_pending = current_pending.reject do |task_id|
           snapshot.dig("emitted_tasks", task_id, "authority") == "parent"
         end
         if DIRECT_EXECUTORS.include?(selected) && !reviewer_pending.empty?
@@ -234,10 +238,6 @@ module AdversarialReview
         return response(state)
       end
 
-      if stage_roster_pending?(state, selected, env)
-        return response(state)
-      end
-
       case snapshot.fetch("stage")
       when "prepared"
         state.transition_to("attacking")
@@ -246,14 +246,12 @@ module AdversarialReview
         )
         state.pin_executor!(selected)
       when "attacking"
-        preemit_stage_tasks(state, "deduplicating")
         state.transition_to("deduplicating")
         selected = dispatch_role_task(state, "dedupe", selected, env,
                                       fallback_generic: fallback_generic)
       when "deduplicating"
         next_cull = snapshot.fetch("revise_round") == 2 && snapshot.fetch("fresh_sweep_required") ?
           "culling-new-findings" : "culling"
-        preemit_stage_tasks(state, next_cull)
         state.transition_to(next_cull)
         selected = dispatch_judge_tasks(state, selected, env, fallback_generic: fallback_generic)
       when "culling", "culling-new-findings"
@@ -263,7 +261,6 @@ module AdversarialReview
               snapshot.fetch("findings").none? { |finding| finding.fetch("state") == "pending" }
           state.transition_to("complete")
         else
-          preemit_stage_tasks(state, "awaiting-author")
           state.transition_to("awaiting-author")
           task = Prompts.parent_action_task(manifest, state.to_h)
           state.create_task_bundle(task.fetch("task_id")) { task }
@@ -277,14 +274,12 @@ module AdversarialReview
           return response(state).merge("next_action" => "submit-author-actions")
         end
         state.refresh_targets_after_actions! unless snapshot.fetch("findings").empty?
-        preemit_stage_tasks(state, "resolving")
         state.transition_to("resolving")
         selected = dispatch_role_task(state, "resolution", selected, env,
                                       fallback_generic: fallback_generic)
       when "resolving"
         latest = state.to_h
         if latest.fetch("pending_arbiter_subjects").any?
-          preemit_stage_tasks(state, "arbitrating")
           state.transition_to("arbitrating")
           selected = dispatch_role_task(state, "arbiter", selected, env,
                                         fallback_generic: fallback_generic)
@@ -302,7 +297,6 @@ module AdversarialReview
           state.transition_to("complete")
         end
       when "fresh-sweep"
-        preemit_stage_tasks(state, "deduplicating")
         state.transition_to("deduplicating")
         selected = dispatch_role_task(state, "dedupe", selected, env,
                                       fallback_generic: fallback_generic)
@@ -697,7 +691,7 @@ module AdversarialReview
       )
     end
 
-    def attack_roster_pending?(state, selected, env)
+    def attack_roster_pending?(state, selected, env, fallback_generic: false)
       snapshot = state.to_h
       manifest = state.manifest_snapshot
       round = snapshot.fetch("revise_round")
@@ -716,21 +710,25 @@ module AdversarialReview
                         {"task_ids" => unexpected.sort})
       end
       unless (expected - observed).empty?
-        dispatch_attack_tasks(state, selected, env, fallback_generic: false)
+        dispatch_attack_tasks(
+          state, selected, env, fallback_generic: fallback_generic
+        )
         return true
       end
-      expected.any? { |task_id| !snapshot.fetch("ingested_results").key?(task_id) }
+      false
     end
 
-    def stage_roster_pending?(state, selected, env)
+    def stage_roster_pending?(state, selected, env, fallback_generic: false)
       snapshot = state.to_h
       stage = snapshot.fetch("stage")
-      return attack_roster_pending?(state, selected, env) if %w[attacking fresh-sweep].include?(stage)
+      return attack_roster_pending?(
+        state, selected, env, fallback_generic: fallback_generic
+      ) if %w[attacking fresh-sweep].include?(stage)
 
       if stage == "awaiting-author"
         task_id = "author-actions-parent-r#{snapshot.fetch("revise_round")}-a1"
         if snapshot.fetch("emitted_tasks").key?(task_id)
-          return !snapshot.fetch("ingested_results").key?(task_id)
+          return false
         end
       end
 
@@ -786,42 +784,25 @@ module AdversarialReview
         end
         return true
       end
-      tasks.any? do |task|
-        !snapshot.fetch("ingested_results").key?(task.fetch("task_id"))
-      end
+      false
     end
 
-    def preemit_stage_tasks(state, next_stage)
-      snapshot = state.to_h
-      manifest = state.manifest_snapshot
-      tasks = case next_stage
-              when "deduplicating"
-                [Prompts.role_task(manifest, snapshot, "dedupe")]
-              when "culling", "culling-new-findings"
-                if manifest.fetch("tier") == "ultra"
-                  voters = %w[voter-1 voter-2 voter-3]
-                  vote_group = "VG-cull-r#{snapshot.fetch("revise_round")}"
-                  voters.map do |voter|
-                    Prompts.role_task(
-                      manifest, snapshot, "judge", voter_id: voter,
-                      voter_ids: voters, vote_group_id: vote_group
-                    )
-                  end
-                else
-                  [Prompts.role_task(manifest, snapshot, "judge")]
-                end
-              when "awaiting-author"
-                [Prompts.parent_action_task(manifest, snapshot)]
-              when "resolving"
-                [Prompts.role_task(manifest, snapshot, "resolution")]
-              when "arbitrating"
-                [Prompts.role_task(manifest, snapshot, "arbiter")]
-              else
-                []
-              end
-      tasks.each do |task|
-        next if snapshot.fetch("emitted_tasks").key?(task.fetch("task_id"))
-        state.create_task_bundle(task.fetch("task_id")) { task }
+    def current_stage_pending_task_ids(snapshot, _manifest)
+      stage = snapshot.fetch("stage")
+      kind = case stage
+             when "attacking", "fresh-sweep" then "attack"
+             when "deduplicating" then "dedupe"
+             when "culling", "culling-new-findings" then "judge"
+             when "awaiting-author" then "author-actions"
+             when "resolving" then "resolution"
+             when "arbitrating" then "arbiter"
+             end
+      return [] unless kind
+
+      round = snapshot.fetch("revise_round")
+      pending_task_ids(snapshot).select do |task_id|
+        record = snapshot.fetch("emitted_tasks").fetch(task_id)
+        record.fetch("kind") == kind && record.fetch("round") == round
       end
     end
 

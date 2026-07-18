@@ -385,7 +385,8 @@ class AdversarialReviewCliTest < Minitest::Test
       ["awaiting-author", "revise", "default", "author-actions", 1],
       ["resolving", "revise", "default", "resolution", 1],
       ["arbitrating", "revise", "default", "arbiter", 1],
-      ["fresh-sweep", "revise", "default", "attack", 7]
+      ["fresh-sweep", "revise", "default", "attack", 7],
+      ["culling-new-findings", "revise", "default", "judge", 1]
     ]
     cases.each do |stage, mode, tier, kind, expected_count|
       with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
@@ -396,12 +397,14 @@ class AdversarialReviewCliTest < Minitest::Test
         run_dir = File.join(repository, ".git", "crash-#{stage}-#{tier}")
         state = AdversarialReview::State.create(run_dir, manifest)
         state.transition_to("attacking")
-        state.transition_to("deduplicating") if %w[deduplicating culling awaiting-author resolving arbitrating fresh-sweep].include?(stage)
-        state.transition_to("culling") if %w[culling awaiting-author resolving arbitrating fresh-sweep].include?(stage)
-        state.transition_to("awaiting-author") if %w[awaiting-author resolving arbitrating fresh-sweep].include?(stage)
-        state.transition_to("resolving") if %w[resolving arbitrating fresh-sweep].include?(stage)
+        state.transition_to("deduplicating") if %w[deduplicating culling awaiting-author resolving arbitrating fresh-sweep culling-new-findings].include?(stage)
+        state.transition_to("culling") if %w[culling awaiting-author resolving arbitrating fresh-sweep culling-new-findings].include?(stage)
+        state.transition_to("awaiting-author") if %w[awaiting-author resolving arbitrating fresh-sweep culling-new-findings].include?(stage)
+        state.transition_to("resolving") if %w[resolving arbitrating fresh-sweep culling-new-findings].include?(stage)
         state.transition_to("arbitrating") if stage == "arbitrating"
-        state.transition_to("fresh-sweep") if stage == "fresh-sweep"
+        state.transition_to("fresh-sweep") if %w[fresh-sweep culling-new-findings].include?(stage)
+        state.transition_to("deduplicating") if stage == "culling-new-findings"
+        state.transition_to("culling-new-findings") if stage == "culling-new-findings"
 
         payload = AdversarialReview::CLI.continue_run(
           ["--run-dir", run_dir], env: {}, program_path: CLI
@@ -412,6 +415,117 @@ class AdversarialReviewCliTest < Minitest::Test
         assert_equal stage, payload.fetch("stage"), "#{stage}/#{tier} advanced past a missing roster"
         assert_equal expected_count, matching.length, "#{stage}/#{tier} roster"
         assert_equal expected_count, payload.fetch("pending_batch_size"), "#{stage}/#{tier} pending"
+      end
+    end
+  end
+
+  def test_crash_immediately_before_transition_leaves_no_future_stage_task
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = AdversarialReview::Manifest.build(
+        repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+        output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+      )
+      run_dir = File.join(repository, ".git", "before-transition-crash")
+      state = AdversarialReview::State.create(run_dir, manifest)
+      state.transition_to("attacking")
+      manifest.fetch("enabled_tasks").each do |angle|
+        task = AdversarialReview::Prompts.attack_task(manifest, angle, 1)
+        state.create_task_bundle(task.fetch("task_id")) { task }
+        state.ingest(task.fetch("task_id"), empty_result_for(task))
+      end
+      injected = Class.new(StandardError)
+      state.define_singleton_method(:transition_to) { |_next_stage| raise injected, "before transition" }
+
+      assert_raises(injected) do
+        AdversarialReview::State.stub(:load, state) do
+          AdversarialReview::CLI.continue_run(
+            ["--run-dir", run_dir], env: {}, program_path: CLI
+          )
+        end
+      end
+
+      snapshot = state.to_h
+      assert_equal "attacking", snapshot.fetch("stage")
+      future_tasks = snapshot.fetch("emitted_tasks").values.select do |task|
+        task.fetch("kind") == "dedupe"
+      end
+      assert_empty future_tasks
+    end
+  end
+
+  def test_legacy_future_task_pending_does_not_block_transition_and_is_adopted_once_afterward
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      manifest = AdversarialReview::Manifest.build(
+        repository: repository, spec: "docs/spec.md", tier: "default", mode: "critique",
+        output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+      )
+      run_dir = File.join(repository, ".git", "legacy-future-task")
+      state = AdversarialReview::State.create(run_dir, manifest)
+      state.transition_to("attacking")
+      manifest.fetch("enabled_tasks").each do |angle|
+        task = AdversarialReview::Prompts.attack_task(manifest, angle, 1)
+        state.create_task_bundle(task.fetch("task_id")) { task }
+        state.ingest(task.fetch("task_id"), empty_result_for(task))
+      end
+      future = AdversarialReview::Prompts.role_task(manifest, state.to_h, "dedupe")
+      state.create_task_bundle(future.fetch("task_id")) { future }
+
+      payload = AdversarialReview::CLI.continue_run(
+        ["--run-dir", run_dir], env: {}, program_path: CLI
+      )
+
+      snapshot = AdversarialReview::State.load(run_dir).to_h
+      assert_equal "deduplicating", payload.fetch("stage")
+      dedupe_ids = snapshot.fetch("emitted_tasks").select do |_id, task|
+        task.fetch("kind") == "dedupe"
+      end.keys
+      assert_equal [future.fetch("task_id")], dedupe_ids
+      assert_equal 1, payload.fetch("pending_batch_size")
+      accept_all_pending_for_test(AdversarialReview::State.load(run_dir))
+      advanced = AdversarialReview::CLI.continue_run(
+        ["--run-dir", run_dir], env: {}, program_path: CLI
+      )
+      assert_equal "culling", advanced.fetch("stage")
+    end
+  end
+
+  def test_before_transition_fault_matrix_never_publishes_next_stage_roster
+    %w[attacking deduplicating culling awaiting-author resolving fresh-sweep culling-new-findings].each do |source_stage|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        mode = source_stage == "culling" ? "critique" : "revise"
+        manifest = AdversarialReview::Manifest.build(
+          repository: repository, spec: "docs/spec.md", tier: "default", mode: mode,
+          output: "chat", executor: "generic", model: "inherit", effort: "inherit"
+        )
+        run_dir = File.join(repository, ".git", "before-#{source_stage}")
+        state = AdversarialReview::State.create(run_dir, manifest)
+        state.transition_to("attacking")
+        state.transition_to("deduplicating") if %w[deduplicating culling awaiting-author resolving fresh-sweep culling-new-findings arbitrating].include?(source_stage)
+        state.transition_to("culling") if %w[culling awaiting-author resolving fresh-sweep culling-new-findings arbitrating].include?(source_stage)
+        state.transition_to("awaiting-author") if %w[awaiting-author resolving fresh-sweep culling-new-findings arbitrating].include?(source_stage)
+        state.transition_to("resolving") if %w[resolving fresh-sweep culling-new-findings arbitrating].include?(source_stage)
+        state.transition_to("fresh-sweep") if %w[fresh-sweep culling-new-findings].include?(source_stage)
+        state.transition_to("deduplicating") if source_stage == "culling-new-findings"
+        state.transition_to("culling-new-findings") if source_stage == "culling-new-findings"
+        state.transition_to("arbitrating") if source_stage == "arbitrating"
+
+        AdversarialReview::CLI.continue_run(
+          ["--run-dir", run_dir], env: {}, program_path: CLI
+        )
+        accept_all_pending_for_test(state)
+        before_ids = state.to_h.fetch("emitted_tasks").keys.sort
+        injected = Class.new(StandardError)
+        state.define_singleton_method(:transition_to) { |_next_stage| raise injected, "before transition" }
+
+        assert_raises(injected, source_stage) do
+          AdversarialReview::State.stub(:load, state) do
+            AdversarialReview::CLI.continue_run(
+              ["--run-dir", run_dir], env: {}, program_path: CLI
+            )
+          end
+        end
+
+        assert_equal before_ids, state.to_h.fetch("emitted_tasks").keys.sort, source_stage
       end
     end
   end
@@ -2294,6 +2408,7 @@ class AdversarialReviewCliTest < Minitest::Test
     when "dedupe" then base.merge("groups" => [])
     when "judge" then base.merge("verdicts" => [], "metrics" => {})
     when "resolution" then base.merge("checks" => [], "new_findings" => [], "metrics" => {})
+    when "arbiter" then base.merge("decisions" => [], "metrics" => {})
     else
       raise "unsupported empty result task: #{kind}"
     end
@@ -2419,6 +2534,38 @@ class AdversarialReviewCliTest < Minitest::Test
       task = nil
       state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
       task
+    end
+  end
+
+  def accept_all_pending_for_test(state)
+    snapshot = state.to_h
+    snapshot.fetch("emitted_tasks").each_key do |task_id|
+      next if snapshot.fetch("ingested_results").key?(task_id)
+
+      task = nil
+      state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+      if task["authority"] == "parent"
+        payload = {
+          "schema_version" => 1, "run_id" => task.fetch("run_id"),
+          "task_id" => task.fetch("task_id"),
+          "artifact_digests" => task.fetch("artifact_digests"),
+          "actions" => [], "notes" => []
+        }
+        state.accept_result(
+          task_id, payload, authority: "parent", capabilities: nil,
+          usage: {}, attempts: 0, runtime_provenance: {"source" => "fault-test"}
+        )
+      else
+        template = task.fetch("capability_declaration_template")
+        capabilities = AdversarialReview::Capabilities.normalize(
+          {}, requested_model: template.dig("model_selection", "requested"),
+          requested_effort: template.dig("effort_selection", "requested")
+        )
+        state.accept_result(
+          task_id, empty_result_for(task), authority: "reviewer", capabilities: capabilities,
+          usage: {}, attempts: 1, runtime_provenance: {"source" => "fault-test"}
+        )
+      end
     end
   end
 
