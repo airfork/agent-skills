@@ -138,6 +138,29 @@ m75's TASK-003 (29 attempts / 4 replans over a spec ambiguity) and m54's
 TASK-102 grind. Instruction-level and unvalidated; the next audit should
 check whether the verdict is actually recorded and whether it fires early.
 
+## Third field audit (2026-07-19)
+
+Five more runs (ai-civ m76/m77, exodus m34, kards-sim m55/m56), all
+new-format. The v1.4/v1.5 machinery is now field-validated: preflight-lint
+adopted with recorded dispositions (m55's run caught the PROJECT_STATUS
+ownership gap preflight instead of mid-run); run-verification used
+everywhere, including refusing a fabricated SHA (m77); diff-classified gate
+skips exercised (m55 "markdown-only ⇒ fast subset"); the oversized_evidence
+cap rejected a real 1121-char record (m55); the spec-attribution checkpoint
+fired with both implementation-shaped (m77 ×4) and contract-shaped verdicts
+(m34 → product-lead amendment; m55 → three trigger-3 escalations with owner
+reapproval); zero wrongful worker kills across all five (m34 quotes the
+snapshot-delta rules verbatim); the m33 allowlist bug did not recur; one
+`lite` profile use (m34's T2 recovery). v1.6 fixes from this round:
+`update-attempt` command (append-only attempts double-counted 17 dispatches
+against the budget in m34); `load_1m` in run-verification digests plus
+gates-run-alone policy (m55/m56 self-contaminated timing measurements);
+ledger disciplines (one attempt per dispatch, no `&&`-chained mutations
+after m55's silent short-circuit, commit STATE at task boundaries after
+m77's ledger destruction); blast-radius ownership rule (m77's five
+packet-scope errors); filter-coverage rule (m77 certified a red branch
+green); off-ledger RUN handoff warning (m76's invisible RUN).
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and

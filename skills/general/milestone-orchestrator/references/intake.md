@@ -78,6 +78,14 @@ approved rather than running one oversized milestone. Longer unattended runs
 also compound coordinator-recovery and drift risk; splitting is the cheaper
 failure containment.
 
+**Ownership must cover the SPEC's blast radius.** Walk each task's SPEC
+sections and list every file the change can plausibly touch or break —
+including the test files that adjudicate it — before freezing `owned_paths`
+and per-task verification filters. A field run spent both its replans and
+five coordinator packet-scope errors on the same root cause: "the approved
+PLAN's path-ownership map does not cover the blast radius of its own SPEC."
+The plan review (either depth) must check this mapping explicitly.
+
 `PLAN.md` also records the **execution profile** (`full` or `lite`, per the
 SKILL.md table) with its rationale, the grounding digest (or a pointer to
 `DIGEST.md`), and the computed worker-dispatch budget. The profile is part of
@@ -217,6 +225,11 @@ To run on the recommended RUN tier, start a fresh session and invoke:
 needed. To continue here instead (this session's model: <model>), say
 "continue into RUN" — fine when this model already matches the RUN tier.
 ```
+
+The cheaper session must still be a milestone-orchestrator `run` operating
+the STATE ledger — handing the approved packet to an ad hoc implementation
+thread saves the same model cost but forfeits supervision, acceptance gates,
+and the audit trail (a field run did this and its RUN is simply invisible).
 
 Substitute the real slug, checkpoint SHA, session model, and the RUN routes
 recorded at preflight; drop host lines that don't apply to this environment.

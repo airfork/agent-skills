@@ -167,6 +167,38 @@ class MilestoneOrchestratorControlStateTest < Minitest::Test
     assert_equal before, File.read(@state_path)
   end
 
+  def test_update_attempt_moves_dispatch_to_terminal_status
+    lease = acquire
+    attempt = {"attempt" => 1, "status" => "dispatched", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
+    run_control("record-attempt", "TASK-001", "--attempt-json", attempt, *fenced("coordinator", lease))
+    patch = {"status" => "completed", "result_commits" => ["e" * 40], "evidence" => "digest ref"}.to_json
+    _out, _err, exit_code = run_control("update-attempt", "TASK-001", "1", "--patch-json", patch,
+                                        *fenced("coordinator", lease))
+    assert_equal 0, exit_code
+    task = read_state(@state_path)["tasks"]["TASK-001"]
+    assert_equal 1, task["attempts"].length
+    assert_equal "completed", task["attempts"][0]["status"]
+    assert_equal ["e" * 40], task["attempts"][0]["result_commits"]
+  end
+
+  def test_update_attempt_to_failed_increments_failure_count
+    lease = acquire
+    attempt = {"attempt" => 1, "status" => "dispatched", "route" => "sonnet", "base_sha" => "c" * 40}.to_json
+    run_control("record-attempt", "TASK-001", "--attempt-json", attempt, *fenced("coordinator", lease))
+    _out, _err, exit_code = run_control("update-attempt", "TASK-001", "1", "--patch-json",
+                                        {"status" => "failed"}.to_json, *fenced("coordinator", lease))
+    assert_equal 0, exit_code
+    assert_equal 1, read_state(@state_path)["tasks"]["TASK-001"]["failure_count"]
+  end
+
+  def test_update_attempt_unknown_number_rejected
+    lease = acquire
+    _out, stderr, exit_code = run_control("update-attempt", "TASK-001", "7", "--patch-json",
+                                          {"status" => "completed"}.to_json, *fenced("coordinator", lease))
+    assert_equal 1, exit_code
+    assert_match(/no attempt 7/i, stderr)
+  end
+
   def test_advance_stage_requires_completed_attempt
     lease = acquire
     before = File.read(@state_path)

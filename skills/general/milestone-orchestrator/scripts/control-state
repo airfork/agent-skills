@@ -10,6 +10,7 @@
 #   control-state STATE.md set-phase PHASE --owner ID --token N
 #   control-state STATE.md set-epoch N --owner ID --token N
 #   control-state STATE.md record-attempt TASK --attempt-json JSON --owner ID --token N
+#   control-state STATE.md update-attempt TASK ATTEMPT_N --patch-json JSON --owner ID --token N
 #   control-state STATE.md advance-stage TASK STAGE --owner ID --token N
 #   control-state STATE.md set-condition TASK CONDITION --owner ID --token N
 #   control-state STATE.md record-resource ID --kind K --host-id H [--task T] --owner ID --token N
@@ -202,6 +203,32 @@ when "record-attempt"
       journal_note = "#{task_id} circuit opened after #{task["failure_count"]} failures"
     end
   end
+when "update-attempt"
+  task_id = positional[0] || usage!("update-attempt requires a task id")
+  attempt_number = Integer(positional[1] || usage!("update-attempt requires an attempt number"))
+  raw = options["patch-json"] || usage!("update-attempt requires --patch-json")
+  begin
+    patch = JSON.parse(raw)
+  rescue JSON::ParserError => e
+    usage!("--patch-json does not parse: #{e.message}")
+  end
+  task = fetch_task(state, task_id)
+  attempt = (task["attempts"] || []).find { |a| a.is_a?(Hash) && a["attempt"] == attempt_number }
+  reject!("no attempt #{attempt_number} recorded on #{task_id}") if attempt.nil?
+  if patch.key?("status")
+    new_status = patch["status"]
+    reject!("attempt status #{new_status.inspect} is not one of #{ATTEMPT_STATUSES.join(", ")}") \
+      unless ATTEMPT_STATUSES.include?(new_status)
+    if new_status == "failed" && attempt["status"] != "failed"
+      task["failure_count"] = task.fetch("failure_count", 0) + 1
+      budget = state.dig("budgets", "task_failures")
+      if budget && task["failure_count"] >= budget
+        task["condition"] = "circuit-open"
+        journal_note = "#{task_id} circuit opened after #{task["failure_count"]} failures"
+      end
+    end
+  end
+  attempt.merge!(patch)
 when "advance-stage"
   task_id = positional[0] || usage!("advance-stage requires a task id")
   stage = positional[1] || usage!("advance-stage requires a stage")

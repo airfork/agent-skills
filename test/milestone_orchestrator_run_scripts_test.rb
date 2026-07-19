@@ -68,6 +68,7 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
     assert File.file?(digest["log"])
     assert_includes File.read(digest["log"]), "ok"
     assert digest["tail"].any? { |l| l.include?("ok") }
+    assert_kind_of Float, digest["load_1m"]
   end
 
   def test_failing_command_exits_one_with_fail_digest

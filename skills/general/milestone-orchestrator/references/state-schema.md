@@ -21,6 +21,26 @@ remote-ref-expectation check before any push.
 Templates may use angle-bracket instructional tokens (`<like-this>`); an
 initialized RUN state may not contain unresolved tokens.
 
+Three ledger disciplines field runs learned expensively:
+
+- **One attempt entry per physical dispatch.** Record the entry at dispatch
+  (`record-attempt`, status `dispatched`) and move it to its terminal status
+  with `update-attempt` — never append a second entry for the same dispatch.
+  A run that appended dispatched+completed pairs double-counted 17 dispatches
+  against its budget and had to raise the ceiling for pure accounting. A
+  composite review round (attackers, judges, dedupe) is one attempt with the
+  role roster in its evidence, not one attempt per role.
+- **Never chain control-state mutations with `&&`.** A rejected mutation
+  exits nonzero and silently short-circuits everything chained after it — a
+  field run's rejected `record-attempt` skipped the chained `advance-stage`,
+  leaving git saying integrated while STATE said pending. Run each mutation
+  as its own command and check its result.
+- **Commit STATE.md at every task boundary.** An uncommitted ledger is one
+  stray `git checkout -- .` away from destruction — a field run lost ~405
+  lines of RUN history that way and had to reconstruct from git and
+  adjudication evidence. Checkpoint commits of the ledger are cheap;
+  reconstruction is not.
+
 ## PLAN canonical block
 
 ````markdown

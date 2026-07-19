@@ -129,6 +129,17 @@ manual rescue. Therefore:
   provably docs/comments/test-annotations only (check `git diff --stat`
   against the last certified SHA) runs the fast subset instead — record the
   classification with the evidence. When unsure, run the gate.
+- **Timing-sensitive gates run alone.** Two field coordinators contaminated
+  their own benchmark/wall-clock measurements by running concurrent agents or
+  commands during the gate. When a gate's duration or timing is part of the
+  evidence, nothing else runs during it; the `load_1m` field in the
+  run-verification digest is the adjudication record — treat a high-load
+  result as suspect rather than escalating on it.
+- **Task-local verification filters must cover the task's owned paths.** A
+  field run's adjudication filter excluded exactly the test files the change
+  broke, certifying a red branch green. When registering per-task fast
+  commands in PLAN, include every test project/module that covers the task's
+  owned paths; when in doubt, widen the filter.
 
 ## Review and remediation loop
 

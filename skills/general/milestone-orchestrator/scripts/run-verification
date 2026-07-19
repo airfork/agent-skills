@@ -137,6 +137,11 @@ File.open(log_path, "w") do |log|
 end
 duration = (Time.now - started).round(1)
 
+# Machine load at completion — timing-sensitive gates on shared boxes get
+# discarded to contention; recording load makes that adjudicable from the
+# digest instead of a post-hoc investigation.
+load_1m = `uptime 2>/dev/null`[/load averages?:?\s+([\d.]+)/, 1]&.to_f
+
 pass = !timed_out && exit_code == 0
 tail_lines = pass ? PASS_TAIL_LINES : FAIL_TAIL_LINES
 tail = File.open(log_path) do |f|
@@ -151,6 +156,7 @@ puts JSON.generate(
   "exit_code" => exit_code,
   "timed_out" => timed_out,
   "duration_seconds" => duration,
+  "load_1m" => load_1m,
   "log" => log_path,
   "tail" => tail
 )
