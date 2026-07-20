@@ -170,30 +170,20 @@ class PromptEngineerSkillContractTest < Minitest::Test
       "Ecosystem",
       "scripts/prompt-engineer-eval",
       "scripts/prompt-engineer-sandbox",
-      "scripts/prompt-engineer-cutover",
       "UNMEASURED",
       "BLOCKED",
       "measurement statuses",
       "INCONCLUSIVE",
       "PROMPT_ENGINEER_MAX_USD",
       "eight hours",
-      "separate explicit cutover approval",
-      "activation commit",
-      "scripts/prompt-engineer-cutover rollback",
-      "post-cutover use record",
-      "five qualifying uses on each host",
-      "later explicit cleanup request"
+      "Cutover evaluation is currently fail-closed",
+      "no mutation or rollback command"
     ].each { |term| assert_includes usage, term }
-    assert_match(/clean\s+stable\s+checkout/, usage)
+    refute_includes usage, "scripts/prompt-engineer-cutover"
 
-    %w[
-      scripts/prompt-engineer-eval
-      scripts/prompt-engineer-sandbox
-      scripts/prompt-engineer-cutover
-    ].each do |cli|
-      assert_match(/#{Regexp.escape(cli)}[^\n]*planned\/deferred[^\n]*implementation commits land/i, commands)
-      refute_match(/#{Regexp.escape(cli)}[^\n]*available/i, commands)
-    end
+    assert_match(/scripts\/prompt-engineer-eval[^\n]*fail-closed/i, commands)
+    assert_match(/scripts\/prompt-engineer-sandbox[^\n]*unsupported/i, commands)
+    refute_includes commands, "scripts/prompt-engineer-cutover"
     refute_match(/\brtk\b/, commands)
   end
 

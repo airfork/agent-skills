@@ -8,7 +8,7 @@ module PromptEngineer
   class RunStore
     class Error < StandardError; end
 
-    ARMS = %w[legacy replacement implicit].freeze
+    ARMS = %w[legacy replacement unassisted].freeze
     DIGEST = /\A[0-9a-f]{64}\z/.freeze
     MAX_RECORD_BYTES = 1_048_576
     MAX_EXPORT_BYTES = 16 * 1_024 * 1_024
@@ -326,10 +326,10 @@ module PromptEngineer
       corpus.trigger_records.each do |trigger|
         if trigger.fetch("expected_activation")
           Corpus::HOSTS.each { |host| tasks << task_for_node("trigger", nil, host, "replacement", 0, trigger, corpus) }
-          tasks << task_for_node("trigger", nil, "codex", "implicit", 0, trigger, corpus)
+          tasks << task_for_node("trigger", nil, "codex", "unassisted", 0, trigger, corpus)
         else
-          tasks << task_for_node("trigger", nil, "codex", "implicit", 0, trigger, corpus)
-          tasks << task_for_node("trigger", nil, "claude", "implicit", 0, trigger, corpus)
+          tasks << task_for_node("trigger", nil, "codex", "unassisted", 0, trigger, corpus)
+          tasks << task_for_node("trigger", nil, "claude", "unassisted", 0, trigger, corpus)
         end
       end
       raise Error, "base DAG count is not frozen" unless tasks.length == 130

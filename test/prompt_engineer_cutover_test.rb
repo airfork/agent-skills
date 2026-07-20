@@ -19,12 +19,31 @@ class PromptEngineerCutoverTest < Minitest::Test
 
   def test_even_a_ready_shape_cannot_apply_without_explicit_mutating_implementation
     decision = PromptEngineer::Cutover.evaluate(
-      qualification: "PASS",
-      capabilities: {"codex" => {"status" => "supported"}, "claude" => {"status" => "supported"}},
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: supported_capabilities,
       runtime: "ruby-2.6",
       sandbox: "supported"
     )
     assert_equal "READY", decision.fetch("decision")
     assert_raises(PromptEngineer::Cutover::Error) { PromptEngineer::Cutover.apply!(decision) }
+  end
+
+  private
+
+  def supported_capabilities
+    %w[codex claude].each_with_object({}) do |host, result|
+      result[host] = {
+        "host" => host,
+        "status" => "supported",
+        "normalizer" => "native",
+        "reason" => "verified native evidence",
+        "evidence" => {
+          "root" => "/tmp/prompt-engineer-evidence",
+          "artifact" => "#{host}/export-capabilities.json",
+          "pointer" => "#/",
+          "sha256" => "a" * 64
+        }
+      }
+    end
   end
 end

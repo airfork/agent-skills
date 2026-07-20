@@ -48,9 +48,8 @@ Choose the lightest profile that can support the claim:
 required evidence is missing, the final decision label remains `INCONCLUSIVE`.
 
 The checked-in qualification surface is provided by
-`scripts/prompt-engineer-eval`, with host isolation through
-`scripts/prompt-engineer-sandbox` and lifecycle controls through
-`scripts/prompt-engineer-cutover`. Qualification requires an explicit positive
+`scripts/prompt-engineer-eval`, with host-boundary checks through
+`scripts/prompt-engineer-sandbox`. Qualification requires an explicit positive
 `PROMPT_ENGINEER_MAX_USD` ceiling, an operator-selected model and effort for
 each host, and a maximum operator budget of eight hours. The fixed run budgets
 are 96 behavioral executor runs, 40 trigger runs, and at most 64 judge runs;
@@ -58,20 +57,12 @@ there is no implicit monetary or time expansion.
 
 ### Cutover, rollback, and retention
 
-Qualification produces a report and stops. Cutover begins only from a clean stable
-checkout whose exact qualified commit and package bytes are revalidated.
-The operator reviews and separately approves the canonical preview before
-`prepare` or `apply`; the activation commit is created only after the isolated
-filesystem transition and verification succeed. A failed or rejected
-activation is reverted before filesystem rollback. Use
-`scripts/prompt-engineer-cutover rollback --transaction PATH` before activation,
-or provide the exact activation revert commit after activation.
-
-The post-cutover use record includes timestamp, host and model versions,
-invocation mode, anonymized task category, outcome, and evidence location.
-Retain each host's legacy backup until five qualifying uses on each host are
-recorded and the retention gate passes. Backup deletion is unavailable here and
-requires a later explicit cleanup request and reviewed cleanup change.
+Qualification produces a report and stops. Cutover evaluation is currently fail-closed:
+the checked-in gate only evaluates scorer decisions, exact Codex and Claude capability records, Ruby
+compatibility, and sandbox evidence; it returns fail-closed results and exposes
+no mutation or rollback command. Live cutover, backup retention, and deletion
+remain unavailable until a separately reviewed implementation and explicit
+operator approval exist.
 
 ## `adversarial-review`
 

@@ -10,6 +10,7 @@ module PromptEngineer
     RELEASE_DECISIONS = %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT NOT_QUALIFIED INCONCLUSIVE].freeze
     STABILITY_SESSION_CAP = 18
     TARGETED_SESSION_CAP = 6
+    NEGATIVE_TRIGGER_RUNS = 16
 
     class MaskedPacket
       attr_reader :document, :rubric, :label_map, :packet_digest,
@@ -191,6 +192,7 @@ module PromptEngineer
       return decision_payload("NOT_QUALIFIED", "aggregate score gate failed", evidence, aggregate: aggregate, outcomes: outcomes) unless aggregate_gate?(aggregate, hosts)
       return decision_payload("NOT_QUALIFIED", "efficiency gate failed", evidence, aggregate: aggregate, outcomes: outcomes) unless efficiency_gate?(evidence.fetch("efficiency"))
       return decision_payload("NOT_QUALIFIED", "explicit trigger gate failed", evidence, aggregate: aggregate, outcomes: outcomes) unless explicit_trigger_gate?(evidence)
+      return decision_payload("NOT_QUALIFIED", "negative trigger gate failed", evidence, aggregate: aggregate, outcomes: outcomes) unless negative_trigger_gate?(evidence)
       decision_payload("QUALIFIED_EXPLICIT", "all explicit release gates passed", evidence, aggregate: aggregate, outcomes: outcomes)
     rescue KeyError, TypeError => error
       raise Error, "malformed release evidence: #{error.message}"
@@ -387,6 +389,14 @@ module PromptEngineer
       explicit.fetch("passed") == explicit.fetch("total") && explicit.fetch("total") == Budget::EXPLICIT_TRIGGER_RUNS
     end
     private_class_method :explicit_trigger_gate?
+
+    def negative_trigger_gate?(evidence)
+      negative = evidence.fetch("negative_triggers")
+      negative.keys.sort == %w[total unexpected_activation] &&
+        negative.fetch("unexpected_activation") == 0 &&
+        negative.fetch("total") == NEGATIVE_TRIGGER_RUNS
+    end
+    private_class_method :negative_trigger_gate?
 
     def decision_payload(decision, reason, evidence, aggregate: nil, outcomes: nil)
       payload = {"decision" => decision, "reason" => reason}

@@ -16,9 +16,8 @@ commands.
 | `scripts/archive-clean` | Remove only named release/archive output paths. | Removes only untracked generated paths listed by the script. |
 | `scripts/sync-skills --target codex --dry-run` | Preview managed skill symlink changes. | Read-only. |
 | `scripts/sync-skills --target codex --apply` | Apply managed Codex skill symlink changes when explicitly requested. | Changes the selected global skill directory. |
-| `scripts/prompt-engineer-eval` | Planned/deferred until implementation commits land; the explicit prompt-engineer qualification CLI is absent from this checkout. | No state change until implementation lands. |
-| `scripts/prompt-engineer-sandbox` | Planned/deferred until implementation commits land; the isolated Codex and Claude qualification launcher is absent from this checkout. | No state change until implementation lands. |
-| `scripts/prompt-engineer-cutover` | Planned/deferred until implementation commits land; the explicit cutover and retention CLI is absent from this checkout. | No state change until implementation lands. |
+| `scripts/prompt-engineer-eval` | Prepare, inspect, score, and report prompt-engineer qualification artifacts. Host execution and native ingestion remain fail-closed. | Depends on the subcommand; run roots and output paths are explicit. |
+| `scripts/prompt-engineer-sandbox` | Validate sandbox packets and report the current host capability boundary. | Read-only; live launch is unsupported. |
 | `scripts/run-codex-5.6-skill-review <luna\|terra\|sol>` | Run the existing model-bound compatibility review. | May update its report only after a successful review. |
 | `scripts/prompt-engineer-eval <subcommand>` | Prepare, inspect, score, and report prompt-engineer evaluation artifacts without launching a host. | Depends on the subcommand; live host operations are fail-closed. |
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start --repository /absolute/path/to/reviewed/repository --spec docs/spec.md --plan docs/plan.md --executor generic --model MODEL --effort EFFORT` | Start a portable adversarial-review run from the installed skill, targeting an explicit repository. | Creates durable run state; defaults to chat and sibling report output. |
@@ -48,10 +47,11 @@ scripts/prompt-engineer-eval status
 scripts/prompt-engineer-eval status --run-dir RUN_DIR
 ```
 
-The remaining deterministic artifact commands are available through explicit
+The remaining deterministic artifact commands are accepted by explicit
 dispatch: `policy`, `prepare`, `next`, `ingest`, `judge-packet`, `judge-ingest`,
 `score`, `close`, and `report`. Host-dependent execution, native export
 normalization, and judge-host ingestion fail closed until native evidence and
-adapters are available. Run roots, corpus/package paths, evidence files, and
-report destinations are explicit external paths; no ambient home or network
-state is consulted.
+adapters are available. The cutover gate is a library-only fail-closed check;
+there is no cutover mutation command in this checkout. Run roots, corpus/package
+paths, evidence files, and report destinations are explicit external paths; no
+ambient home or network state is consulted.
