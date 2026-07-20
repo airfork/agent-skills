@@ -30,17 +30,19 @@ Use for a consequential change to one prompt or one prompt-bearing skill.
 2. Create one minimal candidate and record its exact text.
 3. Run baseline and candidate in fresh, equivalent contexts with symmetric
    inputs and available tools. Mask or randomize variant labels where practical.
-4. Score the same criteria for both variants, record regressions and missing
-   observations, and decide whether the claim is supported.
+4. Evaluate the same criteria for baseline and candidate, record regressions
+   and missing observations, and decide whether the claim is supported.
 
 ### Minimum acceptance
 
 The Standard profile's comparable evidence is a baseline and candidate run in
-fresh, equivalent contexts with symmetric inputs, tools, and data. `Supported`
-is allowed only when the same observable success criteria pass for both
-contexts and every zero-tolerance failure check passes for the candidate. If
-the paired comparison or any required evidence is missing, use
-`INCONCLUSIVE`.
+fresh, equivalent contexts with symmetric inputs, tools, and data. Evaluate the
+same criteria for baseline and candidate. `Supported` is allowed only when the
+candidate meets the success criteria, every candidate zero-tolerance failure
+check passes, and the candidate introduces no regression. Baseline failure is
+comparison evidence, not an automatic rejection; a passing candidate can be
+`Supported` even when the baseline fails under those conditions. If the paired
+comparison or any required evidence is missing, use `INCONCLUSIVE`.
 
 If the contexts, inputs, tools, or observations are not comparable, report
 `INCONCLUSIVE` rather than filling the gap with confidence or authority.

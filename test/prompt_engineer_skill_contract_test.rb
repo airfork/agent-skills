@@ -96,6 +96,17 @@ class PromptEngineerSkillContractTest < Minitest::Test
     assert_includes evaluation, "inconclusive"
   end
 
+  def test_standard_can_support_candidate_improvement_when_baseline_fails
+    evaluation = File.read(File.join(SKILL_DIR, "references", "evaluation.md")).downcase
+    standard = evaluation.split("## standard", 2).fetch(1).split(/^## /, 2).first
+
+    assert_includes standard, "evaluate the same criteria for baseline and candidate"
+    assert_match(/baseline failure is\s+comparison evidence/, standard)
+    assert_includes standard, "candidate meets the success criteria"
+    assert_includes standard, "supported"
+    assert_includes standard, "zero-tolerance"
+  end
+
   def test_contexts_route_instruction_layers_tool_schema_and_embedded_components
     contexts = File.read(File.join(SKILL_DIR, "references", "prompt-contexts.md")).downcase
 
