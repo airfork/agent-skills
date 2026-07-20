@@ -17,6 +17,7 @@ module PromptEngineer
     PRIVATE_KEYS = %w[case_id rubric_points prohibited_behaviors zero_tolerance_gates judge_instructions].freeze
     LEGACY_LOCK_KEYS = %w[schema_version status repository commit legacy_path companion_path dependency_closure evidence].freeze
     LEGACY_EVIDENCE_KEYS = %w[status files object_ids aggregate_digest].freeze
+    MANIFEST_TREE_DIGEST_PATTERN = /(?<prefix>^[ \t]*tree_digest[ \t]*: *)(?<quote>["']?)[0-9a-f]{64}\k<quote>(?=[ \t]*(?:#.*)?(?:\r?\n|\z))/m.freeze
     LEGACY_PATH = "skills/scripts/skills/prompt_engineer"
     COMPANION_PATH = "skills/scripts/skills/lib"
     NOFOLLOW_FLAG = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : nil
@@ -97,9 +98,13 @@ module PromptEngineer
     end
 
     def self.manifest_binding_bytes(bytes)
-      manifest = Contracts.parse_yaml(bytes)
-      manifest["tree_digest"] = "0" * 64
-      Canonical.json(manifest)
+      replaced = bytes.sub(MANIFEST_TREE_DIGEST_PATTERN) do
+        match = Regexp.last_match
+        "#{match[:prefix]}#{match[:quote]}#{"0" * 64}#{match[:quote]}"
+      end
+      raise Error, "manifest tree_digest declaration not found" if replaced == bytes
+
+      replaced
     end
     private_class_method :manifest_binding_bytes
 

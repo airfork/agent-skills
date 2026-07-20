@@ -175,6 +175,13 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_includes point.fetch("required"), "status"
     assert_equal %w[pass fail uncertain], point.fetch("properties").fetch("status").fetch("enum")
     assert_includes point.fetch("required"), "citation_required"
+    assert_equal 1, dimensions.fetch("items").fetch("properties").fetch("point_results").fetch("minItems")
+    assert_includes point.fetch("required"), "citation"
+    assert_equal %w[string null], point.fetch("properties").fetch("citation").fetch("type")
+    assert_includes point.fetch("required"), "uncertainty"
+    uncertainty = point.fetch("properties").fetch("uncertainty")
+    assert_equal %w[none material], uncertainty.fetch("properties").fetch("classification").fetch("enum")
+    assert_includes uncertainty.fetch("required"), "reason"
     assert_equal false, judge.fetch("properties").fetch("timestamps").fetch("additionalProperties")
   end
 
@@ -200,13 +207,27 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal({}, PromptEngineer::Corpus.activation_diff(explicit, implicit).reject { |path, _| path == ["policy", "allow_implicit_invocation"] })
   end
 
-  def test_manifest_tree_digest_binding_ignores_yaml_quote_style
+  def test_manifest_tree_digest_binds_raw_formatting_comments_and_quote_bytes
     with_fixture_tree do |root|
       manifest_path = File.join(root, "manifest.yml")
-      bytes = File.binread(manifest_path)
-      File.write(manifest_path, bytes.sub(/tree_digest: "([0-9a-f]{64})"/, "tree_digest: '\\1'"))
-      corpus = PromptEngineer::Corpus.load(root)
-      assert_equal corpus.manifest.fetch("tree_digest"), corpus.tree_digest
+      original = File.binread(manifest_path)
+      baseline = PromptEngineer::Corpus.tree_digest(root)
+      variants = {
+        "quote" => original.sub('tree_digest: "', "tree_digest: '").sub("\"\n", "'\n"),
+        "format" => original.sub("schema_version: 1\n", "schema_version: 1  \n"),
+        "comment" => original.sub("tree_digest: \"", "# binding comment\ntree_digest: \"")
+      }
+
+      variants.each do |name, variant|
+        File.binwrite(manifest_path, variant)
+        variant_digest = PromptEngineer::Corpus.tree_digest(root)
+        refute_equal baseline, variant_digest, "#{name} bytes must affect the digest"
+
+        File.binwrite(manifest_path, manifest_with_digest(variant, variant_digest))
+        corpus = PromptEngineer::Corpus.load(root)
+        assert_equal variant_digest, corpus.tree_digest, "#{name} variant must load with its bound digest"
+        File.binwrite(manifest_path, original)
+      end
     end
   end
 
@@ -452,6 +473,24 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
   end
 
+  def test_lease_snapshot_deep_freezes_mutable_fields_without_aliasing_settlement_model
+    model = +"mutable:model"
+    budget = PromptEngineer::Budget.new(
+      money_limit: 50.0,
+      prices: {"mutable:model" => {"input" => 1.0, "output" => 2.0}},
+      session_timeout_seconds: 60
+    )
+
+    lease = budget.reserve!(model, {"input" => 10, "output" => 9})
+    assert lease.model.frozen?
+    refute_same model, lease.model
+
+    model.replace("unpriced:model")
+    settled = budget.settle!(lease.id, {"input" => 1, "output" => 2})
+    assert_equal :settled, settled.status
+    assert_equal 5.0, budget.spent
+  end
+
   def test_budget_ceilings_are_fixed_and_independent
     assert_contract_error PromptEngineer::Budget::Error, "fixed" do
       PromptEngineer::Budget.new(money_limit: 10, prices: {}, max_sessions: 1)
@@ -614,9 +653,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     paths.each do |relative|
       bytes = File.binread(File.join(root, relative))
       if relative == "manifest.yml"
-        manifest = PromptEngineer::Contracts.parse_yaml(bytes)
-        manifest["tree_digest"] = "0" * 64
-        bytes = PromptEngineer::Canonical.json(manifest)
+        bytes = manifest_with_digest(bytes, "0" * 64)
       end
       digest.update(relative.encode("UTF-8"))
       digest.update("\0")
@@ -624,6 +661,17 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       digest.update("\0")
     end
     digest.hexdigest
+  end
+
+  def manifest_with_digest(bytes, digest)
+    pattern = /(?<prefix>^[ \t]*tree_digest[ \t]*:[ \t]*)(?<quote>["']?)[0-9a-f]{64}\k<quote>(?=[ \t]*(?:#.*)?(?:\r?\n|\z))/m
+    replaced = bytes.sub(pattern) do
+      match = Regexp.last_match
+      "#{match[:prefix]}#{match[:quote]}#{digest}#{match[:quote]}"
+    end
+    raise "manifest tree_digest declaration not found" if replaced == bytes
+
+    replaced
   end
 
   def initialize_git_repository(root)

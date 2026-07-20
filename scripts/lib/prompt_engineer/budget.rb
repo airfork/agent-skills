@@ -88,7 +88,7 @@ module PromptEngineer
         raise Error, "session ceiling exceeded" if @session_counts[kind] >= SESSION_CAPS.fetch(kind)
         raise Error, "money ceiling exceeded" if @spent + @reserved + cost > @money_limit
         @next_id += 1
-        lease = Lease.new("lease-#{@next_id}", model, cost, timeout_seconds, :reserved,
+        lease = Lease.new("lease-#{@next_id}", deep_copy(model), cost, timeout_seconds, :reserved,
                           nil, nil, Time.now.to_i, kind)
         @leases[lease.id] = lease
         @reserved += cost
@@ -227,7 +227,7 @@ module PromptEngineer
     end
 
     def snapshot_lease(lease)
-      copy = Lease.new(*lease.to_a)
+      copy = Lease.new(*deep_copy(lease.to_a))
       deep_freeze(copy)
       copy.freeze
     end
@@ -263,18 +263,22 @@ module PromptEngineer
         value.each { |key, child| deep_freeze(key); deep_freeze(child) }
       when Array
         value.each { |child| deep_freeze(child) }
+      when Struct
+        value.each { |child| deep_freeze(child) }
       end
       value.freeze
     end
 
     def deep_copy(value)
       case value
-      when Hash
-        value.each_with_object({}) { |(key, child), copy| copy[deep_copy(key)] = deep_copy(child) }
-      when Array
-        value.map { |child| deep_copy(child) }
-      else
-        value
+        when Hash
+          value.each_with_object({}) { |(key, child), copy| copy[deep_copy(key)] = deep_copy(child) }
+        when Array
+          value.map { |child| deep_copy(child) }
+        when String
+          value.dup
+        else
+          value
       end
     end
     end
