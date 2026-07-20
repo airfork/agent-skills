@@ -951,7 +951,182 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
   end
 
+  def test_run_preparation_seals_inputs_and_builds_isolated_public_private_layout
+    with_prepared_store do |store, root|
+      manifest = store.manifest
+
+      assert_match(/\Arun-[0-9a-f-]{36}\z/, store.run_id)
+      assert_equal PromptEngineer::Corpus.load(CORPUS).tree_digest, manifest.fetch("corpus_digest")
+      assert_equal manifest.fetch("corpus_digest"), manifest.fetch("corpus_manifest_digest")
+      assert_equal directory_digest(File.join(REPO, "skills/general/prompt-engineer")), manifest.fetch("package_digest")
+      assert_equal PromptEngineer::Canonical.digest(PromptEngineer::Contracts.load_yaml(fixture("qualification-policy.example.yml"))), manifest.fetch("qualification_policy_digest")
+      assert_equal PromptEngineer::Canonical.digest(PromptEngineer::Contracts.load_yaml(fixture("legacy.lock.yml"))), manifest.fetch("legacy_lock_digest")
+      assert_equal %w[legacy replacement implicit], manifest.fetch("arm_labels").keys
+      manifest.fetch("arm_labels").each_value { |label| assert_match(/\Aarm-[0-9a-f]{24}\z/, label) }
+      refute_equal manifest.fetch("arm_labels").fetch("legacy"), manifest.fetch("arm_labels").fetch("replacement")
+      refute_includes manifest.fetch("arm_labels").values, "legacy"
+
+      assert_equal 72, manifest.fetch("dag").fetch("initial_count")
+      assert_equal 18, manifest.fetch("dag").fetch("stability_count")
+      assert_equal 40, manifest.fetch("dag").fetch("trigger_count")
+      assert_equal 0, manifest.fetch("dag").fetch("targeted_repeat_count")
+      assert_equal 0, manifest.fetch("dag").fetch("second_judge_count")
+
+      assert File.directory?(store.path("homes"))
+      assert File.directory?(store.path("outputs"))
+      assert File.directory?(store.path("scratch"))
+      assert_equal 0o700, File.stat(store.path("homes")).mode & 0o777
+      assert_equal 0o700, File.stat(store.path("outputs")).mode & 0o777
+      assert_equal 0o700, File.stat(store.path("scratch")).mode & 0o777
+      manifest.fetch("arm_labels").each_value do |label|
+        PromptEngineer::Corpus::HOSTS.each do |host|
+          assert File.directory?(store.path("homes", label, host))
+          assert_equal 0o700, File.stat(store.path("homes", label, host)).mode & 0o777
+        end
+      end
+
+      public_packet = store.public_packet("PE-001", "codex", "legacy")
+      private_packet = store.private_packet("PE-001", "codex", "legacy")
+      assert_equal "PE-001", public_packet.fetch("case").fetch("case_id")
+      assert_equal manifest.fetch("arm_labels").fetch("legacy"), public_packet.fetch("arm_label")
+      refute public_packet.key?("private")
+      assert_equal "PE-001", private_packet.fetch("case_id")
+      assert private_packet.fetch("rubric").key?("judge_instructions")
+      refute_equal public_packet, private_packet
+
+      assert_equal 0o600, File.stat(store.manifest_path).mode & 0o777
+      assert_equal 0o600, File.stat(store.ledger_path).mode & 0o777
+      assert_equal 130, store.pending_tasks.length
+      assert_equal store.manifest_digest, Digest::SHA256.hexdigest(File.binread(store.manifest_path))
+      assert_raises(FrozenError) { manifest.fetch("dag")["initial_count"] = 1 }
+      refute_empty Dir[File.join(root, "packets", "public", "*.json")]
+      refute_empty Dir[File.join(root, "packets", "private", "*.json")]
+    end
+  end
+
+  def test_run_preparation_refuses_ambient_environment_and_existing_run_roots
+    Dir.mktmpdir("prompt-engineer-run") do |parent|
+      existing = File.join(parent, "existing")
+      FileUtils.mkdir(existing)
+      assert_contract_error PromptEngineer::RunStore::Error, "exists" do
+        prepare_store(existing, environment: {"PATH" => "/bin", "UNDECLARED" => "secret"})
+      end
+      assert_empty Dir.children(existing)
+
+      run_root = File.join(parent, "new")
+      assert_contract_error PromptEngineer::RunStore::Error, "environment" do
+        prepare_store(run_root, environment: {"PATH" => "/bin", "UNDECLARED" => "secret"})
+      end
+      refute File.exist?(run_root)
+    end
+  end
+
+  def test_provenance_ingestion_binds_frozen_run_facts_and_copies_only_canonical_records
+    with_prepared_store do |store, _root|
+      task = store.claim_next!("test-worker")
+      record = executor_record_for(store, task)
+      raw_export = "native export bytes\n"
+      record["raw_export_digest"] = Digest::SHA256.hexdigest(raw_export)
+
+      assert PromptEngineer::Provenance.validate_executor_record!(record, store: store, task: task, raw_export: raw_export)
+      digest = store.ingest_executor!(record, raw_export: raw_export)
+      assert_match(/\A[0-9a-f]{64}\z/, digest)
+      assert File.file?(store.path("records", "executor", "#{digest}.json"))
+      assert_equal 1, store.ingested_records.length
+      refute_equal raw_export, File.binread(store.path("records", "executor", "#{digest}.json"))
+      assert_equal record, JSON.parse(File.binread(store.path("records", "executor", "#{digest}.json")))
+    end
+  end
+
+  def test_provenance_rejects_tampered_frozen_inputs_duplicate_nonces_and_closed_runs
+    with_prepared_store do |store, _root|
+      task = store.claim_next!("test-worker")
+      record = executor_record_for(store, task)
+      raw_export = "native export bytes\n"
+      record["raw_export_digest"] = Digest::SHA256.hexdigest(raw_export)
+      store.ingest_executor!(record, raw_export: raw_export)
+
+      duplicate = Marshal.load(Marshal.dump(record))
+      assert_contract_error PromptEngineer::Provenance::Error, "nonce" do
+        store.ingest_executor!(duplicate, raw_export: raw_export)
+      end
+
+      tampered = Marshal.load(Marshal.dump(record))
+      tampered["frozen_input_digests"]["corpus"] = "f" * 64
+      assert_contract_error PromptEngineer::Provenance::Error, "frozen input" do
+        PromptEngineer::Provenance.validate_executor_record!(tampered, store: store, task: task, raw_export: raw_export)
+      end
+
+      next_task = store.claim_next!("test-worker-2")
+      store.close!("budget exhausted")
+      closed_record = executor_record_for(store, next_task)
+      assert_contract_error PromptEngineer::RunStore::Error, "closed" do
+        store.ingest_executor!(closed_record, raw_export: raw_export)
+      end
+    end
+  end
+
   private
+
+  def with_prepared_store
+    Dir.mktmpdir("prompt-engineer-run-parent") do |parent|
+      root = File.join(parent, "run")
+      store = prepare_store(root, environment: {"PATH" => "/usr/bin", "LANG" => "C"})
+      yield store, root
+    end
+  end
+
+  def prepare_store(root, environment:)
+    PromptEngineer::RunStore.prepare(
+      run_root: root,
+      corpus: PromptEngineer::Corpus.load(CORPUS),
+      package_root: File.join(REPO, "skills/general/prompt-engineer"),
+      qualification_policy: fixture("qualification-policy.example.yml"),
+      legacy_lock: fixture("legacy.lock.yml"),
+      environment: environment
+    )
+  end
+
+  def directory_digest(root)
+    digest = Digest::SHA256.new
+    Dir.glob(File.join(root, "**", "*")).select { |path| File.file?(path) }.map do |path|
+      path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+    end.sort_by(&:b).each do |relative|
+      digest.update(relative.encode("UTF-8"))
+      digest.update("\0")
+      digest.update(File.binread(File.join(root, relative)))
+      digest.update("\0")
+    end
+    digest.hexdigest
+  end
+
+  def executor_record_for(store, task)
+    digest = lambda { |value| Digest::SHA256.hexdigest(value) }
+    {
+      "run_id" => store.run_id,
+      "case_id" => task.fetch("case_id"),
+      "host" => task.fetch("host"),
+      "arm" => task.fetch("arm"),
+      "nonce" => task.fetch("nonce"),
+      "session" => {"id" => task.fetch("session_id")},
+      "fresh_session_evidence" => {"native_session_id" => task.fetch("session_id"), "new_session" => true},
+      "raw_export_digest" => digest.call("native export bytes\n"),
+      "sandbox_launch_attestation_digest" => "a" * 64,
+      "expected_package_digest" => store.manifest.fetch("package_digest"),
+      "discovery_evidence" => {"digest" => "b" * 64, "source" => "sandbox"},
+      "invocation_evidence" => {"digest" => "c" * 64, "source" => "native"},
+      "frozen_input_digests" => {
+        "corpus" => store.manifest.fetch("corpus_digest"),
+        "package" => store.manifest.fetch("package_digest"),
+        "policy" => store.manifest.fetch("qualification_policy_digest"),
+        "legacy_lock" => store.manifest.fetch("legacy_lock_digest")
+      },
+      "exit_status" => {"code" => 0, "status" => "success"},
+      "timestamps" => {"started_at" => "2026-01-01T00:00:00Z", "ended_at" => "2026-01-01T00:00:01Z"},
+      "output_digests" => {"final" => digest.call("final output")},
+      "usage" => {"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
+    }
+  end
 
   def semantic_judge_result(rubric)
     dimensions = rubric.fetch("rubric_points").map do |dimension, points|
