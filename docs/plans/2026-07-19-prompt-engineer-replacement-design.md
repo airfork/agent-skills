@@ -1,7 +1,7 @@
 # Prompt Engineer Replacement — Design
 
 **Date:** 2026-07-19  
-**Status:** Draft specification; direction approved, awaiting user review  
+**Status:** Approved for implementation planning on 2026-07-19  
 **Placement:** `skills/general/prompt-engineer/`  
 **Initial interfaces:** Codex and Claude  
 **Deferred interfaces:** Cursor and Gemini
@@ -71,10 +71,11 @@ Qualification uses a small repository-owned CLI, `scripts/prompt-engineer-eval`,
 for the mechanical parts only: corpus validation, isolated packet preparation,
 arm staging, response ingestion, label masking, repeat eligibility, score
 arithmetic, and report generation. It never launches Codex or Claude. The
-operator starts every host session explicitly from the generated instructions
-and returns the exported response and provenance to the CLI. This hybrid keeps
-volatile host automation out of the repository while making the experiment's
-state and arithmetic reproducible.
+operator explicitly submits every generated launch packet to
+`scripts/prompt-engineer-sandbox`; that wrapper starts the selected host and
+returns its native export and provenance for CLI ingestion. This separation
+keeps host execution out of the evaluator while making isolation, state, and
+arithmetic reproducible.
 
 This design rejects two alternatives:
 
@@ -119,6 +120,10 @@ The package does not contain a README, paper archive, changelog, copied model
 documentation, executable qualification code, or mutable runtime state.
 Evaluation fixtures, tooling, and reports live in the repository test, script,
 and documentation trees rather than the installed skill.
+
+`SKILL.md` is at most 250 nonblank lines and each reference is at most 300
+nonblank lines. The limit is a contract against recreating the legacy framework,
+not a target to fill.
 
 ## Trigger contract
 
@@ -373,8 +378,10 @@ Before the first live session, `scripts/prompt-engineer-eval prepare`:
    append-only run manifest under an explicit run directory outside the
    repository.
 2. Validates a checked-in `legacy.lock.yml` containing the source repository,
-   commit `e16d537`, required legacy skill files, companion
-   `scripts/skills/prompt_engineer` and `skills/lib` paths, and per-file hashes.
+   full commit `e16d537c594b0f29a368726aa11bb4e5d704938f`, required legacy skill files,
+   companion `skills/scripts/skills/prompt_engineer` and transitive
+   `skills/scripts/skills/lib` paths relative to that Git root, and per-file
+   hashes.
    The operator supplies a local legacy source root; preparation never fetches
    unpinned network content.
 3. Creates a fresh home and public-only case workspace for each host/arm/run.
@@ -388,14 +395,17 @@ Before the first live session, `scripts/prompt-engineer-eval prepare`:
    is discoverable.
 4. Copies only `public.yml` and its declared artifacts into executor
    workspaces. Private rubrics remain outside the executor's filesystem root.
-5. Emits the exact operator launch instruction and expected result/provenance
-   record for one fresh session. The CLI does not run the host command.
+5. Seals the base work DAG and deterministic derivation rules. It emits no
+   launch instruction or nonce. `next` is the only operation that reserves
+   budget, leases work, assigns a nonce, and emits an operator launch packet.
 
 Executor exports use the checked-in
 `test/fixtures/prompt-engineer/schemas/executor-result-v1.yml` contract.
-Provider-specific normalizers live under
-`scripts/skills/prompt_engineer/exporters/` and convert immutable native Codex
-or Claude exports into the shared record without discarding the raw export.
+Provider-specific normalizers live under the repository-owned
+`scripts/lib/prompt_engineer/normalizers/` tree and convert immutable native
+Codex or Claude exports into the shared record without discarding the raw
+export. The legacy `skills/scripts/skills/prompt_engineer` tree remains only a
+locked qualification dependency and a cutover backup target.
 The normalized record requires:
 
 - Schema and run identifiers, case ID, host, opaque arm label, and repeat index.
@@ -438,13 +448,52 @@ packets are emitted.
 `scripts/prompt-engineer-eval` supports only these operations:
 
 ```text
-prepare       validate inputs and emit the next isolated launch packet
+choices       canonicalize explicit model, effort, timeout, and cap choices
+policy        build a canonical policy from authenticated probes and choices
+prepare       validate inputs and create the immutable run and pending queue
+next          atomically reserve and emit the next isolated launch packet
 ingest        validate one exported executor result and provenance record
 judge-packet  emit a private-rubric plus masked-output packet
 judge-ingest  validate one judge result and point-loss citations
 score         apply frozen repeat and release arithmetic
+status        report queue, reservations, budgets, and terminal state
+close         stop new launches and make unresolved work reportable
 report        render the qualification report from immutable records
 ```
+
+`choices` is the sole producer of the closed operator-choices record and refuses
+unknown or invalid values. `policy` validates a checked-in closed schema and
+builds the qualification-policy input from immutable capability evidence plus
+that canonical operator-choices record; a hand-authored file is never trusted
+merely because it parses. `prepare` requires that canonical qualification-policy
+input, which pins host executable
+realpaths and hashes, model and effort, argv templates, runtime read roots,
+writable roots, environment keys, endpoint policy, timeouts, capability-probe
+digests, and pricing authority. Pricing authority records provider/source,
+currency, effective interval, model, every billable input/output/cache/reasoning
+dimension, minimum and failed-request charges, provider token caps, and immutable
+source evidence. It also binds provider-side project spending-cap evidence; the
+caps partitioned across providers must sum to no more than the user ceiling. If
+the provider cannot enforce and attest such a cap, the run cannot claim a hard
+monetary ceiling and live qualification stops.
+
+One locked single-writer run ledger is authoritative for queue state and
+budgets. `prepare` seals initial executor nodes, mandatory stability nodes, the
+trigger matrix, and content-addressed derivation rules; it does not precreate
+outcome-dependent targeted repeats or conditional second judges. When bound
+evidence satisfies a frozen predicate, the ledger appends the derived node with
+a stable ID from the rule and source-record digests. Replaying the same evidence
+is idempotent; non-selected reserved slots are explicitly closed unused. Before
+any executor or judge launch, `next` appends and durably syncs a lease that
+reserves one session, its full timeout, and the pessimistic maximum cost
+calculated from the pricing authority. Concurrent claims serialize under the run
+lock. Ingest settles actual native usage against the reservation; expired or
+crashed leases remain charged at the reservation until an operator closes them
+with evidence. Unknown prices, missing native usage, or insufficient remaining
+time, session, or money budget prohibit launch. `close` records a reason such as
+budget exhaustion, sandbox regression, provenance failure, zero-tolerance
+failure, or operator stop and transitions unresolved comparisons to
+`INCONCLUSIVE` so `score` and `report` can finish.
 
 The run manifest freezes independent maximum budgets before outputs exist.
 Version 1 defaults to:
@@ -454,7 +503,8 @@ Version 1 defaults to:
 - 40 trigger executor sessions: 16 explicit-positive sessions across the two
   hosts, 16 Codex implicit positive/negative sessions, and 8 Claude negative
   discovery sessions.
-- 64 judge sessions, eight operator hours, and a user-supplied monetary ceiling.
+- At most 64 judge sessions, eight operator hours, and a user-supplied monetary
+  ceiling.
   One judge session reviews one masked three-arm host/case/repeat packet. The
   reserve covers 24 initial packets, 6 stability packets, up to 2 targeted
   repeat packets, and one second judge for each of those 32 packets.
@@ -584,12 +634,21 @@ invalid unless the rubric point explicitly permits a missing-output citation.
 The CLI rejects undeclared requirements, duplicate point losses, and arithmetic
 that does not reproduce from the point records.
 
-When an initial result is within one point, a second fresh judge reviews the
-same masked packet. This uses the same primary-dimension predicate as executor
-repeat selection. The packet's final dimension score is the lower score from
-the two judges. If either judge marks material uncertainty, or the records
-cannot be reconciled without adding a rubric requirement, mark the packet
-`INCONCLUSIVE` and revise the corpus only in a new version.
+Every complete packet receives one fresh judge. When an initial result is within
+one point, a second fresh judge reviews the same masked packet. This uses the
+same primary-dimension predicate as executor repeat selection. The 64-session
+budget is reserve capacity for at most 32 initial and 32 conditional second
+judges; unused reserve is not spent. The packet's final dimension score is the
+lower score from the two judges when the second judge is required. If either
+judge marks material uncertainty, or the records cannot be reconciled without
+adding a rubric requirement, mark the packet `INCONCLUSIVE` and revise the
+corpus only in a new version.
+
+Judge sessions use `scripts/prompt-engineer-sandbox` through a distinct sealed
+`kind: judge` launch packet. They receive the masked packet and private rubric,
+not executor worktrees or the label map, and are subject to the same fresh-
+session, native-export, model/effort, tool, environment, provider-authentication,
+result-sink, reservation, and post-run attestation rules as executor sessions.
 
 ## Repository integration
 
@@ -604,16 +663,20 @@ Implementation updates:
   disabled pending qualification and cutover. The approved cutover changes it
   to `Active` and Codex/Claude enabled in the same commit as `skills.yaml`.
 - `USAGE.md`: document explicit invocation, evaluation profiles, qualification,
-  and the separate cutover gate.
+  and the separate cutover gate. The activation commit changes its candidate/
+  disabled guidance to the verified active state in the same commit as
+  `skills.yaml` and `CATALOG.md`; an activation-revert commit restores all three.
 - `scripts/prompt-engineer-eval`: implement the deterministic prepare, ingest,
   masking, scoring, and report surface. It does not launch agent hosts or live
   external actions.
 - `scripts/prompt-engineer-sandbox`: launch the operator-selected host through
   a host adapter that enforces the staged filesystem, environment, credential,
   connector, and network policy and emits machine-verifiable attestation.
-- `scripts/prompt-engineer-cutover`: implement `prepare`, `apply`, `verify`, and
-  `rollback` against an explicit destination root. It refuses the real user
-  homes unless given a qualified report digest and an explicit live flag.
+- `scripts/prompt-engineer-cutover`: implement a deterministic `roots` builder,
+  read-only `preview`, and `prepare`, `apply`, `verify`, and `rollback` against
+  explicit, schema-validated discovery roots. It refuses the real user homes
+  unless given a qualified report digest, an approved composite preview digest,
+  and an explicit live flag.
 - `test/prompt_engineer_skill_contract_test.rb`: validate package layout,
   frontmatter, metadata, forbidden authority-priming patterns, reference routes,
   catalog/manifest consistency, and the qualification policy.
@@ -633,17 +696,32 @@ Implementation updates:
   partial legacy moves, hash mismatch, first-target success plus second-target
   failure, torn final log records, earlier log corruption, power-loss recovery,
   symlink and parent-directory identity swaps, idempotent rollback, repeated
-  rollback, required parent-directory syncs, and preservation of unrelated
-  files and skills.
+  rollback, concurrent command contenders, required parent-directory syncs,
+  activation-commit verification, use-record retention status, and preservation
+  of unrelated files and skills.
 - `test/fixtures/prompt-engineer/`: store the versioned corpus and sanitized
   artifacts plus `legacy.lock.yml`; do not store generated run state.
 - `docs/plans/2026-07-19-prompt-engineer-replacement-evaluation.md`: record the
   qualification environment, immutable corpus digest, arm provenance, raw
   result locations, scores, repeats, findings, and release decision.
 
-The implementation plan adds shared qualification schema and arithmetic under
-`test/support/` so scripts and tests do not duplicate the contract. It must not
-add a runtime prompt-revision workflow engine.
+The implementation plan adds production qualification schema and arithmetic
+under `scripts/lib/prompt_engineer/`; `test/support/` contains only builders and
+test utilities. It must not add a runtime prompt-revision workflow engine.
+
+Implementation may report `CORE_READY` when the lean package, corpus, host-
+neutral evaluator, and fake-adapter contracts pass. `REPOSITORY_COMPLETE`
+retains the acceptance meaning below and requires both real native normalizers,
+both sandbox self-probes, and the cutover primitive. Missing native evidence may
+permit useful core work but cannot be reported as repository completion.
+
+Native capability probes live in an immutable external evidence root, not an
+unspecified temporary directory. Its manifest binds every raw native export,
+capability JSON record, executable, profile, and sanitized checked-in fixture by
+digest and records a retention requirement through cutover and the five-use
+observation window. Repository-completion, qualification, and cutover-preparation
+gates recheck that every required external byte still exists and matches; a hash
+without available source bytes is insufficient evidence.
 
 ## Static verification
 
@@ -667,7 +745,7 @@ Before forward testing:
     temporary Codex and Claude destinations and verify restoration hashes,
     crash durability, torn-log handling, and path-race refusal.
 11. Run sandbox self-probes for both host adapters and verify the emitted
-    attestation digests bind to ingested executor records.
+    attestation digests bind to ingested executor and judge records.
 
 Because candidate install metadata is disabled, ordinary sync dry-runs must
 show no prompt-engineer operation during implementation. A cutover-specific
@@ -682,20 +760,46 @@ separate explicit user approval after the report is reviewed.
 
 At approved cutover:
 
-1. Revalidate the repository commit and qualification report digests.
-2. Run `scripts/prompt-engineer-cutover prepare` to create an immutable
-   `plan.json` recording the discovered Codex and Claude legacy paths, file
+1. Merge the qualified candidate commit into a clean stable checkout outside
+   `.worktrees/`; revalidate that commit and the qualification report digest.
+   Run `scripts/prompt-engineer-cutover roots --host-root codex=PATH --host-root
+   claude=PATH --output PATH`, followed by
+   `scripts/prompt-engineer-cutover preview --repo-root PATH --roots PATH
+   --qualified-report PATH --preview-dir PATH`, before approval. The closed roots
+   document lists every host and discovery root; ambient homes or configuration
+   never choose scope. Preview performs a read-only scan and writes a closed,
+   canonical discovery inventory covering
+   every Codex and Claude discovery root, installed legacy variant, dedicated
+   companion module, shared path classification, owner/mode/type/hash, parent
+   device/inode identity, source capability-evidence digest, and scan timestamp.
+   It also writes a canonical draft plan and `preview.json`, whose digest binds
+   the roots document, inventory bytes, draft-plan bytes, qualified report, and
+   source repository/package digests. None grants live authority and preview
+   opens no mutation handle.
+2. After the user approves that preview digest, run
+   `scripts/prompt-engineer-cutover prepare --repo-root PATH --preview PATH
+   --qualified-report PATH --qualified-report-sha SHA256
+   --preview-sha SHA256 --transaction PATH --live` to create an immutable
+   `plan.json`. Preparation rescans the roots embedded in the preview and
+   requires exact roots/inventory/draft-plan/composite digest matches before
+   recording the authenticated discovered Codex and Claude legacy paths, file
    types, ownership, modes, device/inode identities, hashes, candidate source,
    destinations, opened parent-directory identities, and ordered intended
-   operations. Preparation writes a complete temporary file, `fsync`s it,
-   atomically renames it into place, `fsync`s the containing directory, and
-   refuses to replace it.
-3. Run `apply` with the qualified report digest and explicit live flag. It moves
+   operations. Preparation rejects a source inside `.worktrees`, a dirty source,
+   a stable-checkout HEAD other than the exact qualified commit, a candidate
+   package-tree digest other than the report's qualified digest, a report that is
+   not qualified, a mismatched digest, or any unaccounted discovery path. It
+   writes a complete temporary file, `fsync`s it, atomically
+   renames it into place, `fsync`s the containing directory, and refuses to
+   replace it. The first `--live` binds the user's reviewed report and live
+   authority into the immutable plan.
+3. Run `apply --transaction PATH --qualified-report-sha SHA256 --live`. The
+   repeated digest and flag revalidate, rather than create, authority. It moves
    each legacy skill directory and only its dedicated
-   `scripts/skills/prompt_engineer` module into a timestamped, non-discovered
-   backup directory, then installs the managed replacement links. Preserve the
-   shared `scripts` root, `skills.lib` workflow framework, and every unrelated
-   installed skill.
+   `skills/scripts/skills/prompt_engineer` module into per-parent, same-device,
+   timestamped, non-discovered backup directories, then installs the managed
+   replacement links. Preserve the shared `skills/scripts` root,
+   `skills/scripts/skills/lib` framework, and every unrelated installed skill.
 4. Perform mutations with descriptor-relative, no-follow filesystem operations
    anchored to the opened parent directories recorded by preparation. Before
    each mutation, revalidate ownership, mode, device/inode identity, file type,
@@ -714,20 +818,39 @@ At approved cutover:
    other failure immediately invokes the same idempotent rollback routine; a
    rollback failure stops and reports exact remaining operations without
    attempting unrelated cleanup.
-6. Run `verify` to confirm every installed path is the expected repository
+6. Run `verify` to confirm every installed path is the expected stable-repository
    symlink, every backup hash matches, and every unrelated sibling is unchanged.
 7. Start fresh Codex and Claude sessions and verify discovery, explicit
    invocation, and one read-only smoke case.
-8. If the activation candidate qualified, apply the single-field implicit
+8. Create one activation commit in the stable checkout that changes
+   `skills.yaml`, `CATALOG.md`, and `USAGE.md` together from Candidate/disabled
+   to Active/Codex-and-Claude-enabled. If the activation candidate qualified, the
+   same commit also applies the single-field implicit
    metadata patch, verify its digest, start a fresh Codex session, and rerun the
-   trigger smoke suite. Otherwise keep implicit invocation disabled.
+   trigger smoke suite. Otherwise keep implicit invocation disabled. Run
+   `verify --transaction PATH --activation-commit SHA`. Before validating the
+   commit, `verify` durably appends an activation-attempt event containing its
+   SHA, parent, diff digest, and observed metadata-tree digest. It then validates
+   the exact metadata diff and, on success, appends the accepted event and marks
+   the transaction complete. If commit creation or final verification fails,
+   revert that activation commit when it exists and invoke filesystem rollback;
+   never leave active metadata paired with restored legacy paths.
 
-Rollback is `scripts/prompt-engineer-cutover rollback --transaction PATH`. It
+Before rollback after an activation commit, create a normal Git revert commit
+that restores the exact three-file candidate state. Before activation, rollback
+is `scripts/prompt-engineer-cutover rollback --transaction PATH` and refuses an
+activation-revert argument. After activation, rollback requires
+`scripts/prompt-engineer-cutover rollback --transaction PATH
+--activation-revert SHA`. It
 reconstructs progress from `plan.json`, `events.jsonl`, and the live filesystem,
 not `state.json`. It removes only replacement symlinks named in the plan,
 restores recorded legacy paths and companion dependencies, verifies hashes, and
-is safe to run again after success or partial failure. It never deletes
-evaluation evidence or changes unrelated installed skills.
+verifies that the supplied revert commit is the exact inverse of the durably
+recorded activation attempt before it restores paths. This applies whether the
+attempt was accepted or failed validation. If activation metadata remains
+active, rollback fails closed and does not claim completion. It is safe to run
+again after success or partial failure. It never deletes evaluation evidence or
+changes unrelated installed skills.
 
 Keep the backup until five qualifying real uses complete on each host. A
 qualifying use is a distinct task where the skill was actually invoked, reached
@@ -735,7 +858,10 @@ a final diagnosis or candidate recommendation, and produced no safety failure,
 unwanted activation, user-reported material error, or workflow abort. Record
 timestamp, host and model versions, invocation mode, anonymized task category,
 outcome, and evidence location in the transaction's post-cutover log. Backup
-removal requires a separate explicit cleanup request. Rerun focused
+records are appended through `verify --transaction PATH --record-use FILE`, and
+`verify --transaction PATH --retention-status` reports per-host progress.
+Backup removal is deliberately unavailable in this implementation and requires
+a separate explicit cleanup request and reviewed cleanup change. Rerun focused
 qualification before enabling implicit invocation after a host discovery-policy
 change, and rerun full qualification after a material `SKILL.md` or reference
 change, a default model-family change, or any zero-tolerance/material regression.
@@ -813,7 +939,7 @@ not arm identities. An executor never receives the repository checkout that
 contains `private.yml`.
 
 `scripts/prompt-engineer-sandbox` is the checked-in launch boundary used by the
-operator instructions emitted from `prepare`; raw host commands are not valid
+operator packets emitted from `next`; raw host commands are not valid
 qualification launches. Its host adapters start Codex or Claude with an
 OS-enforced write allowlist limited to the case's declared worktree, output,
 and scratch paths. Staged skill bytes, host configuration, task packet, and
