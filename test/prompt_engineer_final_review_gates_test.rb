@@ -33,8 +33,9 @@ class PromptEngineerFinalReviewGatesTest < Minitest::Test
       sandbox: "supported"
     )
 
-    assert_equal "READY", ready.fetch("decision")
-    assert ready.fetch("mutations_permitted")
+    assert_equal "BLOCKED", ready.fetch("decision")
+    refute ready.fetch("mutations_permitted")
+    assert_includes ready.fetch("reasons"), "capability evidence authenticity is unproven"
 
     invalid = PromptEngineer::Cutover.evaluate(
       qualification: "PASS",

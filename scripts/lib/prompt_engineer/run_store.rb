@@ -9,6 +9,8 @@ module PromptEngineer
     class Error < StandardError; end
 
     ARMS = %w[legacy replacement unassisted].freeze
+    TRIGGER_ARMS = %w[implicit unassisted].freeze
+    EXECUTOR_ARMS = (ARMS + ["implicit"]).freeze
     DIGEST = /\A[0-9a-f]{64}\z/.freeze
     MAX_RECORD_BYTES = 1_048_576
     MAX_EXPORT_BYTES = 16 * 1_024 * 1_024
@@ -160,6 +162,19 @@ module PromptEngineer
       PromptEngineer::Provenance.ingest!(store: self, record: record, raw_export: raw_export)
     end
 
+    def evaluation_ingested_count
+      read_events.count { |event| event["event"] == "executor_ingested" }
+    end
+
+    def expected_ingested_count
+      @task_index.length
+    end
+
+    def evaluation_complete?
+      ingested_nodes = read_events.select { |event| event["event"] == "executor_ingested" }.map { |event| event.fetch("node_id") }
+      ingested_nodes.uniq.length == expected_ingested_count && ingested_nodes.uniq.sort == @task_index.keys.sort
+    end
+
     def close!(reason, evidence_digest: nil)
       raise Error, "close reason is required" unless reason.is_a?(String) && !reason.empty?
       if evidence_digest && !(evidence_digest.is_a?(String) && evidence_digest.match?(DIGEST))
@@ -263,11 +278,11 @@ module PromptEngineer
     end
 
     def normalize_policy(value)
-      source = value.is_a?(Hash) ? deep_copy(value) : Contracts.load_yaml(value)
-      if !value.is_a?(Hash)
-        schema_path = File.join(File.dirname(File.expand_path(value)), "schemas", "qualification-policy-v1.yml")
-        Contracts.validate!(source, Contracts.load_schema(schema_path)) if File.file?(schema_path)
-      end
+      raise Error, "qualification policy must be a schema path" if value.is_a?(Hash)
+      source = Contracts.load_yaml(value)
+      schema_path = File.join(File.dirname(File.expand_path(value)), "schemas", "qualification-policy-v1.yml")
+      raise Error, "qualification policy schema path is missing" unless File.file?(schema_path)
+      Contracts.validate!(source, Contracts.load_schema(schema_path))
       validate_policy_schema!(source)
       [source, PromptEngineer::Canonical.digest(source)]
     end
@@ -336,7 +351,7 @@ module PromptEngineer
     end
 
     def build_manifest(corpus:, policy:, policy_digest:, lock_digest:, package_digest:, environment:)
-      arm_labels = ARMS.each_with_object({}) do |arm, labels|
+      arm_labels = EXECUTOR_ARMS.each_with_object({}) do |arm, labels|
         labels[arm] = "arm-#{PromptEngineer::Canonical.digest({"run_id" => @run_id, "arm" => arm})[0, 24]}"
       end
       {
@@ -393,7 +408,7 @@ module PromptEngineer
       end
       corpus.trigger_records.each do |trigger|
         if trigger.fetch("expected_activation")
-          Corpus::HOSTS.each { |host| tasks << task_for_node("trigger", nil, host, "replacement", 0, trigger, corpus) }
+          Corpus::HOSTS.each { |host| tasks << task_for_node("trigger", nil, host, "implicit", 0, trigger, corpus) }
           tasks << task_for_node("trigger", nil, "codex", "unassisted", 0, trigger, corpus)
         else
           tasks << task_for_node("trigger", nil, "codex", "unassisted", 0, trigger, corpus)
@@ -513,7 +528,7 @@ module PromptEngineer
       %w[corpus_digest corpus_manifest_digest package_digest qualification_policy_digest legacy_lock_digest].each do |field|
         raise Error, "manifest #{field} is invalid" unless @manifest.fetch(field).match?(DIGEST)
       end
-      raise Error, "manifest arm labels are invalid" unless @manifest.fetch("arm_labels").keys.sort == ARMS.sort
+      raise Error, "manifest arm labels are invalid" unless @manifest.fetch("arm_labels").keys.sort == EXECUTOR_ARMS.sort
       validate_policy_schema!(@manifest.fetch("policy_snapshot"))
     rescue KeyError, NoMethodError => error
       raise Error, "invalid manifest: #{error.message}"

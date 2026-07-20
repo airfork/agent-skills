@@ -207,7 +207,7 @@ module PromptEngineer
         run_root: options.fetch("run-dir"),
         corpus: PromptEngineer::Corpus.load(options.fetch("corpus")),
         package_root: options.fetch("candidate-root"),
-        qualification_policy: load_document(options.fetch("qualification-policy")),
+        qualification_policy: options.fetch("qualification-policy"),
         legacy_lock: load_document(options.fetch("legacy-lock")),
         legacy_root: options["legacy-root"],
         environment: environment
@@ -274,6 +274,7 @@ module PromptEngineer
       actual_digest = Digest::SHA256.file(evidence_path).hexdigest
       raise Error.new("evidence_digest_mismatch", "evidence digest does not match bytes") unless actual_digest == expected_digest
       raise Error.new("run_not_closed", "run must be closed with the evidence digest") unless store.closed?
+      raise Error.new("evaluation_incomplete", "run does not contain every evaluation result") unless store.evaluation_complete?
       unless store.closed_evidence_digest == expected_digest
         raise Error.new("evidence_not_committed", "closed run does not commit this evidence digest")
       end

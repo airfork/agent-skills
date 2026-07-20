@@ -24,7 +24,9 @@ class PromptEngineerCutoverTest < Minitest::Test
       runtime: "ruby-2.6",
       sandbox: "supported"
     )
-    assert_equal "READY", decision.fetch("decision")
+    assert_equal "BLOCKED", decision.fetch("decision")
+    refute decision.fetch("mutations_permitted")
+    assert_includes decision.fetch("reasons"), "capability evidence authenticity is unproven"
     assert_raises(PromptEngineer::Cutover::Error) { PromptEngineer::Cutover.apply!(decision) }
   end
 

@@ -89,7 +89,7 @@ module PromptEngineer
       raise Error, "executor result schema version is invalid" unless record.fetch("schema_version") == 1
       raise Error, "executor result repeat index is invalid" unless record.fetch("repeat_index").is_a?(Integer) && record.fetch("repeat_index") >= 0
       raise Error, "executor result host is invalid" unless Corpus::HOSTS.include?(record.fetch("host"))
-      raise Error, "executor result arm is invalid" unless RunStore::ARMS.include?(record.fetch("arm"))
+      raise Error, "executor result arm is invalid" unless RunStore::EXECUTOR_ARMS.include?(record.fetch("arm"))
       DIGEST_FIELDS.each { |field| require_digest!(record.fetch(field), field) }
       raise Error, "executor result case ID is invalid" unless record.fetch("case_id").match?(/\APE-[0-9]{3}\z/)
       raise Error, "executor result final status is invalid" unless %w[completed failed aborted inconclusive].include?(record.fetch("final_status"))

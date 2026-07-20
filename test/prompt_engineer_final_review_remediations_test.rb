@@ -13,16 +13,15 @@ class PromptEngineerFinalReviewRemediationsTest < Minitest::Test
   LEGACY_LOCK = File.join(REPO, "test/fixtures/prompt-engineer/legacy.lock.yml")
   PACKAGE = File.join(REPO, "skills/general/prompt-engineer")
 
-  def test_hash_policy_is_validated_as_a_closed_schema
+  def test_hash_policy_is_rejected_even_when_it_has_a_valid_shape
     with_store_inputs do |inputs|
       policy = PromptEngineer::Contracts.load_yaml(POLICY)
-      policy.delete("provider_caps")
 
       error = assert_raises(PromptEngineer::RunStore::Error) do
         PromptEngineer::RunStore.prepare(**inputs.merge(qualification_policy: policy))
       end
 
-      assert_includes error.message, "required"
+      assert_includes error.message, "schema path"
     end
   end
 
@@ -76,14 +75,26 @@ class PromptEngineerFinalReviewRemediationsTest < Minitest::Test
 
       store.close!("qualification complete", evidence_digest: digest)
       stdout, stderr, status = invoke("score", "--run-dir", store.root, "--evidence", evidence, "--evidence-digest", digest)
-      assert_equal 0, status, stderr
-      assert_equal "QUALIFIED_EXPLICIT", JSON.parse(stdout).fetch("decision").fetch("decision")
+      assert_equal 3, status
+      assert_equal "evaluation_incomplete", JSON.parse(stderr).fetch("error").fetch("code")
 
       output = File.join(store.root, "report.md")
       stdout, stderr, status = invoke("report", "--run-dir", store.root, "--evidence", evidence, "--evidence-digest", digest, "--output", output)
-      assert_equal 0, status, stderr
-      assert File.file?(output)
-      assert_equal output, JSON.parse(stdout).fetch("report_path")
+      assert_equal 3, status
+      assert_equal "evaluation_incomplete", JSON.parse(stderr).fetch("error").fetch("code")
+      refute File.exist?(output)
+    end
+  end
+
+  def test_trigger_tasks_use_an_explicit_implicit_arm_without_changing_behavioral_arms
+    with_store do |store|
+      triggers = store.pending_tasks.select { |task| task.fetch("kind") == "trigger" }
+
+      assert_equal 40, triggers.length
+      assert_equal 16, triggers.count { |task| task.fetch("arm") == "implicit" }
+      assert_equal 24, triggers.count { |task| task.fetch("arm") == "unassisted" }
+      refute triggers.any? { |task| %w[legacy replacement].include?(task.fetch("arm")) }
+      assert_equal %w[legacy replacement unassisted], PromptEngineer::RunStore::ARMS
     end
   end
 

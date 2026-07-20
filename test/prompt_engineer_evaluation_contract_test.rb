@@ -1142,7 +1142,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       assert_equal directory_digest(File.join(REPO, "skills/general/prompt-engineer")), manifest.fetch("package_digest")
       assert_equal PromptEngineer::Canonical.digest(PromptEngineer::Contracts.load_yaml(fixture("qualification-policy.example.yml"))), manifest.fetch("qualification_policy_digest")
       assert_equal PromptEngineer::Canonical.digest(PromptEngineer::Contracts.load_yaml(fixture("legacy.lock.yml"))), manifest.fetch("legacy_lock_digest")
-      assert_equal %w[legacy replacement unassisted], manifest.fetch("arm_labels").keys
+      assert_equal PromptEngineer::RunStore::EXECUTOR_ARMS.sort, manifest.fetch("arm_labels").keys.sort
       manifest.fetch("arm_labels").each_value { |label| assert_match(/\Aarm-[0-9a-f]{24}\z/, label) }
       refute_equal manifest.fetch("arm_labels").fetch("legacy"), manifest.fetch("arm_labels").fetch("replacement")
       refute_includes manifest.fetch("arm_labels").values, "legacy"

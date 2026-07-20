@@ -16,6 +16,8 @@ module PromptEngineer
       reasons = []
       reasons << "qualification is not a scorer decision" unless QUALIFICATION_DECISIONS.include?(qualification)
       reasons << "qualification decision is not qualified" unless %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT].include?(qualification)
+      trusted_capabilities = defined?(PromptEngineer::Capabilities::RECORDS) && capabilities.equal?(PromptEngineer::Capabilities::RECORDS)
+      reasons << "capability evidence authenticity is unproven" unless trusted_capabilities
       reasons.concat(capability_errors(capabilities))
       reasons << "Ruby 2.6 compatibility evidence is unavailable" unless runtime == "ruby-2.6"
       reasons << "sandbox support is unavailable" unless sandbox == "supported"
