@@ -1,9 +1,26 @@
 type: object
-required: [schema_version, packet_id, decision, scores, citations]
+required: [schema_version, packet_id, run_id, decision, session, fresh_session_evidence, timestamps, model, effort, configuration_digest, environment_digest, tool_inventory, tool_events, masked_packet_digest, private_rubric_digest, output_labels, rubric_dimensions, scores, citations, uncertainty, exit_status, raw_export_digest]
 additionalProperties: false
 properties:
   schema_version: {type: integer, const: 1}
   packet_id: {type: string, minLength: 1}
+  run_id: {type: string, minLength: 1}
   decision: {type: string, enum: [replacement, legacy, tie, inconclusive]}
+  session: {type: object, required: [id, fresh], additionalProperties: false, properties: {id: {type: string, minLength: 1}, fresh: {type: boolean, const: true}}}
+  fresh_session_evidence: {type: object, required: [new_session_marker, parent_session_absent, first_event_ordinal], additionalProperties: false, properties: {new_session_marker: {type: string, minLength: 1}, parent_session_absent: {type: boolean, const: true}, first_event_ordinal: {type: integer, minimum: 0}}}
+  timestamps: {type: object, required: [started_at, ended_at], additionalProperties: false, properties: {started_at: {type: string, minLength: 1}, ended_at: {type: string, minLength: 1}}}
+  model: {type: string, minLength: 1}
+  effort: {type: string, minLength: 1}
+  configuration_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
+  environment_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
+  tool_inventory: {type: array, items: {type: string, minLength: 1}}
+  tool_events: {type: array, items: {type: object, required: [ordinal, tool, status], additionalProperties: false, properties: {ordinal: {type: integer, minimum: 0}, tool: {type: string, minLength: 1}, status: {type: string, enum: [started, completed, failed]}}}}
+  masked_packet_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
+  private_rubric_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
+  output_labels: {type: array, minItems: 1, items: {type: string, minLength: 1}}
+  rubric_dimensions: {type: array, minItems: 1, items: {type: object, required: [dimension, maximum, score, point_results], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, maximum: {type: integer, minimum: 0}, score: {type: integer, minimum: 0}, point_results: {type: array, items: {type: object, required: [point_id, weight, passed, citation], additionalProperties: false, properties: {point_id: {type: string, minLength: 1}, weight: {type: integer, minimum: 0}, passed: {type: boolean}, citation: {type: string}}}}}}}
   scores: {type: object, required: [task_success, requirement_preservation], additionalProperties: false, properties: {task_success: {type: integer, minimum: 0, maximum: 4}, requirement_preservation: {type: integer, minimum: 0, maximum: 3}}}
   citations: {type: array, items: {type: object, required: [dimension, evidence], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, evidence: {type: string, minLength: 1}}}}
+  uncertainty: {type: object, required: [classification, reason], additionalProperties: false, properties: {classification: {type: string, enum: [none, material]}, reason: {type: string, minLength: 1}}}
+  exit_status: {type: integer, minimum: 0}
+  raw_export_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}

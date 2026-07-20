@@ -141,12 +141,20 @@ module PromptEngineer
       if node.is_a?(Psych::Nodes::Scalar) && node.plain && node.value =~ /\A[+-]?\.(?:nan|inf)\z/i
         raise YamlError, "nonfinite YAML scalar at #{render_path(path)}"
       end
+      if node.is_a?(Psych::Nodes::Scalar) && node.plain &&
+          node.value =~ /\A[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?[eE][+-]?[0-9_]+\z/
+        converted = Float(node.value.delete("_"))
+        raise YamlError, "nonfinite YAML scalar at #{render_path(path)}" unless converted.finite?
+      end
       if node.is_a?(Psych::Nodes::Mapping)
         keys = {}
         children = node.children
         children.each_slice(2) do |key, value|
           unless key.is_a?(Psych::Nodes::Scalar)
             raise YamlError, "mapping keys must be scalar strings at #{render_path(path)}"
+          end
+          if key.tag
+            raise YamlError, "AST mapping keys must not be explicitly tagged at #{render_path(path)}"
           end
           unless string_mapping_key?(key)
             raise YamlError, "AST mapping keys must be strings at #{render_path(path)}"

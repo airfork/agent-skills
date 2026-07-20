@@ -54,6 +54,13 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_includes error.message, "AST"
   end
 
+  def test_explicitly_tagged_scalar_mapping_keys_are_rejected_during_ast_walk
+    error = assert_raises(PromptEngineer::Contracts::YamlError) do
+      PromptEngineer::Contracts.parse_yaml("!!int \"1\": value\n")
+    end
+    assert_includes error.message, "AST"
+  end
+
   def test_yaml_parser_returns_only_safe_plain_values
     value = PromptEngineer::Contracts.parse_yaml("name: prompt\nitems:\n  - one\n")
     assert_equal({"name" => "prompt", "items" => ["one"]}, value)
@@ -67,7 +74,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
   end
 
   def test_yaml_parser_rejects_nonfinite_yaml_scalars
-    %w[.nan .inf -.inf].each do |scalar|
+    %w[.nan .inf -.inf 1.0e+9999].each do |scalar|
       assert_contract_error PromptEngineer::Contracts::YamlError, "finite" do
         PromptEngineer::Contracts.parse_yaml("value: #{scalar}\n")
       end
@@ -131,6 +138,34 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     policy = PromptEngineer::Contracts.load_yaml(fixture("qualification-policy.example.yml"))
     schema = PromptEngineer::Contracts.load_schema(fixture("schemas/qualification-policy-v1.yml"))
     assert PromptEngineer::Contracts.validate!(policy, schema)
+  end
+
+  def test_executor_and_judge_schemas_bind_freshness_provenance_and_rubric_packets
+    executor = PromptEngineer::Contracts.load_schema(fixture("schemas/executor-result-v1.yml"))
+    %w[
+      repeat_index public_task_packet_digest arm_environment_manifest_digest
+      expected_package_digest masked_label_map_digest sandbox_launch_attestation_digest
+      fresh_session_evidence timestamps cli model effort configuration_digest
+      environment_digest tool_inventory tool_events final_status exit_status
+      raw_export_digest
+    ].each do |field|
+      assert_includes executor.fetch("required"), field
+    end
+
+    judge = PromptEngineer::Contracts.load_schema(fixture("schemas/judge-result-v1.yml"))
+    %w[
+      run_id session fresh_session_evidence timestamps model effort
+      configuration_digest environment_digest tool_inventory masked_packet_digest
+      tool_events private_rubric_digest output_labels rubric_dimensions uncertainty
+      exit_status raw_export_digest
+    ].each do |field|
+      assert_includes judge.fetch("required"), field
+    end
+    dimensions = judge.fetch("properties").fetch("rubric_dimensions")
+    assert_equal "array", dimensions.fetch("type")
+    assert_includes dimensions.fetch("items").fetch("required"), "dimension"
+    assert_includes dimensions.fetch("items").fetch("required"), "score"
+    assert_includes dimensions.fetch("items").fetch("required"), "point_results"
   end
 
   def test_corpus_freezes_cases_triggers_tree_digest_and_activation_pair
@@ -208,22 +243,73 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       secret = File.join(root, "secret.txt")
       File.write(victim, "safe")
       File.write(secret, "private rubric")
-      original_open = File.method(:open)
+      original_open = PromptEngineer::Corpus.method(:open_descriptor_nofollow)
       swapped = false
-      File.define_singleton_method(:open) do |*arguments, &block|
-        if arguments.first == victim && !swapped
+      PromptEngineer::Corpus.define_singleton_method(:open_descriptor_nofollow) do |path, root|
+        if path == victim && !swapped
           FileUtils.rm(victim)
           File.symlink(secret, victim)
           swapped = true
         end
-        original_open.call(*arguments, &block)
+        original_open.call(path, root)
       end
       begin
         assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
           PromptEngineer::Corpus.stable_file_bytes(victim)
         end
       ensure
-        File.define_singleton_method(:open, original_open)
+        PromptEngineer::Corpus.define_singleton_method(:open_descriptor_nofollow, original_open)
+      end
+    end
+  end
+
+  def test_corpus_digest_rejects_ancestor_directory_swap
+    with_fixture_tree do |root|
+      artifacts = File.join(root, "cases", "PE-001", "artifacts")
+      real_artifacts = File.join(root, "cases", "PE-001", "real-artifacts")
+      original_snapshot = PromptEngineer::Corpus.method(:tree_identity_snapshot)
+      swapped = false
+      PromptEngineer::Corpus.define_singleton_method(:tree_identity_snapshot) do |path|
+        snapshot = original_snapshot.call(path)
+        unless swapped
+          FileUtils.mv(artifacts, real_artifacts)
+          File.symlink("real-artifacts", artifacts)
+          swapped = true
+        end
+        snapshot
+      end
+      begin
+        assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
+          PromptEngineer::Corpus.tree_digest(root)
+        end
+      ensure
+        PromptEngineer::Corpus.define_singleton_method(:tree_identity_snapshot, original_snapshot)
+      end
+    end
+  end
+
+  def test_corpus_stable_read_rejects_same_metadata_different_content
+    Dir.mktmpdir("prompt-engineer-content-race") do |root|
+      path = File.join(root, "victim.txt")
+      File.write(path, "safe")
+      stat = File.stat(path)
+      reads = 0
+      fake = Object.new
+      fake.define_singleton_method(:stat) { stat }
+      fake.define_singleton_method(:read) do
+        reads += 1
+        reads == 1 ? "safe" : "evil"
+      end
+      fake.define_singleton_method(:rewind) {}
+      fake.define_singleton_method(:close) {}
+      original_open = PromptEngineer::Corpus.method(:open_descriptor_nofollow)
+      PromptEngineer::Corpus.define_singleton_method(:open_descriptor_nofollow) { |_path, _root| fake }
+      begin
+        assert_contract_error PromptEngineer::Corpus::Error, "content" do
+          PromptEngineer::Corpus.stable_file_bytes(path)
+        end
+      ensure
+        PromptEngineer::Corpus.define_singleton_method(:open_descriptor_nofollow, original_open)
       end
     end
   end
@@ -350,6 +436,9 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_contract_error PromptEngineer::Budget::Error, "timeout" do
       PromptEngineer::Budget.new(money_limit: 1, prices: {}, session_timeout_seconds: 0)
     end
+    assert_contract_error PromptEngineer::Budget::Error, "money" do
+      PromptEngineer::Budget.new(money_limit: 10**1000, prices: {})
+    end
   end
 
   def test_reservation_rejects_negative_timeout_and_settlement_usage_caps
@@ -404,6 +493,12 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     assert_contract_error PromptEngineer::Budget::Error, "price" do
       PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {"input" => 10**1000}})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "token" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {:token_cap => Float::NAN}})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "token" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {:token_cap => -1}})
     end
   end
 

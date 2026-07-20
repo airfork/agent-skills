@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "fiddle"
 require "open3"
 
 module PromptEngineer
@@ -19,6 +20,17 @@ module PromptEngineer
     LEGACY_PATH = "skills/scripts/skills/prompt_engineer"
     COMPANION_PATH = "skills/scripts/skills/lib"
     NOFOLLOW_FLAG = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : nil
+    AT_FDCWD = -100
+    OPENAT_FUNCTION = begin
+      handle = Fiddle.dlopen(nil)
+      Fiddle::Function.new(
+        handle["openat"],
+        [Fiddle::TYPE_INT, Fiddle::TYPE_VOIDP, Fiddle::TYPE_INT, Fiddle::TYPE_INT],
+        Fiddle::TYPE_INT
+      )
+    rescue StandardError
+      nil
+    end
 
     attr_reader :root, :manifest, :triggers, :cases, :tree_digest, :manifest_digest
 
@@ -68,35 +80,133 @@ module PromptEngineer
     end
 
     def self.digest_paths(root, paths)
+      initial_tree = tree_identity_snapshot(root)
       digest = Digest::SHA256.new
       paths.sort_by { |path| path.b }.each do |relative|
-        bytes = stable_file_bytes(File.join(root, relative))
+        bytes = stable_file_bytes(File.join(root, relative), root)
         bytes = yield(relative, bytes) if block_given?
         digest.update(relative.encode("UTF-8"))
         digest.update("\0")
         digest.update(bytes)
         digest.update("\0")
       end
+      raise Error, "corpus tree changed during digest" unless initial_tree == tree_identity_snapshot(root)
       digest.hexdigest
     end
 
-    def self.stable_file_bytes(path)
-      raise Error, "no-follow reads unavailable" unless NOFOLLOW_FLAG
-      File.open(path, File::RDONLY | NOFOLLOW_FLAG) do |file|
+    def self.stable_file_bytes(path, root = nil)
+      raise Error, "no-follow reads unavailable" unless NOFOLLOW_FLAG && OPENAT_FUNCTION
+      before_path = path_identity_snapshot(path, root)
+      file = open_descriptor_nofollow(path, root)
+      begin
         before = file.stat
         raise Error, "not a regular file #{path}" unless before.file?
         bytes = file.read
+        first_digest = Digest::SHA256.digest(bytes)
+        file.rewind
+        second_bytes = file.read
+        raise Error, "file content changed during read #{path}" unless first_digest == Digest::SHA256.digest(second_bytes) && bytes == second_bytes
         after = file.stat
         identity = [before.dev, before.ino, before.size, before.mtime, before.nlink]
         current = [after.dev, after.ino, after.size, after.mtime, after.nlink]
         raise Error, "file changed during read #{path}" unless identity == current
+        raise Error, "path changed during read #{path}" unless before_path == path_identity_snapshot(path, root)
         bytes
+      ensure
+        file.close
       end
     rescue Errno::ELOOP
       raise Error, "symlinked path #{path}"
     rescue Errno::ENOENT, Errno::EACCES => error
       raise Error, error.message
     end
+
+    def self.open_descriptor_nofollow(path, root)
+      if root
+        root_path = File.realpath(root)
+        relative = path.sub(%r{\A#{Regexp.escape(root_path)}/?}, "")
+        raise Error, "path escape" if relative == path
+        directory_fd = open_directory_descriptor(root_path)
+        components = relative.split("/")
+      else
+        parent = File.realpath(File.dirname(path))
+        directory_fd = open_directory_descriptor(parent)
+        components = [File.basename(path)]
+      end
+      begin
+        components[0...-1].each do |component|
+          next_fd = openat_call(directory_fd, component, File::RDONLY | NOFOLLOW_FLAG)
+          close_fd(directory_fd)
+          directory_fd = next_fd
+        end
+        file_fd = openat_call(directory_fd, components.fetch(-1), File::RDONLY | NOFOLLOW_FLAG)
+      ensure
+        close_fd(directory_fd) if directory_fd
+      end
+      IO.for_fd(file_fd)
+    end
+    private_class_method :open_descriptor_nofollow
+
+    def self.open_directory_descriptor(path)
+      components = File.expand_path(path).split("/").reject { |component| component.empty? }
+      directory_fd = openat_call(AT_FDCWD, "/", File::RDONLY | NOFOLLOW_FLAG)
+      begin
+        components.each do |component|
+          next_fd = openat_call(directory_fd, component, File::RDONLY | NOFOLLOW_FLAG)
+          close_fd(directory_fd)
+          directory_fd = next_fd
+        end
+        directory_fd
+      rescue StandardError
+        close_fd(directory_fd) if directory_fd
+        raise
+      end
+    end
+    private_class_method :open_directory_descriptor
+
+    def self.openat_call(directory_fd, component, flags)
+      file_descriptor = OPENAT_FUNCTION.call(directory_fd, component.to_s, flags, 0)
+      return file_descriptor if file_descriptor >= 0
+
+      raise SystemCallError.new("openat", Fiddle.last_error)
+    end
+    private_class_method :openat_call
+
+    def self.close_fd(file_descriptor)
+      IO.for_fd(file_descriptor).close
+    rescue IOError, Errno::EBADF
+      nil
+    end
+    private_class_method :close_fd
+
+    def self.path_identity_snapshot(path, root)
+      base = root ? File.realpath(root) : File.realpath(File.dirname(path))
+      relative = root ? path.sub(%r{\A#{Regexp.escape(base)}/?}, "") : File.basename(path)
+      raise Error, "path escape" if relative == path
+      components = ["."] + relative.split("/")
+      current = base
+      components.map do |component|
+        current = component == "." ? current : File.join(current, component)
+        stat = File.lstat(current)
+        raise Error, "symlinked path #{current}" if stat.symlink?
+        [component, stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.nlink]
+      end
+    end
+    private_class_method :path_identity_snapshot
+
+    def self.tree_identity_snapshot(root)
+      base = File.realpath(root)
+      paths = [base] + Dir.glob(File.join(base, "**", "*"))
+      paths.sort_by(&:b).map do |path|
+        stat = File.lstat(path)
+        raise Error, "symlinked corpus component #{path}" if stat.symlink?
+        relative = path == base ? "." : path.sub(%r{\A#{Regexp.escape(base)}/?}, "")
+        [relative, stat.dev, stat.ino, stat.mode, stat.size, stat.mtime, stat.nlink]
+      end
+    rescue Errno::ENOENT, Errno::EACCES => error
+      raise Error, error.message
+    end
+    private_class_method :tree_identity_snapshot
 
     def self.activation_diff(left, right, path = [], output = {})
       if left.is_a?(Hash) && right.is_a?(Hash)

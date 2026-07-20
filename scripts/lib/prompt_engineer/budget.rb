@@ -39,7 +39,7 @@ module PromptEngineer
         raise Error, "session caps are fixed"
       end
       max_sessions = TOTAL_SESSION_CAP
-      raise Error, "money limit must be positive" unless finite_numeric?(money_limit) && money_limit > 0
+      raise Error, "money limit must be positive" unless finite_numeric?(money_limit) && money_limit.to_f.finite? && money_limit > 0
       raise Error, "timeout must be positive" unless finite_numeric?(session_timeout_seconds) && session_timeout_seconds > 0
       raise Error, "max sessions must be positive" unless max_sessions.is_a?(Integer) && max_sessions > 0
 
@@ -232,9 +232,11 @@ module PromptEngineer
           raise Error, "price must be nonnegative" unless finite_numeric?(value) && value >= 0
           raise Error, "price must be finite" unless finite_numeric?(value.to_f)
         end
-        cap = price["token_cap"]
-        if cap && !(cap.is_a?(Integer) && cap > 0)
-          raise Error, "token cap must be positive"
+        cap_entries = price.select { |dimension, _value| dimension.to_s == "token_cap" }
+        cap_entries.each_value do |cap|
+          unless finite_numeric?(cap) && cap.to_f.finite? && cap >= 0
+            raise Error, "token cap must be finite and nonnegative"
+          end
         end
       end
       deep_freeze(copy)
