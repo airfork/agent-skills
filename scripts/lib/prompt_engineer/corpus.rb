@@ -79,6 +79,20 @@ module PromptEngineer
       new(root, verify_digest).load
     end
 
+    def self.deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| deep_freeze(key); deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
+    end
+
+    def self.deep_copy(value)
+      Marshal.load(Marshal.dump(value))
+    end
+
     def self.tree_digest(root)
       # The canonical binding hashes ordered UTF-8 relative-path bytes, NUL,
       # file bytes, and NUL. The manifest's declared tree_digest is replaced
@@ -335,11 +349,13 @@ module PromptEngineer
       raise LegacyLockError, "legacy root is symlinked" if File.symlink?(root)
 
       root = File.realpath(root)
-      verify_git_identity(lock, root)
-
       files = lock.fetch("evidence").fetch("files")
       paths = files.map { |entry| entry.fetch("path") }
       raise LegacyLockError, "duplicate locked path" unless paths.uniq.length == paths.length
+      raise LegacyLockError, "repository .git is symlinked" if File.symlink?(File.join(root, ".git"))
+      validate_legacy_tree_shape(root, paths)
+      verify_git_identity(lock, root)
+
       closure = lock.fetch("dependency_closure")
       raise LegacyLockError, "incomplete dependency closure" unless closure.fetch("paths").sort_by(&:b) == paths.sort_by(&:b)
       actual_files = regular_paths(root).reject { |path| path == ".git" || path.start_with?(".git/") }
@@ -347,6 +363,7 @@ module PromptEngineer
       missing = paths - actual_files
       raise LegacyLockError, "extra file #{extras.first}" unless extras.empty?
       raise LegacyLockError, "missing file #{missing.first}" unless missing.empty?
+      tree_entries = git_tree_entries(root, commit)
       files.each do |entry|
         unless entry.keys.sort == %w[mode object_id path sha256].sort
           raise LegacyLockError, "file evidence keys are not closed"
@@ -356,13 +373,16 @@ module PromptEngineer
         reject_symlink_components(root, relative)
         source = File.join(root, relative)
         raise LegacyLockError, "missing file #{relative}" unless File.file?(source)
-        actual = Digest::SHA256.hexdigest(stable_file_bytes(source))
+        tree_entry = tree_entries[relative]
+        raise LegacyLockError, "commit tree entry missing for #{relative}" unless tree_entry && tree_entry.fetch("type") == "blob"
+        raise LegacyLockError, "commit tree object identity mismatch for #{relative}" unless tree_entry.fetch("object_id") == entry.fetch("object_id")
+        raise LegacyLockError, "commit tree mode mismatch for #{relative}" unless tree_entry.fetch("mode").sub(/\A100/, "") == entry.fetch("mode").to_s
+        bytes = stable_file_bytes(source)
+        actual = Digest::SHA256.hexdigest(bytes)
         raise LegacyLockError, "digest mismatch for #{relative}" unless actual == entry.fetch("sha256")
         mode = (File.stat(source).mode & 0o777).to_s(8)
         raise LegacyLockError, "mode mismatch for #{relative}" unless mode == entry.fetch("mode").to_s
-        object_id = git_object_id(source, root)
-        raise LegacyLockError, "object identity unavailable for #{relative}" unless object_id
-        raise LegacyLockError, "object identity mismatch for #{relative}" unless object_id == entry.fetch("object_id")
+        raise LegacyLockError, "working tree object identity mismatch for #{relative}" unless git_blob_object_id(bytes) == tree_entry.fetch("object_id")
       end
       expected = lock_digest(lock)
       raise LegacyLockError, "aggregate digest mismatch" unless expected == lock.fetch("evidence").fetch("aggregate_digest")
@@ -372,11 +392,29 @@ module PromptEngineer
     end
 
     module InstanceMethods
-      attr_reader :root, :manifest, :triggers, :cases, :tree_digest
-
       def initialize_corpus(root, verify_digest)
         @root = File.expand_path(root)
         @verify_digest = verify_digest
+      end
+
+      def root
+        @root.dup
+      end
+
+      def manifest
+        Corpus.deep_copy(@manifest)
+      end
+
+      def triggers
+        Corpus.deep_copy(@triggers)
+      end
+
+      def cases
+        Corpus.deep_copy(@cases)
+      end
+
+      def tree_digest
+        @tree_digest.dup
       end
 
       def load
@@ -394,6 +432,9 @@ module PromptEngineer
       validate_triggers
       @cases = CASE_IDS.map { |id| load_case(id) }
       raise Error, "corpus tree changed during load" unless Corpus.tree_digest(@root) == @tree_digest
+      @manifest = Corpus.deep_freeze(@manifest)
+      @triggers = Corpus.deep_freeze(@triggers)
+      @cases = Corpus.deep_freeze(@cases)
       self
     rescue Contracts::Error, Errno::ENOENT, Errno::EACCES => error
       raise Error, error.message
@@ -416,15 +457,15 @@ module PromptEngineer
       end
 
       def public_case(case_id)
-        fetch_case(case_id).fetch("public")
+        Corpus.deep_copy(fetch_case(case_id).fetch("public"))
       end
 
       def private_rubric(case_id)
-        fetch_case(case_id).fetch("private")
+        Corpus.deep_copy(fetch_case(case_id).fetch("private"))
       end
 
       def manifest_digest
-        @manifest_digest
+        @manifest_digest.dup
       end
 
       def activation_pair
@@ -441,7 +482,7 @@ module PromptEngineer
         index = CASE_IDS.index(case_id)
         raise Error, "unknown case #{case_id}" unless index
 
-        cases.fetch(index)
+        Corpus.deep_copy(@cases.fetch(index))
       end
 
       private
@@ -453,6 +494,9 @@ module PromptEngineer
       raise Error, "case IDs are not frozen" unless manifest.fetch("case_ids") == CASE_IDS
       raise Error, "hosts are not frozen" unless manifest.fetch("required_hosts") == HOSTS
       raise Error, "efficiency IDs are not frozen" unless manifest.fetch("efficiency_case_ids") == EFFICIENCY_CASE_IDS
+      expected_ranges = SCORING_MAXIMA.each_with_object({}) { |(dimension, maximum), ranges| ranges[dimension] = [0, maximum] }
+      raise Error, "scoring_ranges are not frozen" unless manifest.fetch("scoring_ranges") == expected_ranges
+      raise Error, "zero_tolerance_ids are not frozen" unless manifest.fetch("zero_tolerance_ids") == ZERO_TOLERANCE_IDS
       digest = manifest.fetch("tree_digest")
       raise Error, "tree digest is not hexadecimal" unless digest.is_a?(String) && digest =~ /\A[0-9a-f]{64}\z/
       end
@@ -469,6 +513,8 @@ module PromptEngineer
       raise Error, "trigger IDs are not frozen" unless records.map { |record| record.fetch("id") } == TRIGGER_IDS
       records.each_with_index do |record, index|
         raise Error, "trigger record keys are not closed" unless record.keys.sort == %w[expected_activation id prompt].sort
+        validate_string!(record.fetch("id"), "trigger id")
+        validate_string!(record.fetch("prompt"), "trigger prompt")
         expected = index < 8
         raise Error, "trigger activation mismatch" unless record.fetch("expected_activation") == expected
       end
@@ -584,6 +630,7 @@ module PromptEngineer
       raise LegacyLockError, "dependency closure status is invalid" unless %w[blocked complete].include?(closure.fetch("status"))
       raise LegacyLockError, "dependency closure reason is required" unless closure.fetch("reason").is_a?(String) && !closure.fetch("reason").empty?
       raise LegacyLockError, "dependency closure paths must be an array" unless closure.fetch("paths").is_a?(Array)
+      closure.fetch("paths").each { |path| validate_legacy_relative_path!(path) }
       evidence = lock.fetch("evidence")
       raise LegacyLockError, "legacy evidence keys are not closed" unless evidence.is_a?(Hash) && evidence.keys.sort == LEGACY_EVIDENCE_KEYS.sort
       raise LegacyLockError, "legacy evidence files must be an array" unless evidence.fetch("files").is_a?(Array)
@@ -592,6 +639,7 @@ module PromptEngineer
       unless file_entries.all? { |entry| entry.is_a?(Hash) && entry.keys.sort == %w[mode object_id path sha256].sort }
         raise LegacyLockError, "legacy file evidence entries are not closed"
       end
+      file_entries.each { |entry| validate_legacy_relative_path!(entry.fetch("path")) }
       object_id_entries = evidence.fetch("object_ids")
       unless object_id_entries.all? { |entry| entry.is_a?(Hash) && entry.keys.sort == %w[object_id path].sort }
         raise LegacyLockError, "legacy object IDs entries are not closed"
@@ -647,6 +695,53 @@ module PromptEngineer
       raise LegacyLockError, "repository identity unavailable" unless status.success?
 
       output.strip
+    end
+
+    def self.git_tree_entries(root, commit)
+      output = git_output(root, "ls-tree", "-r", "--full-tree", commit)
+      output.lines.each_with_object({}) do |line, entries|
+        metadata, path = line.chomp.split("\t", 2)
+        mode, type, object_id = metadata.to_s.split(" ", 3)
+        raise LegacyLockError, "malformed commit tree entry" unless mode && type && object_id && path && !path.empty?
+
+        entries[path] = {"mode" => mode, "type" => type, "object_id" => object_id}
+      end
+    end
+
+    def self.git_blob_object_id(bytes)
+      Digest::SHA1.hexdigest("blob #{bytes.bytesize}\0".b + bytes.b)
+    end
+
+    def self.validate_legacy_tree_shape(root, locked_paths)
+      expected = locked_paths.each_with_object({}) do |relative, entries|
+        components = validate_legacy_relative_path!(relative)
+        components.each_index do |index|
+          entries[components[0..index].join("/")] = true
+        end
+      end
+      Dir.glob(File.join(root, "**", "*"), File::FNM_DOTMATCH).each do |path|
+        relative = path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+        next if relative.empty? || relative == "."
+        next if relative == ".git" || relative.start_with?(".git/")
+        stat = File.lstat(path)
+        raise LegacyLockError, "symlinked legacy entry #{relative}" if stat.symlink?
+        raise LegacyLockError, "hidden legacy entry #{relative}" if relative.split("/").any? { |component| component.start_with?(".") }
+        raise LegacyLockError, "extra legacy entry #{relative}" unless expected.key?(relative)
+      end
+      true
+    rescue Errno::ENOENT, Errno::EACCES => error
+      raise LegacyLockError, error.message
+    end
+
+    def self.validate_legacy_relative_path!(path)
+      raise LegacyLockError, "legacy path must be a string" unless path.is_a?(String) && !path.empty?
+      raise LegacyLockError, "hidden legacy path #{path}" if path.split("/").any? { |component| component.start_with?(".") }
+      raise LegacyLockError, "path escape" if absolute_or_escape?(path)
+
+      components = path.split("/").reject { |component| component.empty? || component == "." }
+      raise LegacyLockError, "path escape" if components.empty?
+
+      components
     end
 
     def self.normalize_repository_identity(repository)

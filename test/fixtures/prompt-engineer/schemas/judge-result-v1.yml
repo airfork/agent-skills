@@ -56,7 +56,7 @@ properties:
                 then:
                   properties:
                     citation: {type: string, minLength: 1}
-  scores: {type: object, required: [task_success, requirement_preservation], additionalProperties: false, properties: {task_success: {type: integer, minimum: 0, maximum: 4}, requirement_preservation: {type: integer, minimum: 0, maximum: 3}}}
+  scores: {type: object, required: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality], additionalProperties: false, properties: {task_success: {type: integer, minimum: 0, maximum: 4}, requirement_preservation: {type: integer, minimum: 0, maximum: 3}, diagnosis_correctness: {type: integer, minimum: 0, maximum: 2}, evaluation_quality: {type: integer, minimum: 0, maximum: 2}, minimality: {type: integer, minimum: 0, maximum: 2}}}
   citations: {type: array, items: {type: object, required: [dimension, evidence], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, evidence: {type: string, minLength: 1}}}}
   uncertainty: {type: object, required: [classification, reason], additionalProperties: false, properties: {classification: {type: string, enum: [none, material]}, reason: {type: string, minLength: 1}}}
   exit_status: {type: integer, minimum: 0}

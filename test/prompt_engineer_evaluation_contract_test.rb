@@ -184,6 +184,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal %w[none material], uncertainty.fetch("properties").fetch("classification").fetch("enum")
     assert_includes uncertainty.fetch("required"), "reason"
     assert_equal false, judge.fetch("properties").fetch("timestamps").fetch("additionalProperties")
+    assert_equal PromptEngineer::Corpus::SCORING_MAXIMA.keys.sort, judge.fetch("properties").fetch("scores").fetch("required").sort
   end
 
   def test_judge_point_citations_are_conditional_and_required_failures_need_evidence
@@ -221,6 +222,102 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       end
     end
     assert_equal %q[\A[0-9a-f]{64}\z], executor.fetch("properties").fetch("nonce").fetch("pattern")
+    %w[binding binding_digest].each do |field|
+      assert_includes executor.fetch("properties").fetch("activation_evidence").fetch("required"), field
+      assert_includes executor.fetch("properties").fetch("invocation_evidence").fetch("required"), field
+    end
+    binding = executor.fetch("properties").fetch("activation_evidence").fetch("properties").fetch("binding")
+    assert_equal %w[arm case_id host launch_attestation_digest machine_id nonce public_task_packet_digest raw_export_digest run_id session_id staged_package_digest staged_path], binding.fetch("required").sort
+  end
+
+  def test_judge_results_bind_all_five_declared_dimensions_points_weights_and_evidence
+    assert_respond_to PromptEngineer::Contracts, :validate_judge_result!
+    rubric = {
+      "rubric_points" => PromptEngineer::Corpus::SCORING_MAXIMA.keys.each_with_object({}) do |dimension, points|
+        points[dimension] = {"point-#{dimension}" => PromptEngineer::Corpus::SCORING_MAXIMA.fetch(dimension)}
+      end
+    }
+    result = semantic_judge_result(rubric)
+    assert PromptEngineer::Contracts.validate_judge_result!(result, rubric)
+
+    missing_dimension = Marshal.load(Marshal.dump(result))
+    missing_dimension.fetch("rubric_dimensions").pop
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "dimensions" do
+      PromptEngineer::Contracts.validate_judge_result!(missing_dimension, rubric)
+    end
+
+    undeclared_point = Marshal.load(Marshal.dump(result))
+    undeclared_point.fetch("rubric_dimensions").first.fetch("point_results").first["point_id"] = "not-declared"
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "point" do
+      PromptEngineer::Contracts.validate_judge_result!(undeclared_point, rubric)
+    end
+
+    wrong_weight = Marshal.load(Marshal.dump(result))
+    wrong_weight.fetch("rubric_dimensions").first.fetch("point_results").first["weight"] = 0
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "weight" do
+      PromptEngineer::Contracts.validate_judge_result!(wrong_weight, rubric)
+    end
+
+    failed_without_evidence = Marshal.load(Marshal.dump(result))
+    point = failed_without_evidence.fetch("rubric_dimensions").first.fetch("point_results").first
+    point["status"] = "fail"
+    point["citation_required"] = false
+    point["citation"] = nil
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "citation" do
+      PromptEngineer::Contracts.validate_judge_result!(failed_without_evidence, rubric)
+    end
+  end
+
+  def test_executor_binding_digest_covers_run_session_arm_nonce_and_package
+    assert_respond_to PromptEngineer::Contracts, :validate_executor_binding!
+    facts = executor_facts
+    result = executor_result_bound_to(facts)
+    assert PromptEngineer::Contracts.validate_executor_binding!(result, facts)
+
+    tampered = Marshal.load(Marshal.dump(result))
+    tampered.fetch("activation_evidence").fetch("binding")["run_id"] = "other-run"
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "binding" do
+      PromptEngineer::Contracts.validate_executor_binding!(tampered, facts)
+    end
+
+    tampered_session = Marshal.load(Marshal.dump(result))
+    tampered_session.fetch("session")["id"] = "other-session"
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "session" do
+      PromptEngineer::Contracts.validate_executor_binding!(tampered_session, facts)
+    end
+  end
+
+  def test_executor_result_contract_binds_time_events_tokens_and_policy_caps
+    assert_respond_to PromptEngineer::Contracts, :validate_executor_result!
+    facts = executor_facts
+    result = executor_result_bound_to(facts)
+    assert PromptEngineer::Contracts.validate_executor_result!(result, facts, token_cap: 5)
+
+    unordered = Marshal.load(Marshal.dump(result))
+    unordered.fetch("tool_events").first["ordinal"] = 0
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "ordinal" do
+      PromptEngineer::Contracts.validate_executor_result!(unordered, facts, token_cap: 5)
+    end
+
+    reversed = Marshal.load(Marshal.dump(result))
+    reversed.fetch("timestamps")["ended_at"] = "2026-01-01T00:00:00Z"
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "timestamp" do
+      PromptEngineer::Contracts.validate_executor_result!(reversed, facts, token_cap: 5)
+    end
+
+    mismatched_total = Marshal.load(Marshal.dump(result))
+    mismatched_total.fetch("usage")["total_tokens"] = 99
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "total_tokens" do
+      PromptEngineer::Contracts.validate_executor_result!(mismatched_total, facts, token_cap: 5)
+    end
+
+    over_cap = Marshal.load(Marshal.dump(result))
+    over_cap.fetch("usage")["input_tokens"] = 5
+    over_cap.fetch("usage")["output_tokens"] = 1
+    over_cap.fetch("usage")["total_tokens"] = 6
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "token cap" do
+      PromptEngineer::Contracts.validate_executor_result!(over_cap, facts, token_cap: 5)
+    end
   end
 
   def test_corpus_freezes_cases_triggers_tree_digest_and_activation_pair
@@ -243,6 +340,55 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal true, implicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal false, explicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal({}, PromptEngineer::Corpus.activation_diff(explicit, implicit).reject { |path, _| path == ["policy", "allow_implicit_invocation"] })
+  end
+
+  def test_corpus_snapshots_and_returned_cases_are_defensive_copies
+    corpus = PromptEngineer::Corpus.load(CORPUS)
+    manifest = corpus.manifest
+    manifest.fetch("case_ids").clear
+    assert_equal 12, corpus.manifest.fetch("case_ids").length
+
+    cases = corpus.cases
+    cases.clear
+    assert_equal 12, corpus.cases.length
+
+    public_case = corpus.public_case("PE-001")
+    public_case.fetch("title").replace("tampered")
+    refute_equal "tampered", corpus.public_case("PE-001").fetch("title")
+
+    private_rubric = corpus.private_rubric("PE-001")
+    private_rubric.fetch("prohibited_behaviors").clear
+    refute_empty corpus.private_rubric("PE-001").fetch("prohibited_behaviors")
+  end
+
+  def test_manifest_scoring_ranges_and_zero_tolerance_ids_are_frozen_after_rebinding
+    {
+      "scoring_ranges" => {"task_success" => [0, 99]},
+      "zero_tolerance_ids" => ["invented_gate"]
+    }.each do |field, value|
+      with_fixture_tree do |root|
+        manifest = PromptEngineer::Contracts.parse_yaml(File.binread(File.join(root, "manifest.yml")))
+        manifest[field] = value
+        write_yaml_with_recomputed_digest(root, "manifest.yml", manifest)
+        assert_contract_error PromptEngineer::Corpus::Error, field do
+          PromptEngineer::Corpus.load(root)
+        end
+      end
+    end
+  end
+
+  def test_trigger_prompts_are_nonempty_closed_strings_after_rebinding
+    {"" => "prompt", 123 => "prompt"}.each do |value, field|
+      with_fixture_tree do |root|
+        triggers_path = File.join(root, "triggers.yml")
+        triggers = PromptEngineer::Contracts.parse_yaml(File.binread(triggers_path))
+        triggers.fetch("positive").first["prompt"] = value
+        write_yaml_with_recomputed_digest(root, "triggers.yml", triggers)
+        assert_contract_error PromptEngineer::Corpus::Error, field do
+          PromptEngineer::Corpus.load(root)
+        end
+      end
+    end
   end
 
   def test_manifest_tree_digest_binds_raw_formatting_comments_and_quote_bytes
@@ -478,6 +624,68 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       File.write(path, "drift")
       assert_contract_error PromptEngineer::Corpus::LegacyLockError, "digest" do
         PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      end
+    end
+  end
+
+  def test_pinned_legacy_lock_binds_files_to_commit_tree_and_avoids_hash_object_toctou
+    Dir.mktmpdir("legacy-commit-tree") do |root|
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "committed")
+      initialize_git_repository(root)
+      commit = git_head(root)
+
+      File.write(path, "working tree drift")
+      drifted = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", commit, {"skills/prompt-engineer/SKILL.md" => path}
+      )
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "commit tree" do
+        PromptEngineer::Corpus.verify_legacy_lock(drifted, root)
+      end
+
+      File.write(path, "committed")
+      valid = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", commit, {"skills/prompt-engineer/SKILL.md" => path}
+      )
+      original = PromptEngineer::Corpus.method(:git_object_id)
+      PromptEngineer::Corpus.define_singleton_method(:git_object_id) { |_path, _root = nil| raise "hash-object path" }
+      begin
+        assert PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      ensure
+        PromptEngineer::Corpus.define_singleton_method(:git_object_id, original)
+      end
+    end
+  end
+
+  def test_legacy_closure_rejects_hidden_extra_and_symlinked_directory_entries
+    Dir.mktmpdir("legacy-closure-shape") do |root|
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "fixture")
+      initialize_git_repository(root)
+      lock = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", git_head(root), {"skills/prompt-engineer/SKILL.md" => path}
+      )
+
+      hidden = Marshal.load(Marshal.dump(lock))
+      hidden.fetch("dependency_closure").fetch("paths") << ".secret"
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "hidden" do
+        PromptEngineer::Corpus.verify_legacy_lock(hidden, root)
+      end
+
+      extra_dir = File.join(root, "extra-dir")
+      FileUtils.mkdir_p(extra_dir)
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "extra" do
+        PromptEngineer::Corpus.verify_legacy_lock(lock, root)
+      end
+      FileUtils.rm_rf(extra_dir)
+
+      real_dir = File.join(root, "real-dir")
+      FileUtils.mkdir_p(real_dir)
+      File.symlink("real-dir", File.join(root, "linked-dir"))
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "symlink" do
+        PromptEngineer::Corpus.verify_legacy_lock(lock, root)
       end
     end
   end
@@ -744,6 +952,87 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
   end
 
   private
+
+  def semantic_judge_result(rubric)
+    dimensions = rubric.fetch("rubric_points").map do |dimension, points|
+      weight = points.values.sum
+      {
+        "dimension" => dimension,
+        "maximum" => weight,
+        "score" => weight,
+        "point_results" => points.map do |point_id, point_weight|
+          {
+            "point_id" => point_id,
+            "weight" => point_weight,
+            "status" => "pass",
+            "citation_required" => false,
+            "citation" => nil,
+            "uncertainty" => {"classification" => "none", "reason" => "no material uncertainty"}
+          }
+        end
+      }
+    end
+    {"rubric_dimensions" => dimensions}
+  end
+
+  def executor_facts
+    {
+      "run_id" => "run-1",
+      "case_id" => "PE-001",
+      "host" => "codex",
+      "session_id" => "session-1",
+      "arm" => "replacement",
+      "nonce" => "a" * 64,
+      "staged_package_digest" => "b" * 64,
+      "machine_id" => "machine-1",
+      "staged_path" => "/staged/replacement",
+      "public_task_packet_digest" => "e" * 64,
+      "raw_export_digest" => "c" * 64,
+      "launch_attestation_digest" => "d" * 64
+    }
+  end
+
+  def executor_result_bound_to(facts)
+    evidence_for = lambda do |status|
+      binding = facts.dup
+      evidence = {
+        "status" => status,
+        "event_ordinal" => 1,
+        "staged_path" => facts.fetch("staged_path"),
+        "machine_id" => facts.fetch("machine_id"),
+        "machine_binding_digest" => PromptEngineer::Canonical.digest(binding),
+        "binding" => binding,
+        "binding_digest" => PromptEngineer::Canonical.digest(binding)
+      }
+      evidence["evidence_digest"] = PromptEngineer::Canonical.digest(evidence)
+      evidence
+    end
+    {
+      "run_id" => facts.fetch("run_id"),
+      "case_id" => facts.fetch("case_id"),
+      "host" => facts.fetch("host"),
+      "arm" => facts.fetch("arm"),
+      "nonce" => facts.fetch("nonce"),
+      "expected_package_digest" => facts.fetch("staged_package_digest"),
+      "sandbox_launch_attestation_digest" => facts.fetch("launch_attestation_digest"),
+      "public_task_packet_digest" => facts.fetch("public_task_packet_digest"),
+      "raw_export_digest" => facts.fetch("raw_export_digest"),
+      "session" => {"id" => facts.fetch("session_id")},
+      "timestamps" => {"started_at" => "2026-01-01T00:00:00Z", "ended_at" => "2026-01-01T00:01:00Z"},
+      "messages" => [{"ordinal" => 1, "channel" => "assistant", "text" => "done"}],
+      "tool_events" => [{"ordinal" => 2, "tool" => "read", "status" => "completed"}],
+      "usage" => {"input_tokens" => 2, "output_tokens" => 3, "total_tokens" => 5},
+      "activation_evidence" => evidence_for.call("activated"),
+      "invocation_evidence" => evidence_for.call("invoked")
+    }
+  end
+
+  def write_yaml_with_recomputed_digest(root, relative, payload)
+    File.binwrite(File.join(root, relative), Psych.dump(payload))
+    manifest_path = File.join(root, "manifest.yml")
+    manifest = File.binread(manifest_path)
+    File.binwrite(manifest_path, manifest_with_digest(manifest, PromptEngineer::Corpus.tree_digest(root)))
+  end
 
   def independent_tree_digest(root)
     digest = Digest::SHA256.new

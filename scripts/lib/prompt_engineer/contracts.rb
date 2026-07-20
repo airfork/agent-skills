@@ -1,4 +1,5 @@
 require "psych"
+require "time"
 
 module PromptEngineer
   module Contracts
@@ -66,6 +67,113 @@ module PromptEngineer
       []
     rescue ValidationError => error
       [error.message]
+    end
+
+    def validate_judge_result!(result, rubric)
+      declared = normalize_declared_points(rubric)
+      expected_dimensions = PromptEngineer::Corpus::SCORING_MAXIMA.keys
+      dimensions = result.fetch("rubric_dimensions")
+      actual_dimensions = dimensions.map { |dimension| dimension.fetch("dimension") }
+      raise ValidationError, "dimensions must cover the frozen five dimensions" unless actual_dimensions.uniq.sort == expected_dimensions.sort
+
+      dimensions.each do |dimension|
+        name = dimension.fetch("dimension")
+        points = declared.fetch(name)
+        actual_points = dimension.fetch("point_results")
+        actual_ids = actual_points.map { |point| point.fetch("point_id") }
+        raise ValidationError, "point IDs are not declared for #{name}" unless actual_ids.uniq.sort == points.keys.sort
+        expected_maximum = points.values.sum
+        raise ValidationError, "maximum does not match weights for #{name}" unless dimension.fetch("maximum") == expected_maximum
+
+        lost_weight = 0
+        actual_points.each do |point|
+          point_id = point.fetch("point_id")
+          expected_weight = points.fetch(point_id)
+          raise ValidationError, "weight does not match declared point #{point_id}" unless point.fetch("weight") == expected_weight
+          status = point.fetch("status")
+          raise ValidationError, "status is invalid for #{point_id}" unless %w[pass fail uncertain].include?(status)
+          raise ValidationError, "citation_required must be boolean for #{point_id}" unless [true, false].include?(point.fetch("citation_required"))
+          if %w[fail uncertain].include?(status)
+            lost_weight += expected_weight
+            citation = point.fetch("citation", nil)
+            raise ValidationError, "citation evidence is required for #{point_id}" unless point.fetch("citation_required") == true && citation.is_a?(String) && !citation.empty?
+          elsif point.fetch("citation_required") == true
+            citation = point.fetch("citation", nil)
+            raise ValidationError, "citation is required for #{point_id}" unless citation.is_a?(String) && !citation.empty?
+          end
+          if status == "uncertain"
+            classification = point.fetch("uncertainty").fetch("classification")
+            raise ValidationError, "uncertainty classification is required for #{point_id}" unless classification == "material"
+          end
+        end
+        expected_score = [expected_maximum - lost_weight, 0].max
+        raise ValidationError, "score does not match weights for #{name}" unless dimension.fetch("score") == expected_score
+        if result.key?("scores")
+          raise ValidationError, "scores do not match #{name}" unless result.fetch("scores").fetch(name) == expected_score
+        end
+      end
+      true
+    rescue KeyError, TypeError, NoMethodError => error
+      raise ValidationError, "malformed judge result: #{error.message}"
+    end
+
+    def validate_executor_binding!(result, facts)
+      required = %w[run_id case_id host session_id arm nonce staged_package_digest machine_id staged_path public_task_packet_digest raw_export_digest launch_attestation_digest]
+      missing = required.reject { |key| facts.key?(key) }
+      raise ValidationError, "executor binding facts are incomplete" unless missing.empty?
+      expected_binding = required.each_with_object({}) { |key, binding| binding[key] = facts.fetch(key) }
+      raise ValidationError, "run binding mismatch" unless result.fetch("run_id") == facts.fetch("run_id")
+      raise ValidationError, "case binding mismatch" unless result.fetch("case_id") == facts.fetch("case_id")
+      raise ValidationError, "host binding mismatch" unless result.fetch("host") == facts.fetch("host")
+      raise ValidationError, "arm binding mismatch" unless result.fetch("arm") == facts.fetch("arm")
+      raise ValidationError, "nonce binding mismatch" unless result.fetch("nonce") == facts.fetch("nonce")
+      raise ValidationError, "session binding mismatch" unless result.fetch("session").fetch("id") == facts.fetch("session_id")
+      raise ValidationError, "launch packet binding mismatch" unless result.fetch("public_task_packet_digest") == facts.fetch("public_task_packet_digest")
+      raise ValidationError, "raw export binding mismatch" unless result.fetch("raw_export_digest") == facts.fetch("raw_export_digest")
+      raise ValidationError, "package binding mismatch" unless result.fetch("expected_package_digest") == facts.fetch("staged_package_digest")
+      raise ValidationError, "launch attestation binding mismatch" unless result.fetch("sandbox_launch_attestation_digest") == facts.fetch("launch_attestation_digest")
+
+      %w[activation_evidence invocation_evidence].each do |field|
+        evidence = result.fetch(field)
+        raise ValidationError, "#{field} binding mismatch" unless evidence.fetch("binding") == expected_binding
+        expected_digest = Canonical.digest(expected_binding)
+        raise ValidationError, "#{field} binding digest mismatch" unless evidence.fetch("binding_digest") == expected_digest && evidence.fetch("machine_binding_digest") == expected_digest
+        raise ValidationError, "#{field} machine binding mismatch" unless evidence.fetch("machine_id") == facts.fetch("machine_id")
+        raise ValidationError, "#{field} staged path mismatch" unless evidence.fetch("staged_path") == facts.fetch("staged_path")
+        evidence_copy = Marshal.load(Marshal.dump(evidence))
+        evidence_digest = evidence_copy.delete("evidence_digest")
+        raise ValidationError, "#{field} evidence digest mismatch" unless evidence_digest == Canonical.digest(evidence_copy)
+      end
+      true
+    rescue KeyError, TypeError, NoMethodError => error
+      raise ValidationError, "malformed executor binding: #{error.message}"
+    end
+
+    def validate_executor_result!(result, facts, token_cap: nil)
+      validate_executor_binding!(result, facts)
+      timestamps = result.fetch("timestamps")
+      begin
+        started_at = Time.iso8601(timestamps.fetch("started_at"))
+        ended_at = Time.iso8601(timestamps.fetch("ended_at"))
+      rescue ArgumentError, TypeError => error
+        raise ValidationError, "timestamp is invalid: #{error.message}"
+      end
+      raise ValidationError, "timestamp ordering is invalid" unless ended_at > started_at
+
+      events = result.fetch("messages") + result.fetch("tool_events")
+      ordinals = events.map { |event| event.fetch("ordinal") }
+      raise ValidationError, "event ordinals must be unique and monotonic" unless ordinals == ordinals.sort && ordinals.uniq.length == ordinals.length
+
+      usage = result.fetch("usage")
+      input_tokens = usage.fetch("input_tokens")
+      output_tokens = usage.fetch("output_tokens")
+      total_tokens = usage.fetch("total_tokens")
+      raise ValidationError, "total_tokens is inconsistent" unless total_tokens == input_tokens + output_tokens
+      cap = token_cap || facts["token_cap"]
+      raise ValidationError, "token cap exceeded" if cap && total_tokens > cap
+      true
+    rescue KeyError, TypeError, NoMethodError => error
+      raise ValidationError, "malformed executor result: #{error.message}"
     end
 
     def validate_schema!(schema, path = [])
@@ -138,6 +246,22 @@ module PromptEngineer
         end
       end
       true
+    end
+
+    def normalize_declared_points(rubric)
+      points = rubric.fetch("rubric_points", rubric)
+      expected_dimensions = PromptEngineer::Corpus::SCORING_MAXIMA.keys
+      raise ValidationError, "rubric dimensions are not frozen" unless points.is_a?(Hash) && points.keys.sort == expected_dimensions.sort
+      if points.values.all? { |value| value.is_a?(Integer) }
+        points.each_with_object({}) { |(dimension, weight), normalized| normalized[dimension] = {dimension => weight} }
+      elsif points.values.all? { |value| value.is_a?(Hash) }
+        points.each_with_object({}) do |(dimension, point_map), normalized|
+          raise ValidationError, "declared point map is not closed" unless point_map.keys.all? { |point_id| point_id.is_a?(String) } && point_map.values.all? { |weight| weight.is_a?(Integer) && weight >= 0 }
+          normalized[dimension] = point_map
+        end
+      else
+        raise ValidationError, "declared point weights are malformed"
+      end
     end
 
     def walk_ast(node, path)
