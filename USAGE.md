@@ -21,9 +21,54 @@ folder.
 | Skill | Category | Install | Recommended tier | Use for |
 |-------|----------|---------|------------------|---------|
 | `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
+| `prompt-engineer` | `general` | Candidate: Codex and Claude disabled; Cursor and Gemini disabled | `standard` (heavy `deep`) | Explicit prompt diagnosis and revision after qualification; no ordinary managed install or implicit activation. |
 | `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
 | `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
 | `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
+
+## `prompt-engineer`
+
+Use `$prompt-engineer` explicitly when you want prompt diagnosis or a proposed
+revision. The candidate does not activate implicitly, and its managed install is
+disabled for Codex, Claude, Cursor, and Gemini until qualification and a
+separate explicit cutover approval are complete.
+
+### Profiles and qualification
+
+Choose the lightest profile that can support the claim:
+
+- **Quick**: bounded diagnosis or a small wording change; label conclusions as
+  unmeasured when comparative evidence is not available.
+- **Standard**: one prompt or prompt-bearing skill with controlled evaluation,
+  fixed inputs, and a reproducible report.
+- **Ecosystem**: multiple related prompts whose triggers, handoffs, or shared
+  instructions must be evaluated together.
+
+The checked-in qualification surface is provided by
+`scripts/prompt-engineer-eval`, with host isolation through
+`scripts/prompt-engineer-sandbox` and lifecycle controls through
+`scripts/prompt-engineer-cutover`. Qualification requires an explicit positive
+`PROMPT_ENGINEER_MAX_USD` ceiling, an operator-selected model and effort for
+each host, and a maximum operator budget of eight hours. The fixed run budgets
+are 96 behavioral executor runs, 40 trigger runs, and at most 64 judge runs;
+there is no implicit monetary or time expansion.
+
+### Cutover, rollback, and retention
+
+Qualification produces a report and stops. Cutover begins only from a clean stable
+checkout whose exact qualified commit and package bytes are revalidated.
+The operator reviews and separately approves the canonical preview before
+`prepare` or `apply`; the activation commit is created only after the isolated
+filesystem transition and verification succeed. A failed or rejected
+activation is reverted before filesystem rollback. Use
+`scripts/prompt-engineer-cutover rollback --transaction PATH` before activation,
+or provide the exact activation revert commit after activation.
+
+The post-cutover use record includes timestamp, host and model versions,
+invocation mode, anonymized task category, outcome, and evidence location.
+Retain each host's legacy backup until five qualifying uses on each host are
+recorded and the retention gate passes. Backup deletion is unavailable here and
+requires a later explicit cleanup request and reviewed cleanup change.
 
 ## `adversarial-review`
 

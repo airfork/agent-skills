@@ -1,5 +1,7 @@
 require "minitest/autorun"
+require "open3"
 require "psych"
+require "tmpdir"
 
 class PromptEngineerSkillContractTest < Minitest::Test
   REPO = File.expand_path("..", __dir__)
@@ -64,6 +66,88 @@ class PromptEngineerSkillContractTest < Minitest::Test
     end
     assert_match(/^policy:\n\s+allow_implicit_invocation:\s+false\s*$/m, openai)
     assert_match(/\$prompt-engineer/, openai)
+  end
+
+  def test_candidate_manifest_contract
+    manifest = Psych.safe_load(File.read(File.join(REPO, "skills.yaml")), aliases: false)
+    candidate = manifest.fetch("skills").find { |skill| skill.fetch("name") == "prompt-engineer" }
+
+    refute_nil candidate, "missing prompt-engineer candidate manifest entry"
+    assert_equal "skills/general/prompt-engineer", candidate.fetch("path")
+    assert_equal "general", candidate.fetch("category")
+    assert_equal "candidate", candidate.fetch("status")
+    assert_equal %w[codex claude], candidate.fetch("interfaces")
+    assert_equal "standard", candidate.fetch("recommended_model_tier")
+    assert_equal "deep", candidate.fetch("heavy_model_tier")
+
+    install = candidate.fetch("install")
+    %w[codex claude cursor gemini].each do |target|
+      assert_equal false, install.fetch(target).fetch("enabled"), "#{target} install must be disabled"
+    end
+  end
+
+  def test_candidate_catalog_and_usage_agree_with_manifest
+    catalog = File.read(File.join(REPO, "CATALOG.md"))
+    usage = File.read(File.join(REPO, "USAGE.md"))
+
+    [catalog, usage].each do |document|
+      assert_includes document, "`prompt-engineer`"
+      assert_includes document, "Candidate"
+      assert_includes document, "general"
+      assert_includes document, "standard"
+      assert_includes document, "deep"
+      assert_match(/Codex and Claude[^\n]*disabled/i, document)
+    end
+  end
+
+  def test_candidate_operator_surface_is_explicit_and_fail_closed
+    usage = File.read(File.join(REPO, "USAGE.md"))
+    commands = File.read(File.join(REPO, "COMMANDS.md"))
+
+    [
+      "$prompt-engineer",
+      "Quick",
+      "Standard",
+      "Ecosystem",
+      "scripts/prompt-engineer-eval",
+      "scripts/prompt-engineer-sandbox",
+      "scripts/prompt-engineer-cutover",
+      "PROMPT_ENGINEER_MAX_USD",
+      "eight hours",
+      "separate explicit cutover approval",
+      "activation commit",
+      "scripts/prompt-engineer-cutover rollback",
+      "post-cutover use record",
+      "five qualifying uses on each host",
+      "later explicit cleanup request"
+    ].each { |term| assert_includes usage, term }
+    assert_match(/clean\s+stable\s+checkout/, usage)
+
+    %w[
+      scripts/prompt-engineer-eval
+      scripts/prompt-engineer-sandbox
+      scripts/prompt-engineer-cutover
+    ].each do |cli|
+      assert_match(/#{Regexp.escape(cli)}[^\n]*available/i, commands)
+    end
+    refute_match(/\brtk\b/, commands)
+  end
+
+  def test_ordinary_sync_dry_runs_never_select_candidate
+    Dir.mktmpdir("prompt-engineer-sync-contract") do |destination|
+      %w[codex claude].each do |target|
+        stdout, stderr, status = Open3.capture3(
+          "ruby",
+          File.join(REPO, "scripts", "sync-skills"),
+          "--repo-root", REPO,
+          "--dest", File.join(destination, target),
+          "--target", target,
+          "--dry-run"
+        )
+        assert status.success?, stderr
+        refute_match(/(?:link|update|remove|prune)\s+prompt-engineer(?:[:\s]|$)/i, stdout)
+      end
+    end
   end
 
   private
