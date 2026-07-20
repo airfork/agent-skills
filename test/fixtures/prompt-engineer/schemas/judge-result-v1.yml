@@ -18,7 +18,44 @@ properties:
   masked_packet_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
   private_rubric_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
   output_labels: {type: array, minItems: 1, items: {type: string, minLength: 1}}
-  rubric_dimensions: {type: array, minItems: 1, items: {type: object, required: [dimension, maximum, score, point_results], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, maximum: {type: integer, minimum: 0}, score: {type: integer, minimum: 0}, point_results: {type: array, minItems: 1, items: {type: object, required: [point_id, weight, status, citation_required, citation, uncertainty], additionalProperties: false, properties: {point_id: {type: string, minLength: 1}, weight: {type: integer, minimum: 0}, status: {type: string, enum: [pass, fail, uncertain]}, citation_required: {type: boolean}, citation: {type: [string, 'null'], minLength: 1}, uncertainty: {type: object, required: [classification, reason], additionalProperties: false, properties: {classification: {type: string, enum: [none, material]}, reason: {type: string, minLength: 1}}}}}}}}}
+  rubric_dimensions:
+    type: array
+    minItems: 1
+    items:
+      type: object
+      required: [dimension, maximum, score, point_results]
+      additionalProperties: false
+      properties:
+        dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}
+        maximum: {type: integer, minimum: 0}
+        score: {type: integer, minimum: 0}
+        point_results:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            required: [point_id, weight, status, citation_required, citation, uncertainty]
+            additionalProperties: false
+            properties:
+              point_id: {type: string, minLength: 1}
+              weight: {type: integer, minimum: 0}
+              status: {type: string, enum: [pass, fail, uncertain]}
+              citation_required: {type: boolean}
+              citation: {type: [string, 'null']}
+              uncertainty:
+                type: object
+                required: [classification, reason]
+                additionalProperties: false
+                properties:
+                  classification: {type: string, enum: [none, material]}
+                  reason: {type: string, minLength: 1}
+            allOf:
+              - if:
+                  properties:
+                    citation_required: {const: true}
+                then:
+                  properties:
+                    citation: {type: string, minLength: 1}
   scores: {type: object, required: [task_success, requirement_preservation], additionalProperties: false, properties: {task_success: {type: integer, minimum: 0, maximum: 4}, requirement_preservation: {type: integer, minimum: 0, maximum: 3}}}
   citations: {type: array, items: {type: object, required: [dimension, evidence], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, evidence: {type: string, minLength: 1}}}}
   uncertainty: {type: object, required: [classification, reason], additionalProperties: false, properties: {classification: {type: string, enum: [none, material]}, reason: {type: string, minLength: 1}}}

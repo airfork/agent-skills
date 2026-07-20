@@ -10,7 +10,7 @@ module PromptEngineer
     TYPES = %w[object array string integer number boolean null].freeze
     KEYWORDS = %w[
       type properties required additionalProperties items enum const pattern
-      minimum maximum minLength maxLength minItems maxItems
+      minimum maximum minLength maxLength minItems maxItems allOf if then else
     ].freeze
     CORE_TAGS = [
       nil,
@@ -103,6 +103,15 @@ module PromptEngineer
       end
       if schema.key?("items")
         validate_schema!(schema["items"], path + ["items"])
+      end
+      if schema.key?("allOf")
+        all_of = schema["allOf"]
+        raise SchemaError, "allOf must be an array at #{render_path(path)}" unless all_of.is_a?(Array) && !all_of.empty?
+
+        all_of.each_with_index { |child, index| validate_schema!(child, path + ["allOf", index]) }
+      end
+      %w[if then else].each do |keyword|
+        validate_schema!(schema[keyword], path + [keyword]) if schema.key?(keyword)
       end
       if schema.key?("enum") && !schema["enum"].is_a?(Array)
         raise SchemaError, "enum must be an array at #{render_path(path)}"
@@ -248,6 +257,17 @@ module PromptEngineer
       end
       if schema.key?("const") && value != schema["const"]
         raise ValidationError, "const at #{render_path(path)}"
+      end
+      schema.fetch("allOf", []).each { |child| validate_value(value, child, path) }
+      if schema.key?("if")
+        condition_matches = begin
+          validate_value(value, schema.fetch("if"), path)
+          true
+        rescue ValidationError
+          false
+        end
+        branch = condition_matches ? schema["then"] : schema["else"]
+        validate_value(value, branch, path) if branch
       end
       case value
       when Hash

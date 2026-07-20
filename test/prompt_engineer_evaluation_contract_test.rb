@@ -2,6 +2,7 @@ require "json"
 require "minitest/autorun"
 require "digest"
 require "open3"
+require "psych"
 require "tmpdir"
 
 require_relative "support/prompt_engineer_helper"
@@ -183,6 +184,43 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal %w[none material], uncertainty.fetch("properties").fetch("classification").fetch("enum")
     assert_includes uncertainty.fetch("required"), "reason"
     assert_equal false, judge.fetch("properties").fetch("timestamps").fetch("additionalProperties")
+  end
+
+  def test_judge_point_citations_are_conditional_and_required_failures_need_evidence
+    judge = PromptEngineer::Contracts.load_schema(fixture("schemas/judge-result-v1.yml"))
+    point = judge.fetch("properties").fetch("rubric_dimensions").fetch("items").fetch("properties").fetch("point_results").fetch("items")
+    base = {
+      "point_id" => "point-1",
+      "weight" => 1,
+      "status" => "fail",
+      "citation_required" => true,
+      "citation" => nil,
+      "uncertainty" => {"classification" => "none", "reason" => "not uncertain"}
+    }
+
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "type" do
+      PromptEngineer::Contracts.validate!(base, point)
+    end
+    allowed_missing = base.merge("citation_required" => false)
+    assert PromptEngineer::Contracts.validate!(allowed_missing, point)
+    assert_contract_error PromptEngineer::Contracts::ValidationError, "minLength" do
+      PromptEngineer::Contracts.validate!(base.merge("citation" => ""), point)
+    end
+  end
+
+  def test_executor_schema_requires_nonce_and_machine_bound_activation_invocation_evidence
+    executor = PromptEngineer::Contracts.load_schema(fixture("schemas/executor-result-v1.yml"))
+    %w[nonce activation_evidence invocation_evidence].each do |field|
+      assert_includes executor.fetch("required"), field
+    end
+    %w[activation_evidence invocation_evidence].each do |field|
+      evidence = executor.fetch("properties").fetch(field)
+      assert_equal false, evidence.fetch("additionalProperties")
+      %w[event_ordinal staged_path machine_id machine_binding_digest evidence_digest].each do |required|
+        assert_includes evidence.fetch("required"), required
+      end
+    end
+    assert_equal %q[\A[0-9a-f]{64}\z], executor.fetch("properties").fetch("nonce").fetch("pattern")
   end
 
   def test_corpus_freezes_cases_triggers_tree_digest_and_activation_pair
@@ -440,6 +478,81 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       File.write(path, "drift")
       assert_contract_error PromptEngineer::Corpus::LegacyLockError, "digest" do
         PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      end
+    end
+  end
+
+  def test_legacy_identity_rejects_symlinked_git_directory
+    Dir.mktmpdir("symlinked-git") do |root|
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "fixture")
+      initialize_git_repository(root)
+      commit = git_head(root)
+      lock = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", commit, {"skills/prompt-engineer/SKILL.md" => path}
+      )
+      real_git = File.join(root, ".git-real")
+      FileUtils.mv(File.join(root, ".git"), real_git)
+      File.symlink(".git-real", File.join(root, ".git"))
+
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "symlinked" do
+        PromptEngineer::Corpus.verify_legacy_lock(lock, root)
+      end
+    end
+  end
+
+  def test_legacy_object_id_evidence_is_closed_and_matches_file_records
+    Dir.mktmpdir("object-id-lock") do |root|
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "fixture")
+      initialize_git_repository(root)
+      lock = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", git_head(root), {"skills/prompt-engineer/SKILL.md" => path}
+      )
+
+      extra = Marshal.load(Marshal.dump(lock))
+      extra.fetch("evidence").fetch("object_ids").first["extra"] = true
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "object IDs" do
+        PromptEngineer::Corpus.verify_legacy_lock(extra, root)
+      end
+
+      mismatch = Marshal.load(Marshal.dump(lock))
+      mismatch.fetch("evidence").fetch("object_ids").first["object_id"] = "0" * 40
+      mismatch.fetch("evidence")["aggregate_digest"] = PromptEngineer::Corpus.send(:lock_digest, mismatch)
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "object ID" do
+        PromptEngineer::Corpus.verify_legacy_lock(mismatch, root)
+      end
+    end
+  end
+
+  def test_case_payloads_are_closed_and_validated_after_digest_recomputation
+    malformed = {
+      "public:allowed_tools" => ["write"],
+      "public:time_budget" => {"seconds" => 0},
+      "private:rubric_points" => {"task_success" => 99},
+      "private:prohibited_behaviors" => [123],
+      "private:zero_tolerance_gates" => ["unknown_gate"],
+      "private:judge_instructions" => ""
+    }
+
+    malformed.each do |field, value|
+      with_fixture_tree do |root|
+        scope, name = field.split(":")
+        relative = "cases/PE-001/#{scope == "public" ? "public.yml" : "private.yml"}"
+        path = File.join(root, relative)
+        payload = PromptEngineer::Contracts.parse_yaml(File.binread(path))
+        payload.fetch(name)
+        payload[name] = value
+        File.binwrite(path, Psych.dump(payload))
+        digest = PromptEngineer::Corpus.tree_digest(root)
+        manifest_path = File.join(root, "manifest.yml")
+        File.binwrite(manifest_path, manifest_with_digest(File.binread(manifest_path), digest))
+
+        assert_contract_error PromptEngineer::Corpus::Error, name do
+          PromptEngineer::Corpus.load(root)
+        end
       end
     end
   end

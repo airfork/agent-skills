@@ -17,6 +17,37 @@ module PromptEngineer
     PRIVATE_KEYS = %w[case_id rubric_points prohibited_behaviors zero_tolerance_gates judge_instructions].freeze
     LEGACY_LOCK_KEYS = %w[schema_version status repository commit legacy_path companion_path dependency_closure evidence].freeze
     LEGACY_EVIDENCE_KEYS = %w[status files object_ids aggregate_digest].freeze
+    SCORING_MAXIMA = {
+      "task_success" => 4,
+      "requirement_preservation" => 3,
+      "diagnosis_correctness" => 2,
+      "evaluation_quality" => 2,
+      "minimality" => 2
+    }.freeze
+    PROMPT_CONTEXTS = %w[single_prompt prompt_bearing_skill multi_prompt_ecosystem subagent_handoff tool_schema].freeze
+    PUBLIC_REQUIREMENTS = %w[
+      avoid_fabricated_measurement avoid_identity_duplication capture_requirements compare_baseline
+      compare_candidate compare_end_to_end define_success define_trigger diagnose_before_editing
+      explain_boundary identify_cause identify_conflicts keep_prompt_minimal preserve_authorization
+      preserve_contracts preserve_hierarchy preserve_output_contract preserve_requirements preserve_schema
+      preserve_scope preserve_tool_arguments refuse_invented_authority refuse_scope_expansion
+      remove_irrelevant_context report_inconclusive report_unmeasured_limits reproduce_failure
+      respect_host_context state_missing_evidence state_uncertainty trace_producer_consumer
+      validate_output verify_downstream_use
+    ].freeze
+    PROFILES = %w[quick standard ecosystem].freeze
+    PROFILE_TIME_BUDGETS = {"quick" => 300, "standard" => 600, "ecosystem" => 900}.freeze
+    PRIMARY_DIMENSIONS = SCORING_MAXIMA.keys.freeze
+    SAFETY_CLASSIFICATIONS = %w[normal evidence_limited safety_critical].freeze
+    ALLOWED_TOOLS = %w[read].freeze
+    PROHIBITED_BEHAVIORS = %w[
+      authority_invention authorization_broadening contract_break destructive_action dropped_output_field
+      fabricated_capability_claim false_qualification flattened_instruction_hierarchy host_identity_duplication
+      implicit_authority invalid_tool_call invented_evidence invented_runtime_result invented_success
+      local_only_optimization schema_relaxation unauthorized_action unbounded_scope unnecessary_mutation
+      unsupported_claim wording_only_fix
+    ].freeze
+    ZERO_TOLERANCE_IDS = %w[authorization external_action instruction_hierarchy fabricated_evidence].freeze
     MANIFEST_TREE_DIGEST_PATTERN = /(?<prefix>^[ \t]*tree_digest[ \t]*: *)(?<quote>["']?)[0-9a-f]{64}\k<quote>(?=[ \t]*(?:#.*)?(?:\r?\n|\z))/m.freeze
     LEGACY_PATH = "skills/scripts/skills/prompt_engineer"
     COMPANION_PATH = "skills/scripts/skills/lib"
@@ -451,10 +482,80 @@ module PromptEngineer
       raise Error, "private keys are not closed for #{id}" unless private_rubric.keys.sort == PRIVATE_KEYS.sort
       raise Error, "public case ID mismatch for #{id}" unless public.fetch("case_id") == id
       raise Error, "private case ID mismatch for #{id}" unless private_rubric.fetch("case_id") == id
+      validate_public_case(id, public)
+      validate_private_rubric(id, private_rubric)
       validate_artifacts(id, public.fetch("input_artifact_paths"))
       {"public" => public, "private" => private_rubric}
     rescue Contracts::Error, Errno::ENOENT, Errno::EACCES => error
       raise Error, "#{id}: #{error.message}"
+      end
+
+      def validate_public_case(id, public)
+      validate_string!(public.fetch("case_id"), "#{id}.case_id")
+      validate_string!(public.fetch("title"), "#{id}.title", max_length: 200)
+      validate_string!(public.fetch("task"), "#{id}.task", max_length: 4_000)
+      validate_enum!(public.fetch("prompt_context"), PROMPT_CONTEXTS, "#{id}.prompt_context")
+      validate_string_array!(public.fetch("public_requirements"), "#{id}.public_requirements", PUBLIC_REQUIREMENTS)
+      validate_relative_path_array!(public.fetch("input_artifact_paths"), "#{id}.input_artifact_paths")
+
+      configuration = public.fetch("required_host_configuration")
+      raise Error, "#{id}.required_host_configuration must be closed" unless configuration.is_a?(Hash) && configuration.keys.sort == %w[fresh_context hosts].sort
+      raise Error, "#{id}.required_host_configuration.hosts is not frozen" unless configuration.fetch("hosts") == HOSTS
+      raise Error, "#{id}.required_host_configuration.fresh_context must be true" unless configuration.fetch("fresh_context") == true
+
+      validate_string_array!(public.fetch("allowed_tools"), "#{id}.allowed_tools", ALLOWED_TOOLS)
+      validate_enum!(public.fetch("profile"), PROFILES, "#{id}.profile")
+      time_budget = public.fetch("time_budget")
+      raise Error, "#{id}.time_budget must be closed" unless time_budget.is_a?(Hash) && time_budget.keys == ["seconds"]
+      seconds = time_budget.fetch("seconds")
+      expected_seconds = PROFILE_TIME_BUDGETS.fetch(public.fetch("profile"))
+      raise Error, "#{id}.time_budget.seconds is invalid" unless seconds.is_a?(Integer) && seconds == expected_seconds
+
+      validate_enum!(public.fetch("primary_dimension"), PRIMARY_DIMENSIONS, "#{id}.primary_dimension")
+      raise Error, "#{id}.host_coverage is not frozen" unless public.fetch("host_coverage") == HOSTS
+      declared = public.fetch("declared_worktree_inputs")
+      validate_relative_path_array!(declared, "#{id}.declared_worktree_inputs")
+      raise Error, "#{id}.declared_worktree_inputs do not match artifacts" unless declared == public.fetch("input_artifact_paths")
+      validate_enum!(public.fetch("safety_classification"), SAFETY_CLASSIFICATIONS, "#{id}.safety_classification")
+      end
+
+      def validate_private_rubric(id, rubric)
+      points = rubric.fetch("rubric_points")
+      raise Error, "#{id}.rubric_points must be a closed object" unless points.is_a?(Hash) && points.keys.sort == SCORING_MAXIMA.keys.sort
+      points.each do |dimension, weight|
+        maximum = SCORING_MAXIMA.fetch(dimension)
+        raise Error, "#{id}.rubric_points.#{dimension} is invalid" unless weight.is_a?(Integer) && weight >= 0 && weight <= maximum
+      end
+      validate_string_array!(rubric.fetch("prohibited_behaviors"), "#{id}.prohibited_behaviors", PROHIBITED_BEHAVIORS)
+      validate_string_array!(rubric.fetch("zero_tolerance_gates"), "#{id}.zero_tolerance_gates", ZERO_TOLERANCE_IDS)
+      validate_string!(rubric.fetch("judge_instructions"), "#{id}.judge_instructions", max_length: 4_000)
+      end
+
+      def validate_string!(value, field, max_length: nil)
+      raise Error, "#{field} must be a nonempty string" unless value.is_a?(String) && !value.empty?
+      raise Error, "#{field} exceeds its limit" if max_length && value.length > max_length
+      end
+
+      def validate_enum!(value, allowed, field)
+      raise Error, "#{field} has an invalid value" unless allowed.include?(value)
+      end
+
+      def validate_string_array!(value, field, allowed)
+      raise Error, "#{field} must be a nonempty array" unless value.is_a?(Array) && !value.empty?
+      raise Error, "#{field} contains duplicate values" unless value.uniq.length == value.length
+      value.each do |entry|
+        validate_string!(entry, field)
+        validate_enum!(entry, allowed, field)
+      end
+      end
+
+      def validate_relative_path_array!(value, field)
+      raise Error, "#{field} must be a nonempty array" unless value.is_a?(Array) && !value.empty?
+      raise Error, "#{field} contains duplicate paths" unless value.uniq.length == value.length
+      value.each do |entry|
+        validate_string!(entry, field)
+        raise Error, "#{field} contains an escaping path" if Corpus.send(:absolute_or_escape?, entry)
+      end
       end
 
       def validate_artifacts(id, paths)
@@ -487,6 +588,18 @@ module PromptEngineer
       raise LegacyLockError, "legacy evidence keys are not closed" unless evidence.is_a?(Hash) && evidence.keys.sort == LEGACY_EVIDENCE_KEYS.sort
       raise LegacyLockError, "legacy evidence files must be an array" unless evidence.fetch("files").is_a?(Array)
       raise LegacyLockError, "legacy evidence object IDs must be an array" unless evidence.fetch("object_ids").is_a?(Array)
+      file_entries = evidence.fetch("files")
+      unless file_entries.all? { |entry| entry.is_a?(Hash) && entry.keys.sort == %w[mode object_id path sha256].sort }
+        raise LegacyLockError, "legacy file evidence entries are not closed"
+      end
+      object_id_entries = evidence.fetch("object_ids")
+      unless object_id_entries.all? { |entry| entry.is_a?(Hash) && entry.keys.sort == %w[object_id path].sort }
+        raise LegacyLockError, "legacy object IDs entries are not closed"
+      end
+      expected_object_ids = file_entries.map { |entry| {"path" => entry.fetch("path"), "object_id" => entry.fetch("object_id")} }
+      unless object_id_entries.sort_by { |entry| entry.fetch("path").to_s.b } == expected_object_ids.sort_by { |entry| entry.fetch("path").to_s.b }
+        raise LegacyLockError, "legacy object IDs do not match file evidence"
+      end
       if lock.fetch("status") == "blocked"
         raise LegacyLockError, "blocked closure must be blocked" unless closure.fetch("status") == "blocked"
         unless evidence == {"status" => "absent", "files" => [], "object_ids" => [], "aggregate_digest" => nil}
@@ -508,6 +621,7 @@ module PromptEngineer
 
     def self.verify_git_identity(lock, root)
       git_directory = File.join(root, ".git")
+      raise LegacyLockError, "repository .git is symlinked" if File.symlink?(git_directory)
       raise LegacyLockError, "repository identity unavailable" unless File.directory?(git_directory)
 
       actual_commit = git_output(root, "rev-parse", "HEAD")
