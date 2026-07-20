@@ -1,0 +1,14 @@
+#!/usr/bin/env ruby
+require "json"
+require_relative "lib/prompt_engineer"
+require_relative "lib/prompt_engineer/sandbox/darwin"
+
+if ARGV == ["status"]
+  STDOUT.write(PromptEngineer::Canonical.json(PromptEngineer::Sandbox::Darwin.capability))
+  STDOUT.write("\n")
+  exit 0
+end
+
+STDERR.write(JSON.generate("error" => {"code" => "unsupported", "message" => "sandbox launch is unsupported: host authentication and tool isolation evidence is unavailable"}))
+STDERR.write("\n")
+exit 3

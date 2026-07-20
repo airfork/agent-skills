@@ -8,6 +8,7 @@ require_relative "prompt_engineer/capabilities"
 require_relative "prompt_engineer/normalizers"
 require_relative "prompt_engineer/scoring"
 require_relative "prompt_engineer/reporting"
+require_relative "prompt_engineer/sandbox"
 require_relative "prompt_engineer/cli"
 
 module PromptEngineer
