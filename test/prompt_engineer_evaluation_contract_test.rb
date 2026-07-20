@@ -18,6 +18,143 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert defined?(PromptEngineer::Budget)
     assert defined?(PromptEngineer::Capabilities)
     assert defined?(PromptEngineer::Normalizers)
+    assert defined?(PromptEngineer::Scoring)
+    assert defined?(PromptEngineer::Reporting)
+  end
+
+  def test_task8_masking_is_deterministic_and_does_not_expose_arm_or_private_paths
+    records = %w[legacy replacement unassisted].map do |arm|
+      executor_output_for(arm, text: "neutral output", package_digest: arm == "legacy" ? "l" * 64 : "r" * 64)
+    end
+    packet = PromptEngineer::Scoring.build_judge_packet(
+      run_id: "run-task8",
+      case_id: "PE-001",
+      host: "codex",
+      repeat_index: 0,
+      seed: "fixed-seed",
+      public_case: task8_public_case,
+      rubric: task8_rubric,
+      executor_records: records
+    )
+    repeated = PromptEngineer::Scoring.build_judge_packet(
+      run_id: "run-task8",
+      case_id: "PE-001",
+      host: "codex",
+      repeat_index: 0,
+      seed: "fixed-seed",
+      public_case: task8_public_case,
+      rubric: task8_rubric,
+      executor_records: records.reverse
+    )
+
+    assert_equal packet.to_h, repeated.to_h
+    assert_equal packet.packet_digest, repeated.packet_digest
+    assert_equal packet.masked_label_map_digest, repeated.masked_label_map_digest
+    assert_equal packet.document.fetch("output_labels").sort, packet.document.fetch("output_labels")
+    refute packet.document.key?("label_map")
+    refute packet.document.key?("arm")
+    refute packet.document.to_s.include?("legacy")
+    refute packet.document.to_s.include?("replacement")
+    refute packet.document.to_s.include?("/private/source")
+    assert_equal PromptEngineer::Canonical.digest(task8_rubric), packet.private_rubric_digest
+    assert_match(/\A[0-9a-f]{64}\z/, packet.packet_digest)
+  end
+
+  def test_task8_judge_ingestion_requires_packet_binding_and_point_level_evidence
+    packet = task8_packet
+    result = judge_result_for(packet, statuses: {"success" => "fail"})
+
+    assert PromptEngineer::Scoring.ingest_judge_result!(result, packet: packet)
+
+    missing_citation = Marshal.load(Marshal.dump(result))
+    point = missing_citation.fetch("rubric_dimensions").first.fetch("point_results").find { |item| item.fetch("point_id") == "success" }
+    point["citation"] = nil
+    assert_contract_error PromptEngineer::Scoring::Error, "citation" do
+      PromptEngineer::Scoring.ingest_judge_result!(missing_citation, packet: packet)
+    end
+
+    duplicate_point = Marshal.load(Marshal.dump(result))
+    duplicate_point.fetch("rubric_dimensions").first.fetch("point_results") << duplicate_point.fetch("rubric_dimensions").first.fetch("point_results").first
+    assert_contract_error PromptEngineer::Scoring::Error, "point" do
+      PromptEngineer::Scoring.ingest_judge_result!(duplicate_point, packet: packet)
+    end
+
+    wrong_packet = Marshal.load(Marshal.dump(result))
+    wrong_packet["masked_packet_digest"] = "f" * 64
+    assert_contract_error PromptEngineer::Scoring::Error, "packet" do
+      PromptEngineer::Scoring.ingest_judge_result!(wrong_packet, packet: packet)
+    end
+
+    guessed_arm = Marshal.load(Marshal.dump(result))
+    guessed_arm["arm"] = "replacement"
+    assert_contract_error PromptEngineer::Scoring::Error, "arm" do
+      PromptEngineer::Scoring.ingest_judge_result!(guessed_arm, packet: packet)
+    end
+  end
+
+  def test_task8_repeat_reconciliation_uses_lower_score_and_marks_uncertainty_inconclusive
+    packet = task8_packet
+    first = judge_result_for(packet, statuses: {})
+    second = judge_result_for(packet, statuses: {"success" => "fail"})
+
+    reconciled = PromptEngineer::Scoring.reconcile_judges([first, second], packet: packet)
+    assert_equal "scored", reconciled.fetch("status")
+    assert_equal 0, reconciled.fetch("scores").fetch("task_success")
+    assert_equal "second", reconciled.fetch("selected_judge")
+    assert reconciled.fetch("judge_disagreement")
+
+    uncertain = judge_result_for(packet, statuses: {}, overall_uncertainty: "material")
+    uncertain_reconciliation = PromptEngineer::Scoring.reconcile_judges([uncertain], packet: packet)
+    assert_equal "inconclusive", uncertain_reconciliation.fetch("status")
+  end
+
+  def test_task8_repeat_selection_is_frozen_and_caps_stability_and_targeted_runs
+    rows = [
+      {"host" => "codex", "case_id" => "PE-001", "replacement" => {"task_success" => 3, "requirement_preservation" => 3}, "legacy" => {"task_success" => 4, "requirement_preservation" => 3}},
+      {"host" => "claude", "case_id" => "PE-002", "replacement" => {"task_success" => 4, "requirement_preservation" => 2}, "legacy" => {"task_success" => 4, "requirement_preservation" => 3}}
+    ]
+    selected = PromptEngineer::Scoring.select_repeats(rows, corpus_digest: "c" * 64, stability_case_ids: %w[PE-001 PE-002 PE-003])
+    assert_equal rows, selected.fetch("targeted_candidates")
+    assert_equal 18, selected.fetch("stability_session_cap")
+    assert_equal 6, selected.fetch("targeted_session_cap")
+    assert_equal 2, selected.fetch("selected").length
+    assert_equal selected, PromptEngineer::Scoring.select_repeats(rows.reverse, corpus_digest: "c" * 64, stability_case_ids: %w[PE-001 PE-002 PE-003])
+  end
+
+  def test_task8_release_decision_is_fail_closed_for_zero_tolerance_and_missing_host_coverage
+    qualified = task8_release_evidence
+    assert_equal "QUALIFIED_EXPLICIT", PromptEngineer::Scoring.release_decision(qualified).fetch("decision")
+
+    safety_failure = Marshal.load(Marshal.dump(qualified))
+    safety_failure["zero_tolerance_failures"] = [{"host" => "codex", "case_id" => "PE-001", "id" => "authorization"}]
+    assert_equal "NOT_QUALIFIED", PromptEngineer::Scoring.release_decision(safety_failure).fetch("decision")
+
+    missing_host = Marshal.load(Marshal.dump(qualified))
+    missing_host["comparisons"] = qualified.fetch("comparisons").reject { |comparison| comparison.fetch("host") == "claude" }
+    assert_equal "INCONCLUSIVE", PromptEngineer::Scoring.release_decision(missing_host).fetch("decision")
+
+    unsupported = Marshal.load(Marshal.dump(qualified))
+    unsupported["host_status"] = {"codex" => "unsupported", "claude" => "unsupported"}
+    assert_equal "INCONCLUSIVE", PromptEngineer::Scoring.release_decision(unsupported).fetch("decision")
+  end
+
+  def test_task8_report_is_reproducible_and_recomputes_decision_from_immutable_evidence
+    evidence = task8_release_evidence.merge(
+      "environment" => {"codex" => {"version" => "fixture-1"}, "claude" => {"version" => "fixture-1"}},
+      "digests" => {"corpus" => "c" * 64, "package" => "p" * 64, "legacy_lock" => "l" * 64},
+      "budgets" => {"behavioral" => {"used" => 72, "cap" => 96}, "judge" => {"used" => 1, "cap" => 64}},
+      "exclusions" => ["live hosts were not launched"],
+      "trigger_results" => {"positive" => {"passed" => 0, "total" => 0}, "negative" => {"passed" => 0, "total" => 0}}
+    )
+    first = PromptEngineer::Reporting.render(evidence)
+    second = PromptEngineer::Reporting.render(Marshal.load(Marshal.dump(evidence)))
+
+    assert_equal first, second
+    assert_includes first, "# Prompt Engineer Qualification Report"
+    assert_includes first, "QUALIFIED_EXPLICIT"
+    assert_includes first, "live hosts were not launched"
+    assert_includes first, "zero-tolerance"
+    refute_includes first, "arm_label_map"
   end
 
   def test_native_capability_report_is_closed_and_marks_both_hosts_unsupported
@@ -1243,6 +1380,134 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       "usage" => {"input_tokens" => 2, "output_tokens" => 3, "total_tokens" => 5},
       "activation_evidence" => evidence_for.call("activated"),
       "invocation_evidence" => evidence_for.call("invoked")
+    }
+  end
+
+  def task8_public_case
+    {
+      "case_id" => "PE-001",
+      "title" => "Fixture prompt task",
+      "task" => "Improve the prompt while preserving the observable contract.",
+      "prompt_context" => "single_prompt",
+      "public_requirements" => ["preserve_requirements", "compare_baseline"],
+      "input_artifact_paths" => ["/private/source/input.txt"],
+      "required_host_configuration" => {"hosts" => %w[codex claude], "fresh_context" => true}
+    }
+  end
+
+  def task8_rubric
+    {
+      "case_id" => "PE-001",
+      "rubric_points" => {
+        "task_success" => {"success" => 4},
+        "requirement_preservation" => {"preserve" => 3},
+        "diagnosis_correctness" => {"diagnosis" => 2},
+        "evaluation_quality" => {"evidence" => 2},
+        "minimality" => {"minimal" => 2}
+      },
+      "prohibited_behaviors" => ["invented_evidence"],
+      "zero_tolerance_gates" => ["fabricated_evidence"],
+      "judge_instructions" => "Score observable output only."
+    }
+  end
+
+  def task8_packet
+    PromptEngineer::Scoring.build_judge_packet(
+      run_id: "run-task8",
+      case_id: "PE-001",
+      host: "codex",
+      repeat_index: 0,
+      seed: "fixed-seed",
+      public_case: task8_public_case,
+      rubric: task8_rubric,
+      executor_records: %w[legacy replacement unassisted].map { |arm| executor_output_for(arm, text: "#{arm} output") }
+    )
+  end
+
+  def executor_output_for(arm, text:, package_digest: "a" * 64)
+    {
+      "run_id" => "run-task8",
+      "case_id" => "PE-001",
+      "host" => "codex",
+      "arm" => arm,
+      "repeat_index" => 0,
+      "expected_package_digest" => package_digest,
+      "messages" => [{"ordinal" => 0, "channel" => "assistant", "text" => text}],
+      "tool_events" => [{"ordinal" => 1, "tool" => "read", "status" => "completed"}],
+      "final_status" => "completed",
+      "timestamps" => {"started_at" => "2026-01-01T00:00:00Z", "ended_at" => "2026-01-01T00:00:03Z"},
+      "usage" => {"input_tokens" => 1, "output_tokens" => 2, "total_tokens" => 3},
+      "visible_assistant_characters" => text.length,
+      "final_answer_characters" => text.length,
+      "model_turns" => 1,
+      "unnecessary_mutation" => false
+    }
+  end
+
+  def judge_result_for(packet, statuses:, overall_uncertainty: "none")
+    dimensions = packet.rubric.fetch("rubric_points").map do |dimension, points|
+      point_results = points.map do |point_id, weight|
+        status = statuses.fetch(point_id, "pass")
+        {
+          "point_id" => point_id,
+          "weight" => weight,
+          "status" => status,
+          "citation_required" => true,
+          "citation" => status == "pass" ? "output:0" : "output:0 missing required behavior",
+          "uncertainty" => {"classification" => status == "uncertain" ? "material" : "none", "reason" => status == "uncertain" ? "fixture ambiguity" : "not uncertain"}
+        }
+      end
+      score = point_results.sum { |point| point.fetch("status") == "pass" ? point.fetch("weight") : 0 }
+      {"dimension" => dimension, "maximum" => points.values.sum, "score" => score, "point_results" => point_results}
+    end
+    scores = dimensions.each_with_object({}) { |dimension, result| result[dimension.fetch("dimension")] = dimension.fetch("score") }
+    {
+      "schema_version" => 1,
+      "packet_id" => packet.document.fetch("packet_id"),
+      "run_id" => packet.document.fetch("run_id"),
+      "decision" => "tie",
+      "session" => {"id" => "judge-session", "fresh" => true},
+      "fresh_session_evidence" => {"new_session_marker" => "new", "parent_session_absent" => true, "first_event_ordinal" => 0},
+      "timestamps" => {"started_at" => "2026-01-01T00:00:00Z", "ended_at" => "2026-01-01T00:00:03Z"},
+      "model" => "fixture-judge",
+      "effort" => "high",
+      "configuration_digest" => "b" * 64,
+      "environment_digest" => "c" * 64,
+      "tool_inventory" => ["read"],
+      "tool_events" => [],
+      "masked_packet_digest" => packet.packet_digest,
+      "private_rubric_digest" => packet.private_rubric_digest,
+      "output_labels" => packet.document.fetch("output_labels"),
+      "rubric_dimensions" => dimensions,
+      "scores" => scores,
+      "citations" => [{"dimension" => "task_success", "evidence" => "output:0"}],
+      "uncertainty" => {"classification" => overall_uncertainty, "reason" => overall_uncertainty == "material" ? "fixture ambiguity" : "not uncertain"},
+      "exit_status" => 0,
+      "raw_export_digest" => "d" * 64
+    }
+  end
+
+  def task8_release_evidence
+    comparisons = %w[codex claude].flat_map do |host|
+      (1..12).map do |number|
+        {
+          "host" => host,
+          "case_id" => format("PE-%03d", number),
+          "status" => "comparable",
+          "replacement" => {"task_success" => 4, "requirement_preservation" => 3, "diagnosis_correctness" => 2, "evaluation_quality" => 2, "minimality" => 2},
+          "legacy" => {"task_success" => 3, "requirement_preservation" => 3, "diagnosis_correctness" => 2, "evaluation_quality" => 2, "minimality" => 2}
+        }
+      end
+    end
+    {
+      "host_status" => {"codex" => "supported", "claude" => "supported"},
+      "comparisons" => comparisons,
+      "zero_tolerance_failures" => [],
+      "efficiency" => {"codex" => {"replacement" => {"turns" => 1, "characters" => 10}, "legacy" => {"turns" => 2, "characters" => 20}}, "claude" => {"replacement" => {"turns" => 1, "characters" => 10}, "legacy" => {"turns" => 2, "characters" => 20}}},
+      "explicit_triggers" => {"passed" => 16, "total" => 16},
+      "implicit_triggers" => {"passed" => 8, "total" => 8},
+      "negative_triggers" => {"unexpected_activation" => 0, "total" => 16},
+      "inconclusives" => []
     }
   end
 
