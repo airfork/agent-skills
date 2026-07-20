@@ -39,12 +39,12 @@ module PromptEngineer
         raise Error, "session caps are fixed"
       end
       max_sessions = TOTAL_SESSION_CAP
-      raise Error, "money limit must be positive" unless money_limit.is_a?(Numeric) && money_limit > 0
-      raise Error, "timeout must be positive" unless session_timeout_seconds.is_a?(Numeric) && session_timeout_seconds > 0
+      raise Error, "money limit must be positive" unless finite_numeric?(money_limit) && money_limit > 0
+      raise Error, "timeout must be positive" unless finite_numeric?(session_timeout_seconds) && session_timeout_seconds > 0
       raise Error, "max sessions must be positive" unless max_sessions.is_a?(Integer) && max_sessions > 0
 
       @money_limit = money_limit.to_f
-      @prices = prices || {}
+      @prices = freeze_prices(prices || {})
       @session_timeout_seconds = session_timeout_seconds
       @max_sessions = max_sessions
       @spent = 0.0
@@ -59,11 +59,11 @@ module PromptEngineer
 
     def reserve_cost(model, usage)
       price = price_for(model)
-      validate_usage(usage)
+      validate_usage(usage, price)
       cost = 0.0
       usage.each do |dimension, amount|
         rate = price.fetch(dimension.to_s) { raise Error, "price missing for #{dimension}" }
-        raise Error, "price must be nonnegative" unless rate.is_a?(Numeric) && rate >= 0
+        raise Error, "price must be nonnegative" unless finite_numeric?(rate) && rate >= 0
         cost += rate.to_f * amount.to_f
       end
       cost
@@ -74,6 +74,7 @@ module PromptEngineer
     def reserve!(model, pessimistic_usage, timeout_seconds = @session_timeout_seconds, kind: :behavioral)
       @lock.synchronize do
         raise Error, "unknown session kind" unless SESSION_CAPS.key?(kind)
+        raise Error, "timeout must be positive" unless finite_numeric?(timeout_seconds) && timeout_seconds > 0
         raise Error, "session timeout exceeds operator time" if timeout_seconds > OPERATOR_TIME_SECONDS
         raise Error, "operator time ceiling exceeded" if @reserved_time + timeout_seconds > OPERATOR_TIME_SECONDS
         cost = reserve_cost(model, pessimistic_usage)
@@ -180,17 +181,57 @@ module PromptEngineer
       price
     end
 
-    def validate_usage(usage)
-      raise Error, "usage must be a nonnegative numeric object" unless usage.is_a?(Hash)
+    def validate_usage(usage, price = nil)
+      raise Error, "usage must be a nonempty numeric object" unless usage.is_a?(Hash) && !usage.empty?
       usage.each_value do |amount|
-        unless amount.is_a?(Numeric) && amount >= 0
+        unless finite_numeric?(amount) && amount >= 0
           raise Error, "usage must be a nonnegative numeric object"
         end
+      end
+      cap = price && price["token_cap"]
+      if cap
+        tokens = usage.inject(0) do |total, (dimension, amount)|
+          token_dimension = dimension.to_s =~ /(?:^|_)tokens\z/
+          total + (token_dimension ? amount : 0)
+        end
+        tokens = usage.fetch("input", 0) + usage.fetch("output", 0) if tokens == 0
+        raise Error, "token cap exceeded" if tokens > cap
       end
     end
 
     def fetch_lease(lease_id)
       @leases.fetch(lease_id) { raise Error, "unknown lease #{lease_id}" }
+    end
+
+    def finite_numeric?(value)
+      value.is_a?(Numeric) && (!value.is_a?(Float) || value.finite?)
+    end
+
+    def freeze_prices(prices)
+      raise Error, "prices must be an object" unless prices.is_a?(Hash)
+      copy = Marshal.load(Marshal.dump(prices))
+      copy.each_value do |price|
+        raise Error, "price must be an object" unless price.is_a?(Hash)
+        price.each do |dimension, value|
+          next if dimension.to_s == "token_cap"
+          raise Error, "price must be nonnegative" unless finite_numeric?(value) && value >= 0
+        end
+        cap = price["token_cap"]
+        if cap && !(cap.is_a?(Integer) && cap > 0)
+          raise Error, "token cap must be positive"
+        end
+      end
+      deep_freeze(copy)
+    end
+
+    def deep_freeze(value)
+      case value
+      when Hash
+        value.each { |key, child| deep_freeze(key); deep_freeze(child) }
+      when Array
+        value.each { |child| deep_freeze(child) }
+      end
+      value.freeze
     end
     end
   end

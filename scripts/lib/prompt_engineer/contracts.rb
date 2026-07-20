@@ -27,7 +27,11 @@ module PromptEngineer
 
     def parse_yaml(source)
       text = source.respond_to?(:read) ? source.read : source.to_s
-      document = Psych.parse(text)
+      documents = []
+      Psych.parse_stream(text) { |document| documents << document }
+      raise YamlError, "exactly one YAML document is required" unless documents.length == 1
+
+      document = documents.first
       walk_ast(document.root, [])
       value = safe_load(text)
       reject_non_string_keys(value, [])

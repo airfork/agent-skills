@@ -64,7 +64,7 @@ module PromptEngineer
     def self.digest_paths(root, paths)
       digest = Digest::SHA256.new
       paths.sort_by { |path| path.b }.each do |relative|
-        bytes = File.binread(File.join(root, relative))
+        bytes = stable_file_bytes(File.join(root, relative))
         bytes = yield(relative, bytes) if block_given?
         digest.update(relative.encode("UTF-8"))
         digest.update("\0")
@@ -72,6 +72,21 @@ module PromptEngineer
         digest.update("\0")
       end
       digest.hexdigest
+    end
+
+    # Path-based reads are revalidated around each read. A changed identity or
+    # size makes the digest unusable instead of silently accepting a TOCTOU race.
+    def self.stable_file_bytes(path)
+      before = File.lstat(path)
+      raise Error, "symlinked file #{path}" if before.symlink?
+      bytes = File.binread(path)
+      after = File.lstat(path)
+      identity = [before.dev, before.ino, before.size, before.mtime, before.nlink]
+      current = [after.dev, after.ino, after.size, after.mtime, after.nlink]
+      raise Error, "file changed during read #{path}" unless identity == current
+      bytes
+    rescue Errno::ENOENT, Errno::EACCES => error
+      raise Error, error.message
     end
 
     def self.activation_diff(left, right, path = [], output = {})
@@ -102,9 +117,9 @@ module PromptEngineer
         raise LegacyLockError, "missing file #{relative}" unless File.file?(source)
         {
           "path" => relative,
-          "sha256" => Digest::SHA256.file(source).hexdigest,
+          "sha256" => Digest::SHA256.hexdigest(stable_file_bytes(source)),
           "mode" => (File.stat(source).mode & 0o777).to_s(8),
-          "object_id" => git_object_id(source) || Digest::SHA256.file(source).hexdigest
+          "object_id" => git_object_id(source) || Digest::SHA256.hexdigest(stable_file_bytes(source))
         }
       end.sort_by { |entry| entry.fetch("path").b }
       lock = {
@@ -160,7 +175,7 @@ module PromptEngineer
         reject_symlink_components(root, relative)
         source = File.join(root, relative)
         raise LegacyLockError, "missing file #{relative}" unless File.file?(source)
-        actual = Digest::SHA256.file(source).hexdigest
+        actual = Digest::SHA256.hexdigest(stable_file_bytes(source))
         raise LegacyLockError, "digest mismatch for #{relative}" unless actual == entry.fetch("sha256")
         mode = (File.stat(source).mode & 0o777).to_s(8)
         raise LegacyLockError, "mode mismatch for #{relative}" unless mode == entry.fetch("mode").to_s
@@ -183,6 +198,7 @@ module PromptEngineer
       end
 
       def load
+      raise Error, "corpus root is symlinked" if File.symlink?(@root)
       raise Error, "corpus root is not a directory" unless File.directory?(@root)
       @manifest = Contracts.load_yaml(File.join(@root, "manifest.yml"))
       validate_manifest
@@ -294,7 +310,7 @@ module PromptEngineer
         absolute = File.expand_path(File.join(root, "cases", id, relative))
         case_root = File.expand_path(File.join(root, "cases", id))
         raise Error, "artifact path escape for #{id}" unless absolute == case_root || absolute.start_with?(case_root + File::SEPARATOR)
-        Corpus.send(:reject_symlink_components, case_root, relative)
+        Corpus.send(:reject_symlink_components, root, File.join("cases", id, relative))
         raise Error, "missing artifact #{relative} for #{id}" unless File.file?(absolute)
         raise Error, "artifact symlink for #{id}" if File.symlink?(absolute)
       end
@@ -335,7 +351,7 @@ module PromptEngineer
 
     def self.verify_git_identity(lock, root)
       git_directory = File.join(root, ".git")
-      return true unless File.directory?(git_directory)
+      raise LegacyLockError, "repository identity unavailable" unless File.directory?(git_directory)
 
       actual_commit = git_output(root, "rev-parse", "HEAD")
       raise LegacyLockError, "commit identity mismatch" unless actual_commit == lock.fetch("commit")

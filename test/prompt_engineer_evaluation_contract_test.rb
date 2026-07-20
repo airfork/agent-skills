@@ -60,6 +60,12 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     refute value.frozen?
   end
 
+  def test_yaml_parser_rejects_multiple_documents_before_construction
+    assert_contract_error PromptEngineer::Contracts::YamlError, "document" do
+      PromptEngineer::Contracts.parse_yaml("one: 1\n---\ntwo: 2\n")
+    end
+  end
+
   def test_schema_validator_is_closed_and_supports_required_enum_const_patterns_and_bounds
     schema = {
       "type" => "object",
@@ -133,6 +139,15 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal({}, PromptEngineer::Corpus.activation_diff(explicit, implicit).reject { |path, _| path == ["policy", "allow_implicit_invocation"] })
   end
 
+  def test_all_declared_case_artifacts_are_tracked
+    PromptEngineer::Corpus::CASE_IDS.each do |case_id|
+      relative = "test/fixtures/prompt-engineer/v1/cases/#{case_id}/artifacts/input.txt"
+      assert File.file?(File.join(REPO, relative)), "missing artifact #{relative}"
+      _out, _err, status = Open3.capture3("git", "-C", REPO, "ls-files", "--error-unmatch", relative)
+      assert status.success?, "artifact is not tracked: #{relative}"
+    end
+  end
+
   def test_artifact_parent_symlinks_are_rejected
     with_fixture_tree do |root|
       case_root = File.join(root, "cases", "PE-001")
@@ -142,6 +157,18 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
         PromptEngineer::Corpus.load(root, verify_digest: false)
       end
+    end
+  end
+
+  def test_corpus_root_symlink_is_rejected
+    with_fixture_tree do |root|
+      symlink = root + "-symlink"
+      File.symlink(root, symlink)
+      assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
+        PromptEngineer::Corpus.load(symlink)
+      end
+    ensure
+      FileUtils.rm_f(symlink) if symlink
     end
   end
 
@@ -262,6 +289,57 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     assert_contract_error PromptEngineer::Budget::Error, "timeout" do
       PromptEngineer::Budget.new(money_limit: 1, prices: {}, session_timeout_seconds: 0)
+    end
+  end
+
+  def test_reservation_rejects_negative_timeout_and_settlement_usage_caps
+    budget = PromptEngineer::Budget.new(
+      money_limit: 50,
+      prices: {"capped:model" => {"input_tokens" => 1.0, "output_tokens" => 1.0, "token_cap" => 4}},
+      session_timeout_seconds: 60
+    )
+    assert_contract_error PromptEngineer::Budget::Error, "timeout" do
+      budget.reserve!("capped:model", {"input_tokens" => 1, "output_tokens" => 1}, -1)
+    end
+    lease = budget.reserve!("capped:model", {"input_tokens" => 1, "output_tokens" => 1})
+    assert_contract_error PromptEngineer::Budget::Error, "usage" do
+      budget.settle!(lease.id, {})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "token" do
+      budget.settle!(lease.id, {"input_tokens" => 3, "output_tokens" => 2})
+    end
+  end
+
+  def test_budget_rejects_nonfinite_prices_usage_and_timeout_and_freezes_prices
+    prices = {"model" => {"input" => 1.0, "output" => 1.0}}
+    budget = PromptEngineer::Budget.new(money_limit: 10, prices: prices)
+    prices.fetch("model")["input"] = 99.0
+    assert_equal 2.0, budget.reserve_cost("model", {"input" => 1, "output" => 1})
+    assert_contract_error PromptEngineer::Budget::Error, "price" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {"input" => Float::NAN}})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "price" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {"input" => Float::INFINITY}})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "timeout" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {}, session_timeout_seconds: Float::INFINITY)
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "usage" do
+      budget.reserve_cost("model", {"input" => Float::INFINITY, "output" => 1})
+    end
+  end
+
+  def test_pinned_lock_requires_git_identity
+    Dir.mktmpdir("unpinned-legacy") do |root|
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
+      File.write(path, "fixture")
+      lock = PromptEngineer::Corpus.lock_for_tree(
+        "fixture://legacy", "a" * 40, {"skills/prompt-engineer/SKILL.md" => path}
+      )
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "repository identity" do
+        PromptEngineer::Corpus.verify_legacy_lock(lock, root)
+      end
     end
   end
 
