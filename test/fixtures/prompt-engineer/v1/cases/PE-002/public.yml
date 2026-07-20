@@ -1,0 +1,14 @@
+case_id: PE-002
+title: Resolve conflicting prompt priorities
+task: Diagnose and revise an agent prompt with conflicting priorities.
+prompt_context: prompt_bearing_skill
+public_requirements: [preserve_hierarchy, identify_conflicts, compare_baseline]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 600}
+profile: standard
+primary_dimension: requirement_preservation
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

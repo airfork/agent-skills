@@ -1,0 +1,14 @@
+case_id: PE-010
+title: Preserve a tool schema contract
+task: Revise a prompt while preserving a tool and structured-output contract.
+prompt_context: tool_schema
+public_requirements: [preserve_schema, preserve_tool_arguments, validate_output]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 900}
+profile: ecosystem
+primary_dimension: requirement_preservation
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

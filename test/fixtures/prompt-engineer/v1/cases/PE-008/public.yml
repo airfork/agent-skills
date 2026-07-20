@@ -1,0 +1,14 @@
+case_id: PE-008
+title: Clarify a subagent handoff
+task: Reduce excess handoff context while preserving the output contract.
+prompt_context: subagent_handoff
+public_requirements: [preserve_output_contract, remove_irrelevant_context, verify_downstream_use]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 900}
+profile: ecosystem
+primary_dimension: task_success
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

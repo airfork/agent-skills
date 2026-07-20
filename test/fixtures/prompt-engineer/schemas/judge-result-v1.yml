@@ -1,0 +1,9 @@
+type: object
+required: [schema_version, packet_id, decision, scores, citations]
+additionalProperties: false
+properties:
+  schema_version: {type: integer, const: 1}
+  packet_id: {type: string, minLength: 1}
+  decision: {type: string, enum: [replacement, legacy, tie, inconclusive]}
+  scores: {type: object, required: [task_success, requirement_preservation], additionalProperties: false, properties: {task_success: {type: integer, minimum: 0, maximum: 4}, requirement_preservation: {type: integer, minimum: 0, maximum: 3}}}
+  citations: {type: array, items: {type: object, required: [dimension, evidence], additionalProperties: false, properties: {dimension: {type: string, enum: [task_success, requirement_preservation, diagnosis_correctness, evaluation_quality, minimality]}, evidence: {type: string, minLength: 1}}}}

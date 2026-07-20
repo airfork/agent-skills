@@ -1,0 +1,20 @@
+schema_version: 1
+operator_choices:
+  codex:
+    model: gpt-test
+    effort: high
+    timeout_seconds: 300
+  claude:
+    model: claude-test
+    effort: high
+    timeout_seconds: 300
+money_limit_usd: 25.0
+hosts:
+  - codex
+  - claude
+pricing_authority:
+  - {provider: openai, model: gpt-test, currency: USD, input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+  - {provider: anthropic, model: claude-test, currency: USD, input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+provider_caps:
+  codex: 12.5
+  claude: 12.5

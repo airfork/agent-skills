@@ -1,0 +1,20 @@
+schema_version: 1
+trigger_suite_version: v1
+positive:
+  - {id: TP-001, prompt: "Create a prompt for this task and compare it with the baseline.", expected_activation: true}
+  - {id: TP-002, prompt: "Optimize this prompt against the stated success criteria.", expected_activation: true}
+  - {id: TP-003, prompt: "Diagnose why this prompt fails before revising it.", expected_activation: true}
+  - {id: TP-004, prompt: "Review the prompts in this handoff ecosystem end to end.", expected_activation: true}
+  - {id: TP-005, prompt: "Compare two prompt variants with evidence.", expected_activation: true}
+  - {id: TP-006, prompt: "Use $prompt-engineer to improve this prompt.", expected_activation: true}
+  - {id: TP-007, prompt: "Simplify this prompt without losing its requirements.", expected_activation: true}
+  - {id: TP-008, prompt: "Evaluate whether this prompt change actually helps.", expected_activation: true}
+negative:
+  - {id: TN-001, prompt: "Implement the requested Ruby change and run its tests.", expected_activation: false}
+  - {id: TN-002, prompt: "Edit this README for grammar and clarity.", expected_activation: false}
+  - {id: TN-003, prompt: "Explain the concept of prompt engineering in two sentences.", expected_activation: false}
+  - {id: TN-004, prompt: "The runtime bug is already traced to configuration; fix it.", expected_activation: false}
+  - {id: TN-005, prompt: "Update the database migration and verify the schema.", expected_activation: false}
+  - {id: TN-006, prompt: "Rename this variable throughout the application.", expected_activation: false}
+  - {id: TN-007, prompt: "Review this ordinary prose paragraph for tone.", expected_activation: false}
+  - {id: TN-008, prompt: "A prompt file is present in the repository; continue the implementation.", expected_activation: false}

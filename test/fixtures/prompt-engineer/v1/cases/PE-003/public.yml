@@ -1,0 +1,14 @@
+case_id: PE-003
+title: Diagnose a reproducible instruction failure
+task: Use a reproducible failure to identify the responsible prompt layer.
+prompt_context: single_prompt
+public_requirements: [reproduce_failure, identify_cause, state_uncertainty]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 600}
+profile: standard
+primary_dimension: diagnosis_correctness
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

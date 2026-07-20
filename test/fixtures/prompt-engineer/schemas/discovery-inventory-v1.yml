@@ -1,0 +1,12 @@
+type: object
+required: [schema_version, scan_time, host, root_id, roots, entries, source_evidence_digest, aggregate_digest]
+additionalProperties: false
+properties:
+  schema_version: {type: integer, const: 1}
+  scan_time: {type: string, minLength: 1}
+  host: {type: string, enum: [codex, claude]}
+  root_id: {type: string, minLength: 1}
+  roots: {type: array, minItems: 1, items: {type: string, minLength: 1}}
+  entries: {type: array, items: {type: object, required: [path, kind, owner, mode, device, inode, sha256, classification], additionalProperties: false, properties: {path: {type: string, minLength: 1}, kind: {type: string, enum: [file, directory, symlink]}, owner: {type: integer, minimum: 0}, mode: {type: integer, minimum: 0}, device: {type: integer, minimum: 0}, inode: {type: integer, minimum: 0}, sha256: {type: string, pattern: '\A[0-9a-f]{64}\z'}, classification: {type: string, enum: [dedicated, shared]}}}}
+  source_evidence_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
+  aggregate_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
