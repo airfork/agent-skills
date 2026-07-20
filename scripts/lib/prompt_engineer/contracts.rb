@@ -116,7 +116,7 @@ module PromptEngineer
       numeric_keywords = %w[minimum maximum]
       numeric_keywords.each do |keyword|
         next unless schema.key?(keyword)
-        unless schema[keyword].is_a?(Numeric)
+        unless finite_real?(schema[keyword])
           raise SchemaError, "#{keyword} must be numeric at #{render_path(path)}"
         end
       end
@@ -137,6 +137,9 @@ module PromptEngineer
       end
       unless CORE_TAGS.include?(node.tag)
         raise YamlError, "unsupported YAML tag #{node.tag.inspect} at #{render_path(path)}"
+      end
+      if node.is_a?(Psych::Nodes::Scalar) && node.plain && node.value =~ /\A[+-]?\.(?:nan|inf)\z/i
+        raise YamlError, "nonfinite YAML scalar at #{render_path(path)}"
       end
       if node.is_a?(Psych::Nodes::Mapping)
         keys = {}
@@ -206,6 +209,9 @@ module PromptEngineer
     private_class_method :reject_non_string_keys
 
     def validate_value(value, schema, path)
+      if value.is_a?(Numeric) && !finite_real?(value)
+        raise ValidationError, "finite at #{render_path(path)}"
+      end
       if schema.key?("type")
         types = schema["type"].is_a?(Array) ? schema["type"] : [schema["type"]]
         unless types.any? { |type| type_matches?(value, type) }
@@ -267,6 +273,12 @@ module PromptEngineer
       end
     end
     private_class_method :type_matches?
+
+    def finite_real?(value)
+      value.is_a?(Numeric) && !value.is_a?(Complex) &&
+        (!value.respond_to?(:finite?) || value.finite?)
+    end
+    private_class_method :finite_real?
 
     def check_length(value, schema, minimum, maximum, path)
       if schema.key?(minimum) && value.length < schema[minimum]

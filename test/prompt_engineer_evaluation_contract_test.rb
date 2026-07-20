@@ -66,6 +66,14 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
   end
 
+  def test_yaml_parser_rejects_nonfinite_yaml_scalars
+    %w[.nan .inf -.inf].each do |scalar|
+      assert_contract_error PromptEngineer::Contracts::YamlError, "finite" do
+        PromptEngineer::Contracts.parse_yaml("value: #{scalar}\n")
+      end
+    end
+  end
+
   def test_schema_validator_is_closed_and_supports_required_enum_const_patterns_and_bounds
     schema = {
       "type" => "object",
@@ -96,6 +104,13 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     assert_contract_error PromptEngineer::Contracts::ValidationError, "minimum" do
       PromptEngineer::Contracts.validate!({"kind" => "case", "name" => "PE-001", "count" => 0}, schema)
+    end
+
+    numeric_schema = {"type" => "number", "minimum" => 0}
+    [Float::NAN, Float::INFINITY, -Float::INFINITY].each do |number|
+      assert_contract_error PromptEngineer::Contracts::ValidationError, "finite" do
+        PromptEngineer::Contracts.validate!(number, numeric_schema)
+      end
     end
   end
 
@@ -129,8 +144,9 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal 12, corpus.cases.length
     assert_equal 16, corpus.trigger_records.length
     assert_equal 40, PromptEngineer::Budget::TRIGGER_RUNS
-    assert_equal independent_tree_digest(CORPUS), corpus.tree_digest
+    assert_equal independent_manifest_binding_digest(CORPUS), corpus.tree_digest
     assert_equal independent_manifest_binding_digest(CORPUS), corpus.manifest_digest
+    assert_equal corpus.manifest.fetch("tree_digest"), corpus.tree_digest
 
     explicit, implicit = corpus.activation_pair
     refute_equal explicit, implicit
@@ -172,6 +188,46 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
   end
 
+  def test_corpus_root_with_symlinked_ancestor_is_rejected
+    with_fixture_tree do |root|
+      container = Dir.mktmpdir("prompt-engineer-root-parent")
+      link = File.join(container, "link")
+      File.symlink(File.dirname(root), link)
+      supplied = File.join(link, File.basename(root))
+      assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
+        PromptEngineer::Corpus.load(supplied)
+      end
+      FileUtils.rm_f(link)
+      FileUtils.rm_rf(container)
+    end
+  end
+
+  def test_corpus_read_fails_closed_when_path_swaps_to_a_symlink_before_open
+    Dir.mktmpdir("prompt-engineer-toctou") do |root|
+      victim = File.join(root, "victim.txt")
+      secret = File.join(root, "secret.txt")
+      File.write(victim, "safe")
+      File.write(secret, "private rubric")
+      original_open = File.method(:open)
+      swapped = false
+      File.define_singleton_method(:open) do |*arguments, &block|
+        if arguments.first == victim && !swapped
+          FileUtils.rm(victim)
+          File.symlink(secret, victim)
+          swapped = true
+        end
+        original_open.call(*arguments, &block)
+      end
+      begin
+        assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
+          PromptEngineer::Corpus.stable_file_bytes(victim)
+        end
+      ensure
+        File.define_singleton_method(:open, original_open)
+      end
+    end
+  end
+
   def test_corpus_digest_and_artifact_containment_fail_closed
     with_fixture_tree do |root|
       File.open(File.join(root, "cases", "PE-001", "artifacts", "input.txt"), "a") { |file| file.write("tamper") }
@@ -208,6 +264,10 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       valid = PromptEngineer::Corpus.lock_for_tree(
         "fixture://legacy", commit, {"skills/prompt-engineer/SKILL.md" => path}
       )
+      assert_equal "skills/scripts/skills/prompt_engineer", valid.fetch("legacy_path")
+      assert_equal "skills/scripts/skills/lib", valid.fetch("companion_path")
+      assert_equal valid.fetch("evidence").fetch("files").map { |entry| entry.fetch("path") },
+                   valid.fetch("dependency_closure").fetch("paths")
       refute valid.fetch("evidence").fetch("files").first.key?("source_path")
       assert PromptEngineer::Corpus.verify_legacy_lock(valid, root)
       File.write(File.join(root, "extra.txt"), "extra")
@@ -308,6 +368,12 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_contract_error PromptEngineer::Budget::Error, "token" do
       budget.settle!(lease.id, {"input_tokens" => 3, "output_tokens" => 2})
     end
+    total_budget = PromptEngineer::Budget.new(
+      money_limit: 50,
+      prices: {"total:model" => {"input_tokens" => 1.0, "output_tokens" => 1.0, "total_tokens" => 0.0, "token_cap" => 4}}
+    )
+    total_lease = total_budget.reserve!("total:model", {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 4})
+    assert_equal :settled, total_budget.settle!(total_lease.id, {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 4}).status
   end
 
   def test_budget_rejects_nonfinite_prices_usage_and_timeout_and_freezes_prices
@@ -326,6 +392,18 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     assert_contract_error PromptEngineer::Budget::Error, "usage" do
       budget.reserve_cost("model", {"input" => Float::INFINITY, "output" => 1})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "price" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {"input" => Complex(1, 0)}})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "usage" do
+      budget.reserve_cost("model", {"input" => Complex(1, 0), "output" => 1})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "cost" do
+      budget.reserve_cost("model", {"input" => 10**1000, "output" => 1})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "price" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {"input" => 10**1000}})
     end
   end
 

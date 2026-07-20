@@ -16,6 +16,9 @@ module PromptEngineer
     PRIVATE_KEYS = %w[case_id rubric_points prohibited_behaviors zero_tolerance_gates judge_instructions].freeze
     LEGACY_LOCK_KEYS = %w[schema_version status repository commit legacy_path companion_path dependency_closure evidence].freeze
     LEGACY_EVIDENCE_KEYS = %w[status files object_ids aggregate_digest].freeze
+    LEGACY_PATH = "skills/scripts/skills/prompt_engineer"
+    COMPANION_PATH = "skills/scripts/skills/lib"
+    NOFOLLOW_FLAG = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : nil
 
     attr_reader :root, :manifest, :triggers, :cases, :tree_digest, :manifest_digest
 
@@ -33,14 +36,9 @@ module PromptEngineer
     end
 
     def self.tree_digest(root)
-      digest_paths(root, regular_paths(root))
-    end
-
-    def self.manifest_tree_digest(root)
-      manifest_digest(root)
-    end
-
-    def self.manifest_digest(root)
+      # The canonical binding hashes ordered UTF-8 relative-path bytes, NUL,
+      # file bytes, and NUL. The manifest's declared tree_digest is replaced
+      # with zeroes while hashing, so that field is the sole binding value.
       digest_paths(root, regular_paths(root)) do |relative, bytes|
         if relative == "manifest.yml"
           bytes.sub(/tree_digest: "[0-9a-f]{64}"/, 'tree_digest: "' + ("0" * 64) + '"')
@@ -48,6 +46,14 @@ module PromptEngineer
           bytes
         end
       end
+    end
+
+    def self.manifest_tree_digest(root)
+      manifest_digest(root)
+    end
+
+    def self.manifest_digest(root)
+      tree_digest(root)
     end
 
     def self.regular_paths(root)
@@ -74,17 +80,20 @@ module PromptEngineer
       digest.hexdigest
     end
 
-    # Path-based reads are revalidated around each read. A changed identity or
-    # size makes the digest unusable instead of silently accepting a TOCTOU race.
     def self.stable_file_bytes(path)
-      before = File.lstat(path)
-      raise Error, "symlinked file #{path}" if before.symlink?
-      bytes = File.binread(path)
-      after = File.lstat(path)
-      identity = [before.dev, before.ino, before.size, before.mtime, before.nlink]
-      current = [after.dev, after.ino, after.size, after.mtime, after.nlink]
-      raise Error, "file changed during read #{path}" unless identity == current
-      bytes
+      raise Error, "no-follow reads unavailable" unless NOFOLLOW_FLAG
+      File.open(path, File::RDONLY | NOFOLLOW_FLAG) do |file|
+        before = file.stat
+        raise Error, "not a regular file #{path}" unless before.file?
+        bytes = file.read
+        after = file.stat
+        identity = [before.dev, before.ino, before.size, before.mtime, before.nlink]
+        current = [after.dev, after.ino, after.size, after.mtime, after.nlink]
+        raise Error, "file changed during read #{path}" unless identity == current
+        bytes
+      end
+    rescue Errno::ELOOP
+      raise Error, "symlinked path #{path}"
     rescue Errno::ENOENT, Errno::EACCES => error
       raise Error, error.message
     end
@@ -127,8 +136,8 @@ module PromptEngineer
         "status" => "pinned",
         "repository" => repository,
         "commit" => commit,
-        "legacy_path" => "skills/prompt-engineer",
-        "companion_path" => "skills/scripts/skills/prompt_engineer",
+        "legacy_path" => LEGACY_PATH,
+        "companion_path" => COMPANION_PATH,
         "dependency_closure" => {
           "status" => "complete",
           "reason" => "verified fixture closure",
@@ -179,7 +188,8 @@ module PromptEngineer
         raise LegacyLockError, "digest mismatch for #{relative}" unless actual == entry.fetch("sha256")
         mode = (File.stat(source).mode & 0o777).to_s(8)
         raise LegacyLockError, "mode mismatch for #{relative}" unless mode == entry.fetch("mode").to_s
-        object_id = git_object_id(source, root) || actual
+        object_id = git_object_id(source, root)
+        raise LegacyLockError, "object identity unavailable for #{relative}" unless object_id
         raise LegacyLockError, "object identity mismatch for #{relative}" unless object_id == entry.fetch("object_id")
       end
       expected = lock_digest(lock)
@@ -199,12 +209,13 @@ module PromptEngineer
 
       def load
       raise Error, "corpus root is symlinked" if File.symlink?(@root)
+      raise Error, "corpus root has symlinked ancestor" unless File.realpath(@root) == @root
       raise Error, "corpus root is not a directory" unless File.directory?(@root)
       @manifest = Contracts.load_yaml(File.join(@root, "manifest.yml"))
       validate_manifest
       @tree_digest = Corpus.tree_digest(@root)
       @manifest_digest = Corpus.manifest_digest(@root)
-      if @verify_digest && @manifest.fetch("tree_digest") != @manifest_digest
+      if @verify_digest && @manifest.fetch("tree_digest") != @tree_digest
         raise Error, "corpus tree digest mismatch"
       end
       @triggers = Contracts.load_yaml(File.join(@root, "triggers.yml"))
@@ -322,6 +333,8 @@ module PromptEngineer
       raise LegacyLockError, "legacy lock keys are not closed" unless lock.keys.sort == LEGACY_LOCK_KEYS.sort
       raise LegacyLockError, "unsupported legacy lock schema" unless lock.fetch("schema_version") == 1
       raise LegacyLockError, "legacy lock status is invalid" unless %w[blocked pinned].include?(lock.fetch("status"))
+      raise LegacyLockError, "legacy path is not exact" unless lock.fetch("legacy_path") == LEGACY_PATH
+      raise LegacyLockError, "companion path is not exact" unless lock.fetch("companion_path") == COMPANION_PATH
       closure = lock.fetch("dependency_closure")
       raise LegacyLockError, "dependency closure keys are not closed" unless closure.is_a?(Hash) && closure.keys.sort == %w[paths reason status].sort
       raise LegacyLockError, "dependency closure status is invalid" unless %w[blocked complete].include?(closure.fetch("status"))
@@ -338,6 +351,7 @@ module PromptEngineer
         end
       else
         raise LegacyLockError, "pinned closure must be complete" unless closure.fetch("status") == "complete"
+        raise LegacyLockError, "pinned closure must be nonempty" if closure.fetch("paths").empty?
         raise LegacyLockError, "pinned evidence must have a digest" unless evidence.fetch("status") == "pinned" && evidence.fetch("aggregate_digest").is_a?(String)
       end
       true

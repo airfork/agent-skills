@@ -64,7 +64,14 @@ module PromptEngineer
       usage.each do |dimension, amount|
         rate = price.fetch(dimension.to_s) { raise Error, "price missing for #{dimension}" }
         raise Error, "price must be nonnegative" unless finite_numeric?(rate) && rate >= 0
-        cost += rate.to_f * amount.to_f
+        converted_rate = rate.to_f
+        converted_amount = amount.to_f
+        converted_cost = converted_rate * converted_amount
+        unless finite_numeric?(converted_rate) && finite_numeric?(converted_amount) && finite_numeric?(converted_cost)
+          raise Error, "cost is not finite"
+        end
+        cost += converted_cost
+        raise Error, "cost is not finite" unless finite_numeric?(cost)
       end
       cost
     rescue KeyError
@@ -188,13 +195,20 @@ module PromptEngineer
           raise Error, "usage must be a nonnegative numeric object"
         end
       end
-      cap = price && price["token_cap"]
+      cap = price && (price["token_cap"] || price[:token_cap])
       if cap
-        tokens = usage.inject(0) do |total, (dimension, amount)|
-          token_dimension = dimension.to_s =~ /(?:^|_)tokens\z/
-          total + (token_dimension ? amount : 0)
-        end
-        tokens = usage.fetch("input", 0) + usage.fetch("output", 0) if tokens == 0
+        tokens = if usage.key?("total_tokens") || usage.key?(:total_tokens)
+                   usage.key?("total_tokens") ? usage.fetch("total_tokens") : usage.fetch(:total_tokens)
+                 else
+                   input = usage.key?("input_tokens") ? usage.fetch("input_tokens") : usage.fetch(:input_tokens, nil)
+                   output = usage.key?("output_tokens") ? usage.fetch("output_tokens") : usage.fetch(:output_tokens, nil)
+                   if input || output
+                     (input || 0) + (output || 0)
+                   else
+                     usage.fetch("input", usage.fetch(:input, 0)) +
+                       usage.fetch("output", usage.fetch(:output, 0))
+                   end
+                 end
         raise Error, "token cap exceeded" if tokens > cap
       end
     end
@@ -204,7 +218,8 @@ module PromptEngineer
     end
 
     def finite_numeric?(value)
-      value.is_a?(Numeric) && (!value.is_a?(Float) || value.finite?)
+      value.is_a?(Numeric) && !value.is_a?(Complex) &&
+        (!value.respond_to?(:finite?) || value.finite?)
     end
 
     def freeze_prices(prices)
@@ -215,6 +230,7 @@ module PromptEngineer
         price.each do |dimension, value|
           next if dimension.to_s == "token_cap"
           raise Error, "price must be nonnegative" unless finite_numeric?(value) && value >= 0
+          raise Error, "price must be finite" unless finite_numeric?(value.to_f)
         end
         cap = price["token_cap"]
         if cap && !(cap.is_a?(Integer) && cap > 0)

@@ -13,7 +13,7 @@ module PromptEngineerTestHelper
   def copy_fixture_tree
     destination = Dir.mktmpdir("prompt-engineer-fixture")
     FileUtils.cp_r(CORPUS, File.join(destination, "v1"))
-    destination
+    File.realpath(destination)
   end
 
   def with_fixture_tree
