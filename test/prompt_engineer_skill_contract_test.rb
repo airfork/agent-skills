@@ -77,6 +77,17 @@ class PromptEngineerSkillContractTest < Minitest::Test
     assert_includes description, "model availability"
   end
 
+  def test_description_excludes_non_prompt_trigger_requests
+    description = skill_text_description
+
+    [
+      "implementation handoff requests without prompt-design intent",
+      "repositories merely containing prompts",
+      "prompt-engineering concept explanations",
+      "one-off answers"
+    ].each { |exclusion| assert_includes description, exclusion }
+  end
+
   def test_each_profile_requires_comparable_evidence_and_zero_tolerance_checks
     evaluation = File.read(File.join(SKILL_DIR, "references", "evaluation.md")).downcase
 

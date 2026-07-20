@@ -3,9 +3,12 @@ name: prompt-engineer
 description: >-
   Use when creating, improving, simplifying, diagnosing, or comparing prompts,
   prompt-bearing skills, subagent handoffs, multi-prompt ecosystems, or prompt
-  evaluations. Do not use for ordinary prose edits or failures already traced
-  to code, runtime, configuration, tools, data, permissions, capability,
-  architecture, model availability, or external systems.
+  evaluations. Do not use for implementation handoff requests without
+  prompt-design intent, repositories merely containing prompts,
+  prompt-engineering concept explanations, one-off answers, ordinary prose
+  edits, or failures already traced to code, runtime, configuration, tools,
+  data, permissions, capability, architecture, model availability, or external
+  systems.
 ---
 
 # Prompt Engineer
