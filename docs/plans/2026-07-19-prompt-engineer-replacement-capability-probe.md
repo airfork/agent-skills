@@ -62,7 +62,7 @@ listed digest is rechecked before a dependent component uses the evidence.
 | Codex sandbox gate | `codex/sandbox-probes.json#/` | `1ca5a9ce458ae713a020aac8226435b31ebd5b42e044c028ae9de4d8d15bcade` |
 | Claude sandbox gate | `claude/sandbox-probes.json#/` | `2873fbfd082ce77a225400fa6ce4855e42a3a165e48ad95d7dc5bcae504dd737` |
 | Filesystem and cutover gate | `filesystem-capabilities.json#/` | `9f38a7dd42ff9164fbebcc90665410faaaf070c48b5507359f03119e3b3a6874` |
-| Combined component decision | `decision.json#/` | `c7d33e6d8fda2634009d1efa18ad270b20ebb9cde5458f05d69f62598f37d3cb` |
+| Combined component decision | `decision.json#/` | `98efbe4f384d0141324cf55565a53a28c00c5b8f8e4d94223f0995e95d764d35` |
 
 The retained raw-unassisted and raw-explicit JSONL files are explicit blocked-run
 markers, not provider transcripts. Their digests are listed in `MANIFEST.json`.
