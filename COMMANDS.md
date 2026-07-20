@@ -16,9 +16,9 @@ commands.
 | `scripts/archive-clean` | Remove only named release/archive output paths. | Removes only untracked generated paths listed by the script. |
 | `scripts/sync-skills --target codex --dry-run` | Preview managed skill symlink changes. | Read-only. |
 | `scripts/sync-skills --target codex --apply` | Apply managed Codex skill symlink changes when explicitly requested. | Changes the selected global skill directory. |
-| `scripts/prompt-engineer-eval` | Available checked-in CLI for explicit prompt-engineer qualification profiles, budgets, and reports. | Creates qualification run state only when invoked. |
-| `scripts/prompt-engineer-sandbox` | Available checked-in CLI for isolated Codex and Claude qualification launches. | Runs only within declared qualification sandbox roots. |
-| `scripts/prompt-engineer-cutover` | Available checked-in CLI for explicit roots, preview, prepare, apply, verify, rollback, and retention records. | Changes live discovery roots only after separate approval and explicit live flags. |
+| `scripts/prompt-engineer-eval` | Planned/deferred until implementation commits land; the explicit prompt-engineer qualification CLI is absent from this checkout. | No state change until implementation lands. |
+| `scripts/prompt-engineer-sandbox` | Planned/deferred until implementation commits land; the isolated Codex and Claude qualification launcher is absent from this checkout. | No state change until implementation lands. |
+| `scripts/prompt-engineer-cutover` | Planned/deferred until implementation commits land; the explicit cutover and retention CLI is absent from this checkout. | No state change until implementation lands. |
 | `scripts/run-codex-5.6-skill-review <luna\|terra\|sol>` | Run the existing model-bound compatibility review. | May update its report only after a successful review. |
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start --repository /absolute/path/to/reviewed/repository --spec docs/spec.md --plan docs/plan.md --executor generic --model MODEL --effort EFFORT` | Start a portable adversarial-review run from the installed skill, targeting an explicit repository. | Creates durable run state; defaults to chat and sibling report output. |
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review ingest --run-dir RUN --task ID --result RESULT.json --capabilities CAPABILITIES.json` | Validate and ingest one generic reviewer result. | Advances only the named task in durable run state. |

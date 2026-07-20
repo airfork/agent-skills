@@ -171,6 +171,10 @@ class PromptEngineerSkillContractTest < Minitest::Test
       "scripts/prompt-engineer-eval",
       "scripts/prompt-engineer-sandbox",
       "scripts/prompt-engineer-cutover",
+      "UNMEASURED",
+      "BLOCKED",
+      "measurement statuses",
+      "INCONCLUSIVE",
       "PROMPT_ENGINEER_MAX_USD",
       "eight hours",
       "separate explicit cutover approval",
@@ -187,7 +191,8 @@ class PromptEngineerSkillContractTest < Minitest::Test
       scripts/prompt-engineer-sandbox
       scripts/prompt-engineer-cutover
     ].each do |cli|
-      assert_match(/#{Regexp.escape(cli)}[^\n]*available/i, commands)
+      assert_match(/#{Regexp.escape(cli)}[^\n]*planned\/deferred[^\n]*implementation commits land/i, commands)
+      refute_match(/#{Regexp.escape(cli)}[^\n]*available/i, commands)
     end
     refute_match(/\brtk\b/, commands)
   end

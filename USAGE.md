@@ -44,6 +44,9 @@ Choose the lightest profile that can support the claim:
 - **Ecosystem**: multiple related prompts whose triggers, handoffs, or shared
   instructions must be evaluated together.
 
+`UNMEASURED` and `BLOCKED` are measurement statuses, not final decisions. When
+required evidence is missing, the final decision label remains `INCONCLUSIVE`.
+
 The checked-in qualification surface is provided by
 `scripts/prompt-engineer-eval`, with host isolation through
 `scripts/prompt-engineer-sandbox` and lifecycle controls through
