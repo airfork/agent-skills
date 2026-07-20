@@ -14,6 +14,27 @@ module PromptEngineer
     MAX_EXPORT_BYTES = 16 * 1_024 * 1_024
     ROOT_MODE = 0o700
     FILE_MODE = 0o600
+    MANIFEST_FIELDS = %w[
+      schema_version run_id created_at corpus_digest corpus_manifest_digest
+      package_digest qualification_policy_digest legacy_lock_digest arm_labels
+      environment_allowlist environment paths budgets dag expansion_rules policy_snapshot
+    ].freeze
+    POLICY_FIELDS = %w[
+      schema_version capability_evidence_digests executable argv_templates
+      operator_choices money_limit_usd hosts model_effort allowlists endpoint_policy
+      timeout_seconds token_caps pricing_authority provider_caps
+    ].freeze
+    POLICY_NESTED_FIELDS = {
+      "capability_evidence_digests" => %w[codex claude],
+      "executable" => %w[realpath sha256],
+      "argv_templates" => %w[codex claude],
+      "operator_choices" => %w[codex claude],
+      "model_effort" => %w[codex claude],
+      "allowlists" => %w[tools runtime_read writable environment],
+      "endpoint_policy" => %w[provider_only endpoints],
+      "token_caps" => %w[codex claude],
+      "provider_caps" => %w[codex claude]
+    }.freeze
 
     attr_reader :root, :run_id
 
@@ -139,19 +160,29 @@ module PromptEngineer
       PromptEngineer::Provenance.ingest!(store: self, record: record, raw_export: raw_export)
     end
 
-    def close!(reason)
+    def close!(reason, evidence_digest: nil)
       raise Error, "close reason is required" unless reason.is_a?(String) && !reason.empty?
+      if evidence_digest && !(evidence_digest.is_a?(String) && evidence_digest.match?(DIGEST))
+        raise Error, "evidence digest is invalid"
+      end
 
       with_ledger_lock do |events|
         raise Error, "run is already closed" if closed_events?(events)
 
-        append_event_unlocked(events, {"event" => "run_closed", "reason" => reason, "at" => Time.now.utc.iso8601(6)})
+        event = {"event" => "run_closed", "reason" => reason, "at" => Time.now.utc.iso8601(6)}
+        event["evidence_digest"] = evidence_digest if evidence_digest
+        append_event_unlocked(events, event)
       end
       true
     end
 
     def closed?
       closed_events?(read_events)
+    end
+
+    def closed_evidence_digest
+      event = read_events.reverse.find { |candidate| candidate["event"] == "run_closed" }
+      event && event["evidence_digest"]
     end
 
     def ingested_records
@@ -174,9 +205,9 @@ module PromptEngineer
 
         record_bytes = PromptEngineer::Canonical.json(record)
         raise Error, "executor record is too large" if record_bytes.bytesize > MAX_RECORD_BYTES
-        if raw_export
-          raise Error, "raw export is too large" if raw_export.bytesize > MAX_EXPORT_BYTES
-        end
+        raise Error, "raw export bytes are required" unless raw_export.is_a?(String)
+        raise Error, "raw export is too large" if raw_export.bytesize > MAX_EXPORT_BYTES
+        raise Error, "native export digest mismatch" unless Digest::SHA256.hexdigest(raw_export) == record.fetch("raw_export_digest")
         digest = Digest::SHA256.hexdigest(record_bytes)
         relative = File.join("records", "executor", "#{digest}.json")
         write_bytes_exclusive(path(relative), record_bytes)
@@ -196,14 +227,19 @@ module PromptEngineer
 
     def load_existing!
       raise Error, "run manifest is missing" unless File.file?(manifest_path)
+      raise Error, "run root is not a canonical directory" unless File.directory?(@root) && !File.symlink?(@root)
 
-      @manifest = read_json(manifest_path)
+      manifest_bytes = File.binread(manifest_path)
+      @manifest = JSON.parse(manifest_bytes)
+      validate_manifest_integrity!(manifest_bytes)
       @run_id = @manifest.fetch("run_id")
-      @manifest_digest = Digest::SHA256.hexdigest(File.binread(manifest_path))
-      @task_index = read_events.each_with_object({}) do |event, tasks|
+      @manifest_digest = Digest::SHA256.hexdigest(manifest_bytes)
+      events = read_events
+      @task_index = events.each_with_object({}) do |event, tasks|
         tasks[event.fetch("id")] = event.reject { |key, _| key == "event" } if event["event"] == "node_created"
       end
-    rescue JSON::ParserError, KeyError, Errno::ENOENT => error
+      validate_ledger_integrity!(events)
+    rescue JSON::ParserError, KeyError, Errno::ENOENT, Errno::EACCES, PromptEngineer::Provenance::Error => error
       raise Error, "invalid run store: #{error.message}"
     end
 
@@ -232,7 +268,39 @@ module PromptEngineer
         schema_path = File.join(File.dirname(File.expand_path(value)), "schemas", "qualification-policy-v1.yml")
         Contracts.validate!(source, Contracts.load_schema(schema_path)) if File.file?(schema_path)
       end
+      validate_policy_schema!(source)
       [source, PromptEngineer::Canonical.digest(source)]
+    end
+
+    def validate_policy_schema!(policy)
+      raise Error, "qualification policy must be an object" unless policy.is_a?(Hash)
+      unless policy.keys.sort == POLICY_FIELDS.sort
+        missing = POLICY_FIELDS - policy.keys
+        raise Error, "qualification policy fields are not closed; required fields missing: #{missing.join(", ")}"
+      end
+      raise Error, "qualification policy schema_version is invalid" unless policy["schema_version"] == 1
+      POLICY_NESTED_FIELDS.each do |field, required|
+        value = policy.fetch(field)
+        raise Error, "qualification policy #{field} must be an object" unless value.is_a?(Hash)
+        raise Error, "qualification policy #{field} fields are not closed" unless value.keys.sort == required.sort
+      end
+      %w[codex claude].each do |host|
+        %w[operator_choices model_effort].each do |field|
+          required = field == "operator_choices" ? %w[model effort timeout_seconds] : %w[model effort]
+          value = policy.fetch(field).fetch(host)
+          raise Error, "qualification policy #{field} #{host} fields are not closed" unless value.is_a?(Hash) && value.keys.sort == required.sort
+        end
+      end
+      raise Error, "qualification policy argv templates are invalid" unless policy.fetch("argv_templates").values.all? { |value| value.is_a?(Array) && !value.empty? && value.all? { |item| item.is_a?(String) } }
+      raise Error, "qualification policy allowlists are invalid" unless policy.fetch("allowlists").values.all? { |value| value.is_a?(Array) && value.all? { |item| item.is_a?(String) } }
+      raise Error, "qualification policy capability digest is invalid" unless policy.fetch("capability_evidence_digests").values.all? { |value| value.match?(DIGEST) }
+      raise Error, "qualification policy executable digest is invalid" unless policy.fetch("executable").fetch("sha256").match?(DIGEST)
+      raise Error, "qualification policy endpoint policy is invalid" unless policy.fetch("endpoint_policy").fetch("provider_only") == true
+      raise Error, "qualification policy pricing authority is invalid" unless policy.fetch("pricing_authority").is_a?(Array) && !policy.fetch("pricing_authority").empty?
+      raise Error, "qualification policy hosts are invalid" unless policy.fetch("hosts") == %w[codex claude]
+      true
+    rescue KeyError, TypeError => error
+      raise Error, "invalid qualification policy: #{error.message}"
     end
 
     def normalize_legacy_lock(value)
@@ -406,7 +474,7 @@ module PromptEngineer
     def read_events
       return [] unless File.file?(ledger_path)
 
-      File.binread(ledger_path).lines.reject(&:empty?).map { |line| JSON.parse(line) }
+      parse_ledger(File.binread(ledger_path))
     rescue JSON::ParserError, Errno::ENOENT => error
       raise Error, "invalid run ledger: #{error.message}"
     end
@@ -415,7 +483,7 @@ module PromptEngineer
       @mutex.synchronize do
         File.open(ledger_path, "r+b") do |file|
           file.flock(File::LOCK_EX)
-          events = file.read.lines.reject(&:empty?).map { |line| JSON.parse(line) }
+          events = parse_ledger(file.read)
           result = yield(events)
           file.flock(File::LOCK_UN)
           result
@@ -423,6 +491,76 @@ module PromptEngineer
       end
     rescue JSON::ParserError, Errno::ENOENT => error
       raise Error, "invalid run ledger: #{error.message}"
+    end
+
+    def parse_ledger(bytes)
+      raise Error, "invalid run ledger: empty" if bytes.empty?
+      bytes.lines.map do |line|
+        raise Error, "invalid run ledger: unterminated event" unless line.end_with?("\n")
+        event = JSON.parse(line)
+        raise Error, "invalid run ledger: noncanonical event" unless PromptEngineer::Canonical.json(event) == line
+        event
+      end
+    rescue JSON::ParserError => error
+      raise Error, "invalid run ledger: #{error.message}"
+    end
+
+    def validate_manifest_integrity!(bytes)
+      raise Error, "manifest fields are not closed" unless @manifest.keys.sort == MANIFEST_FIELDS.sort
+      raise Error, "manifest is not canonical" unless PromptEngineer::Canonical.json(@manifest) == bytes
+      raise Error, "manifest schema version is invalid" unless @manifest.fetch("schema_version") == 1
+      raise Error, "manifest run ID is invalid" unless @manifest.fetch("run_id").match?(/\Arun-[0-9a-f-]{36}\z/)
+      %w[corpus_digest corpus_manifest_digest package_digest qualification_policy_digest legacy_lock_digest].each do |field|
+        raise Error, "manifest #{field} is invalid" unless @manifest.fetch(field).match?(DIGEST)
+      end
+      raise Error, "manifest arm labels are invalid" unless @manifest.fetch("arm_labels").keys.sort == ARMS.sort
+      validate_policy_schema!(@manifest.fetch("policy_snapshot"))
+    rescue KeyError, NoMethodError => error
+      raise Error, "invalid manifest: #{error.message}"
+    end
+
+    def validate_ledger_integrity!(events)
+      prepared = events.first
+      raise Error, "ledger does not start with prepared event" unless prepared && prepared["event"] == "prepared"
+      raise Error, "prepared event is not bound to manifest" unless prepared["manifest_digest"] == PromptEngineer::Canonical.digest(@manifest)
+      raise Error, "ledger contains duplicate prepared event" if events.drop(1).any? { |event| event["event"] == "prepared" }
+
+      nodes = events.select { |event| event["event"] == "node_created" }
+      raise Error, "ledger contains duplicate node IDs" unless nodes.map { |event| event.fetch("id") }.uniq.length == nodes.length
+      leases = {}
+      closed = false
+      events.each do |event|
+        case event.fetch("event")
+        when "prepared", "node_created"
+          next
+        when "lease_created"
+          raise Error, "lease references unknown node" unless @task_index.key?(event.fetch("id"))
+          raise Error, "duplicate lease nonce" if leases.key?(event.fetch("nonce"))
+          leases[event.fetch("nonce")] = event
+        when "executor_ingested"
+          raise Error, "ledger has ingestion after close" if closed
+          lease = leases.fetch(event.fetch("nonce")) { raise Error, "ingestion references unknown lease" }
+          relative = event.fetch("record_path")
+          expected = File.join("records", "executor", "#{event.fetch("record_digest")}.json")
+          raise Error, "record path is not content addressed" unless relative == expected
+          bytes = File.binread(path(relative))
+          raise Error, "stored record is not canonical" unless PromptEngineer::Canonical.json(JSON.parse(bytes)) == bytes
+          raise Error, "stored record digest mismatch" unless Digest::SHA256.hexdigest(bytes) == event.fetch("record_digest")
+          record = JSON.parse(bytes)
+          PromptEngineer::Provenance.validate_executor_record!(record, store: self, task: lease, require_raw_export: false)
+        when "run_closed"
+          raise Error, "duplicate close event" if closed
+          closed = true
+          if event["evidence_digest"] && !event["evidence_digest"].match?(DIGEST)
+            raise Error, "close evidence digest is invalid"
+          end
+        else
+          raise Error, "unknown ledger event #{event.fetch("event")}"
+        end
+      end
+      true
+    rescue KeyError, JSON::ParserError, Errno::ENOENT, NoMethodError => error
+      raise Error, "invalid ledger integrity: #{error.message}"
     end
 
     def append_event(event)

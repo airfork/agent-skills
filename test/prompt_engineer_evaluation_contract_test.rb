@@ -1233,8 +1233,8 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
       end
 
       tampered = Marshal.load(Marshal.dump(record))
-      tampered["frozen_input_digests"]["corpus"] = "f" * 64
-      assert_contract_error PromptEngineer::Provenance::Error, "frozen input" do
+      tampered["activation_evidence"]["binding"]["nonce"] = "f" * 64
+      assert_contract_error PromptEngineer::Provenance::Error, "binding" do
         PromptEngineer::Provenance.validate_executor_record!(tampered, store: store, task: task, raw_export: raw_export)
       end
 
@@ -1282,29 +1282,33 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
   end
 
   def executor_record_for(store, task)
-    digest = lambda { |value| Digest::SHA256.hexdigest(value) }
+    raw_export = "native export bytes\n"
+    raw_digest = Digest::SHA256.hexdigest(raw_export)
+    facts = {
+      "run_id" => store.run_id, "case_id" => task.fetch("case_id"), "host" => task.fetch("host"),
+      "session_id" => task.fetch("session_id"), "arm" => task.fetch("arm"), "nonce" => task.fetch("nonce"),
+      "staged_package_digest" => task.fetch("staged_package_digest"), "machine_id" => "machine-test",
+      "staged_path" => "/staged/#{task.fetch("id")}", "public_task_packet_digest" => task.fetch("public_task_packet_digest"),
+      "raw_export_digest" => raw_digest, "launch_attestation_digest" => "a" * 64
+    }
+    evidence = lambda do |status|
+      value = {"status" => status, "event_ordinal" => 1, "staged_path" => facts.fetch("staged_path"), "machine_id" => facts.fetch("machine_id"), "binding" => facts, "binding_digest" => PromptEngineer::Canonical.digest(facts), "machine_binding_digest" => PromptEngineer::Canonical.digest(facts)}
+      value["evidence_digest"] = PromptEngineer::Canonical.digest(value)
+      value
+    end
     {
-      "run_id" => store.run_id,
-      "case_id" => task.fetch("case_id"),
-      "host" => task.fetch("host"),
-      "arm" => task.fetch("arm"),
-      "nonce" => task.fetch("nonce"),
-      "session" => {"id" => task.fetch("session_id")},
-      "fresh_session_evidence" => {"native_session_id" => task.fetch("session_id"), "new_session" => true},
-      "raw_export_digest" => digest.call("native export bytes\n"),
-      "sandbox_launch_attestation_digest" => "a" * 64,
-      "expected_package_digest" => store.manifest.fetch("package_digest"),
-      "discovery_evidence" => {"digest" => "b" * 64, "source" => "sandbox"},
-      "invocation_evidence" => {"digest" => "c" * 64, "source" => "native"},
-      "frozen_input_digests" => {
-        "corpus" => store.manifest.fetch("corpus_digest"),
-        "package" => store.manifest.fetch("package_digest"),
-        "policy" => store.manifest.fetch("qualification_policy_digest"),
-        "legacy_lock" => store.manifest.fetch("legacy_lock_digest")
-      },
-      "exit_status" => {"code" => 0, "status" => "success"},
+      "schema_version" => 1, "run_id" => facts.fetch("run_id"), "host" => facts.fetch("host"), "case_id" => facts.fetch("case_id"),
+      "arm" => facts.fetch("arm"), "repeat_index" => task.fetch("repeat_index"), "nonce" => facts.fetch("nonce"),
+      "public_task_packet_digest" => facts.fetch("public_task_packet_digest"), "arm_environment_manifest_digest" => "b" * 64,
+      "expected_package_digest" => facts.fetch("staged_package_digest"), "masked_label_map_digest" => "c" * 64,
+      "sandbox_launch_attestation_digest" => facts.fetch("launch_attestation_digest"), "activation_evidence" => evidence.call("activated"),
+      "invocation_evidence" => evidence.call("invoked"), "session" => {"id" => facts.fetch("session_id"), "fresh" => true},
+      "fresh_session_evidence" => {"new_session_marker" => "fresh", "parent_session_absent" => true, "first_event_ordinal" => 0},
       "timestamps" => {"started_at" => "2026-01-01T00:00:00Z", "ended_at" => "2026-01-01T00:00:01Z"},
-      "output_digests" => {"final" => digest.call("final output")},
+      "cli" => {"name" => "fixture", "version" => "1", "executable_digest" => "d" * 64}, "model" => "fixture-model", "effort" => "high",
+      "configuration_digest" => "e" * 64, "environment_digest" => "f" * 64, "tool_inventory" => ["read"],
+      "messages" => [{"ordinal" => 0, "channel" => "assistant", "text" => "done"}], "tool_events" => [{"ordinal" => 1, "tool" => "read", "status" => "completed"}],
+      "final_status" => "completed", "exit_status" => 0, "raw_export_digest" => raw_digest,
       "usage" => {"input_tokens" => 1, "output_tokens" => 1, "total_tokens" => 2}
     }
   end

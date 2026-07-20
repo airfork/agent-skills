@@ -238,11 +238,11 @@ module PromptEngineer
     end
 
     def command_score(argv)
-      options = parse_options(argv, %w[evidence output])
-      require_options!(options, ["evidence"])
-      evidence = load_document(options.fetch("evidence"))
+      options = parse_options(argv, %w[run-dir evidence evidence-digest output])
+      require_options!(options, %w[run-dir evidence evidence-digest])
+      evidence = load_closed_evidence(options)
       decision = PromptEngineer::Scoring.release_decision(evidence)
-      result = {"decision" => decision, "evidence_digest" => PromptEngineer::Canonical.digest(evidence)}
+      result = {"decision" => decision, "evidence_digest" => options.fetch("evidence-digest")}
       write_json(options.fetch("output"), result) if options["output"]
       result
     end
@@ -252,16 +252,34 @@ module PromptEngineer
       require_options!(options, %w[run-dir reason evidence])
       evidence_digest = Digest::SHA256.file(options.fetch("evidence")).hexdigest
       store = PromptEngineer::RunStore.open(options.fetch("run-dir"))
-      store.close!("#{options.fetch("reason")} [evidence=#{evidence_digest}]")
+      store.close!(options.fetch("reason"), evidence_digest: evidence_digest)
       {"closed" => true, "run_id" => store.run_id, "evidence_digest" => evidence_digest}
     end
 
     def command_report(argv)
-      options = parse_options(argv, %w[evidence output])
-      require_options!(options, %w[evidence output])
-      markdown = PromptEngineer::Reporting.render(load_document(options.fetch("evidence")))
+      options = parse_options(argv, %w[run-dir evidence evidence-digest output])
+      require_options!(options, %w[run-dir evidence evidence-digest output])
+      markdown = PromptEngineer::Reporting.render(load_closed_evidence(options))
       write_bytes(options.fetch("output"), markdown)
       {"report_path" => File.expand_path(options.fetch("output")), "report_digest" => Digest::SHA256.hexdigest(markdown)}
+    end
+
+    def load_closed_evidence(options)
+      store = PromptEngineer::RunStore.open(options.fetch("run-dir"))
+      evidence_path = options.fetch("evidence")
+      expected_digest = options.fetch("evidence-digest")
+      unless expected_digest.match?(/\A[0-9a-f]{64}\z/)
+        raise Error.new("evidence_digest_invalid", "evidence digest is invalid")
+      end
+      actual_digest = Digest::SHA256.file(evidence_path).hexdigest
+      raise Error.new("evidence_digest_mismatch", "evidence digest does not match bytes") unless actual_digest == expected_digest
+      raise Error.new("run_not_closed", "run must be closed with the evidence digest") unless store.closed?
+      unless store.closed_evidence_digest == expected_digest
+        raise Error.new("evidence_not_committed", "closed run does not commit this evidence digest")
+      end
+      load_document(evidence_path)
+    rescue Errno::ENOENT, Errno::EACCES => error
+      raise Error.new("evidence_unreadable", error.message)
     end
 
     def parse_options(argv, allowed, repeatable: [])
