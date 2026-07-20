@@ -16,6 +16,50 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert defined?(PromptEngineer::Contracts)
     assert defined?(PromptEngineer::Corpus)
     assert defined?(PromptEngineer::Budget)
+    assert defined?(PromptEngineer::Capabilities)
+    assert defined?(PromptEngineer::Normalizers)
+  end
+
+  def test_native_capability_report_is_closed_and_marks_both_hosts_unsupported
+    report = PromptEngineer::Capabilities.report
+
+    assert_equal %w[claude codex], report.keys.sort
+    report.each do |host, capability|
+      assert_equal host, capability.fetch("host")
+      assert_equal "unsupported", capability.fetch("status")
+      assert_equal "absent", capability.fetch("normalizer")
+      assert_equal "real native export evidence is unavailable", capability.fetch("reason")
+      evidence = capability.fetch("evidence")
+      assert_equal %w[artifact pointer root sha256], evidence.keys.sort
+      assert_match(%r{\A/Users/tunji/\.codex/prompt-engineer-replacement-evidence/task0\z}, evidence.fetch("root"))
+      assert_match(%r{\A(?:codex|claude)/export-capabilities\.json\z}, evidence.fetch("artifact"))
+      assert_equal "#/", evidence.fetch("pointer")
+      assert_match(/\A[0-9a-f]{64}\z/, evidence.fetch("sha256"))
+    end
+  end
+
+  def test_native_capability_report_rejects_unknown_hosts_without_generic_fallback
+    assert_raises(PromptEngineer::Capabilities::UnknownHostError) do
+      PromptEngineer::Capabilities.for("gemini")
+    end
+  end
+
+  def test_unsupported_native_adapters_fail_closed_before_reading_export_bytes
+    %w[codex claude].each do |host|
+      adapter = PromptEngineer::Normalizers.for(host)
+      assert_equal host, adapter.host
+      error = assert_raises(PromptEngineer::Normalizers::UnsupportedError) do
+        adapter.normalize(-> { raise "export must not be read" })
+      end
+      assert_includes error.message, host
+      assert_includes error.message, "unsupported"
+    end
+  end
+
+  def test_native_normalizer_registry_rejects_unknown_hosts
+    assert_raises(PromptEngineer::Capabilities::UnknownHostError) do
+      PromptEngineer::Normalizers.for("gemini")
+    end
   end
 
   def test_canonical_json_is_sorted_utf8_compact_and_has_one_trailing_lf
