@@ -1,6 +1,7 @@
 require "json"
 require "minitest/autorun"
 require "digest"
+require "open3"
 require "tmpdir"
 
 require_relative "support/prompt_engineer_helper"
@@ -44,6 +45,13 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
         PromptEngineer::Contracts.parse_yaml(yaml)
       end
     end
+  end
+
+  def test_non_string_mapping_keys_are_rejected_during_ast_walk
+    error = assert_raises(PromptEngineer::Contracts::YamlError) do
+      PromptEngineer::Contracts.parse_yaml("1: one\n")
+    end
+    assert_includes error.message, "AST"
   end
 
   def test_yaml_parser_returns_only_safe_plain_values
@@ -115,13 +123,26 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal 12, corpus.cases.length
     assert_equal 16, corpus.trigger_records.length
     assert_equal 40, PromptEngineer::Budget::TRIGGER_RUNS
-    assert_equal corpus.tree_digest, PromptEngineer::Corpus.tree_digest(CORPUS)
+    assert_equal independent_tree_digest(CORPUS), corpus.tree_digest
+    assert_equal independent_manifest_binding_digest(CORPUS), corpus.manifest_digest
 
     explicit, implicit = corpus.activation_pair
     refute_equal explicit, implicit
     assert_equal true, implicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal false, explicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal({}, PromptEngineer::Corpus.activation_diff(explicit, implicit).reject { |path, _| path == ["policy", "allow_implicit_invocation"] })
+  end
+
+  def test_artifact_parent_symlinks_are_rejected
+    with_fixture_tree do |root|
+      case_root = File.join(root, "cases", "PE-001")
+      real_artifacts = File.join(case_root, "real-artifacts")
+      FileUtils.mv(File.join(case_root, "artifacts"), real_artifacts)
+      File.symlink("real-artifacts", File.join(case_root, "artifacts"))
+      assert_contract_error PromptEngineer::Corpus::Error, "symlink" do
+        PromptEngineer::Corpus.load(root, verify_digest: false)
+      end
+    end
   end
 
   def test_corpus_digest_and_artifact_containment_fail_closed
@@ -145,17 +166,28 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     lock = PromptEngineer::Corpus.load_legacy_lock(fixture("legacy.lock.yml"))
     assert_equal "e16d537c594b0f29a368726aa11bb4e5d704938f", lock.fetch("commit")
     assert_equal "blocked", lock.fetch("status")
+    assert_equal({"status" => "blocked", "reason" => "PROMPT_ENGINEER_LEGACY_ROOT was unavailable", "paths" => []}, lock.fetch("dependency_closure"))
+    assert_equal({"status" => "absent", "files" => [], "object_ids" => [], "aggregate_digest" => nil}, lock.fetch("evidence"))
     assert_contract_error PromptEngineer::Corpus::LegacyLockError, "unpinned" do
       PromptEngineer::Corpus.verify_legacy_lock(lock, Dir.mktmpdir("unpinned-legacy"))
     end
 
     Dir.mktmpdir("legacy-lock") do |root|
-      path = File.join(root, "skill.md")
+      path = File.join(root, "skills", "prompt-engineer", "SKILL.md")
+      FileUtils.mkdir_p(File.dirname(path))
       File.write(path, "fixture")
+      initialize_git_repository(root)
+      commit = git_head(root)
       valid = PromptEngineer::Corpus.lock_for_tree(
-        "fixture://legacy", "a" * 40, {"skills/prompt-engineer/SKILL.md" => path}
+        "fixture://legacy", commit, {"skills/prompt-engineer/SKILL.md" => path}
       )
+      refute valid.fetch("evidence").fetch("files").first.key?("source_path")
       assert PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      File.write(File.join(root, "extra.txt"), "extra")
+      assert_contract_error PromptEngineer::Corpus::LegacyLockError, "extra" do
+        PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      end
+      FileUtils.rm(File.join(root, "extra.txt"))
       File.write(path, "drift")
       assert_contract_error PromptEngineer::Corpus::LegacyLockError, "digest" do
         PromptEngineer::Corpus.verify_legacy_lock(valid, root)
@@ -167,8 +199,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     budget = PromptEngineer::Budget.new(
       money_limit: 50.0,
       prices: {"codex:gpt-test" => {"input" => 1.0, "output" => 2.0}},
-      session_timeout_seconds: 60,
-      max_sessions: 2
+      session_timeout_seconds: 60
     )
 
     assert_equal 96, PromptEngineer::Budget::BEHAVIORAL_RUNS
@@ -178,7 +209,7 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal 64, PromptEngineer::Budget::MAX_JUDGE_RUNS
     assert_equal 28.0, budget.reserve_cost("codex:gpt-test", {"input" => 10, "output" => 9})
     lease = budget.reserve!("codex:gpt-test", {"input" => 10, "output" => 9})
-    assert_equal 1, budget.remaining_sessions
+    assert_equal 95, budget.remaining(:behavioral)
     assert_equal :reserved, lease.status
     budget.settle!(lease.id, {"input" => 1, "output" => 2})
     assert_equal :settled, budget.lease(lease.id).status
@@ -191,6 +222,40 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
   end
 
+  def test_budget_ceilings_are_fixed_and_independent
+    assert_contract_error PromptEngineer::Budget::Error, "fixed" do
+      PromptEngineer::Budget.new(money_limit: 10, prices: {}, max_sessions: 1)
+    end
+    budget = PromptEngineer::Budget.new(money_limit: 10, prices: {})
+    assert_equal 96, budget.remaining(:behavioral)
+    assert_equal 40, budget.remaining(:trigger)
+    assert_equal 64, budget.remaining(:judge)
+    assert_equal 8 * 60 * 60, budget.remaining_time
+  end
+
+  def test_closed_policy_and_discovery_schemas_bind_boundary_evidence
+    policy = PromptEngineer::Contracts.load_schema(fixture("schemas/qualification-policy-v1.yml"))
+    assert_includes policy.fetch("required"), "capability_evidence_digests"
+    assert_includes policy.fetch("required"), "executable"
+    assert_includes policy.fetch("required"), "argv_templates"
+    assert_includes policy.fetch("required"), "allowlists"
+    assert_includes policy.fetch("required"), "endpoint_policy"
+    assert_includes policy.fetch("required"), "timeout_seconds"
+    assert_includes policy.fetch("required"), "token_caps"
+    pricing = policy.fetch("properties").fetch("pricing_authority").fetch("items")
+    %w[effective_from effective_to input output cache reasoning minimum_charge failed_request_charge token_cap provider_cap_evidence].each do |field|
+      assert_includes pricing.fetch("required"), field
+    end
+    inventory = PromptEngineer::Contracts.load_schema(fixture("schemas/discovery-inventory-v1.yml"))
+    %w[legacy_variants companion_dependency_map source_evidence_digest].each do |field|
+      assert_includes inventory.fetch("required"), field
+    end
+    roots = PromptEngineer::Contracts.load_schema(fixture("schemas/discovery-roots-v1.yml"))
+    %w[expected_owner expected_mode expected_device expected_inode].each do |field|
+      assert_includes roots.fetch("properties").fetch("roots").fetch("items").fetch("required"), field
+    end
+  end
+
   def test_budget_refuses_nonpositive_or_oversubscribed_limits
     assert_contract_error PromptEngineer::Budget::Error, "money" do
       PromptEngineer::Budget.new(money_limit: 0, prices: {})
@@ -198,5 +263,53 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_contract_error PromptEngineer::Budget::Error, "timeout" do
       PromptEngineer::Budget.new(money_limit: 1, prices: {}, session_timeout_seconds: 0)
     end
+  end
+
+  private
+
+  def independent_tree_digest(root)
+    digest = Digest::SHA256.new
+    Dir.glob(File.join(root, "**", "*")).select { |path| File.file?(path) }.map do |path|
+      path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+    end.sort_by(&:b).each do |relative|
+      digest.update(relative.encode("UTF-8"))
+      digest.update("\0")
+      digest.update(File.binread(File.join(root, relative)))
+      digest.update("\0")
+    end
+    digest.hexdigest
+  end
+
+  def independent_manifest_binding_digest(root)
+    digest = Digest::SHA256.new
+    paths = Dir.glob(File.join(root, "**", "*")).select { |path| File.file?(path) }.map do |path|
+      path.sub(%r{\A#{Regexp.escape(root)}/?}, "")
+    end.sort_by(&:b)
+    paths.each do |relative|
+      bytes = File.binread(File.join(root, relative))
+      if relative == "manifest.yml"
+        bytes = bytes.sub(/tree_digest: "[0-9a-f]{64}"/, 'tree_digest: "' + ("0" * 64) + '"')
+      end
+      digest.update(relative.encode("UTF-8"))
+      digest.update("\0")
+      digest.update(bytes)
+      digest.update("\0")
+    end
+    digest.hexdigest
+  end
+
+  def initialize_git_repository(root)
+    system("git", "-C", root, "init", "--quiet")
+    system("git", "-C", root, "config", "user.name", "Fixture User")
+    system("git", "-C", root, "config", "user.email", "fixture@example.invalid")
+    system("git", "-C", root, "add", ".")
+    system("git", "-C", root, "commit", "--quiet", "-m", "fixture")
+  end
+
+  def git_head(root)
+    output, _error, status = Open3.capture3("git", "-C", root, "rev-parse", "HEAD")
+    raise "git fixture failed" unless status.success?
+
+    output.strip
   end
 end

@@ -1,5 +1,5 @@
 type: object
-required: [schema_version, scan_time, host, root_id, roots, entries, source_evidence_digest, aggregate_digest]
+required: [schema_version, scan_time, host, root_id, roots, entries, legacy_variants, companion_dependency_map, dedicated_paths, shared_paths, expected_identities, source_evidence_digest, aggregate_digest]
 additionalProperties: false
 properties:
   schema_version: {type: integer, const: 1}
@@ -8,5 +8,10 @@ properties:
   root_id: {type: string, minLength: 1}
   roots: {type: array, minItems: 1, items: {type: string, minLength: 1}}
   entries: {type: array, items: {type: object, required: [path, kind, owner, mode, device, inode, sha256, classification], additionalProperties: false, properties: {path: {type: string, minLength: 1}, kind: {type: string, enum: [file, directory, symlink]}, owner: {type: integer, minimum: 0}, mode: {type: integer, minimum: 0}, device: {type: integer, minimum: 0}, inode: {type: integer, minimum: 0}, sha256: {type: string, pattern: '\A[0-9a-f]{64}\z'}, classification: {type: string, enum: [dedicated, shared]}}}}
+  legacy_variants: {type: array, minItems: 1, items: {type: string, minLength: 1}}
+  companion_dependency_map: {type: object, required: [legacy, companion], additionalProperties: false, properties: {legacy: {type: array, items: {type: string}}, companion: {type: array, items: {type: string}}}}
+  dedicated_paths: {type: array, items: {type: string}}
+  shared_paths: {type: array, items: {type: string}}
+  expected_identities: {type: array, items: {type: object, required: [path, owner, mode, device, inode, sha256], additionalProperties: false, properties: {path: {type: string, minLength: 1}, owner: {type: integer, minimum: 0}, mode: {type: integer, minimum: 0}, device: {type: integer, minimum: 0}, inode: {type: integer, minimum: 0}, sha256: {type: string, pattern: '\A[0-9a-f]{64}\z'}}}}
   source_evidence_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}
   aggregate_digest: {type: string, pattern: '\A[0-9a-f]{64}\z'}

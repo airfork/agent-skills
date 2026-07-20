@@ -141,6 +141,9 @@ module PromptEngineer
           unless key.is_a?(Psych::Nodes::Scalar)
             raise YamlError, "mapping keys must be scalar strings at #{render_path(path)}"
           end
+          unless string_mapping_key?(key)
+            raise YamlError, "AST mapping keys must be strings at #{render_path(path)}"
+          end
           key_name = key.value
           if key_name == "<<"
             raise YamlError, "merge keys are not permitted at #{render_path(path)}"
@@ -157,6 +160,23 @@ module PromptEngineer
       end
     end
     private_class_method :walk_ast
+
+    def string_mapping_key?(node)
+      return true unless node.tag.nil? && node.plain && !node.quoted
+
+      value = node.value.to_s
+      return false if value.empty?
+      return false if value =~ /\A(?:true|false|null|~)\z/i
+      return false if value =~ /\A[-+]?0b[01_]+\z/i
+      return false if value =~ /\A[-+]?(?:0|[1-9][0-9_]*|0o[0-7_]+|0x[0-9a-f_]+)\z/i
+      return false if value =~ /\A[-+]?(?:[0-9][0-9_]*)?\.[0-9_]+(?:[eE][-+]?[0-9]+)?\z/
+      return false if value =~ /\A[-+]?(?:[0-9][0-9_]*)[eE][-+]?[0-9]+\z/i
+      return false if value =~ /\A(?:\.inf|\.nan)\z/i
+      return false if value =~ /\A[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[Tt]|\z)/
+
+      true
+    end
+    private_class_method :string_mapping_key?
 
     def safe_load(text)
       begin

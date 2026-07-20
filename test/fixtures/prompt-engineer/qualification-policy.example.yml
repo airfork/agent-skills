@@ -1,4 +1,13 @@
 schema_version: 1
+capability_evidence_digests:
+  codex: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  claude: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+executable:
+  realpath: /usr/local/bin/example-host
+  sha256: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+argv_templates:
+  codex: [host, exec, --json]
+  claude: [host, --bare, --output-format, json]
 operator_choices:
   codex:
     model: gpt-test
@@ -12,9 +21,24 @@ money_limit_usd: 25.0
 hosts:
   - codex
   - claude
+model_effort:
+  codex: {model: gpt-test, effort: high}
+  claude: {model: claude-test, effort: high}
+allowlists:
+  tools: [read]
+  runtime_read: [/staged/runtime]
+  writable: [/case/worktree, /case/output, /case/scratch]
+  environment: [PATH, LANG]
+endpoint_policy:
+  provider_only: true
+  endpoints: [provider]
+timeout_seconds: 300
+token_caps:
+  codex: 10000
+  claude: 10000
 pricing_authority:
-  - {provider: openai, model: gpt-test, currency: USD, input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
-  - {provider: anthropic, model: claude-test, currency: USD, input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+  - {provider: openai, model: gpt-test, currency: USD, effective_from: "2026-01-01T00:00:00Z", effective_to: "2027-01-01T00:00:00Z", input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", provider_cap_evidence: {enforced: true, digest: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}}
+  - {provider: anthropic, model: claude-test, currency: USD, effective_from: "2026-01-01T00:00:00Z", effective_to: "2027-01-01T00:00:00Z", input: 1.0, output: 2.0, cache: 0.5, reasoning: 1.0, minimum_charge: 0.0, failed_request_charge: 0.0, token_cap: 10000, source_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", provider_cap_evidence: {enforced: true, digest: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"}}
 provider_caps:
   codex: 12.5
   claude: 12.5

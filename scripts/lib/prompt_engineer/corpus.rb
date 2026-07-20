@@ -1,5 +1,6 @@
 require "digest"
 require "fileutils"
+require "open3"
 
 module PromptEngineer
   module Corpus
@@ -13,8 +14,10 @@ module PromptEngineer
     MANIFEST_KEYS = %w[schema_version corpus_version case_ids required_hosts scoring_ranges zero_tolerance_ids trigger_suite_version efficiency_case_ids tree_digest].freeze
     PUBLIC_KEYS = %w[case_id title task prompt_context public_requirements input_artifact_paths required_host_configuration allowed_tools time_budget profile primary_dimension host_coverage declared_worktree_inputs safety_classification].freeze
     PRIVATE_KEYS = %w[case_id rubric_points prohibited_behaviors zero_tolerance_gates judge_instructions].freeze
+    LEGACY_LOCK_KEYS = %w[schema_version status repository commit legacy_path companion_path dependency_closure evidence].freeze
+    LEGACY_EVIDENCE_KEYS = %w[status files object_ids aggregate_digest].freeze
 
-    attr_reader :root, :manifest, :triggers, :cases, :tree_digest
+    attr_reader :root, :manifest, :triggers, :cases, :tree_digest, :manifest_digest
 
     Snapshot = Struct.new(:root, :manifest, :triggers, :cases, :tree_digest)
 
@@ -34,7 +37,17 @@ module PromptEngineer
     end
 
     def self.manifest_tree_digest(root)
-      digest_paths(root, regular_paths(root).reject { |relative| relative == "manifest.yml" })
+      manifest_digest(root)
+    end
+
+    def self.manifest_digest(root)
+      digest_paths(root, regular_paths(root)) do |relative, bytes|
+        if relative == "manifest.yml"
+          bytes.sub(/tree_digest: "[0-9a-f]{64}"/, 'tree_digest: "' + ("0" * 64) + '"')
+        else
+          bytes
+        end
+      end
     end
 
     def self.regular_paths(root)
@@ -51,9 +64,11 @@ module PromptEngineer
     def self.digest_paths(root, paths)
       digest = Digest::SHA256.new
       paths.sort_by { |path| path.b }.each do |relative|
+        bytes = File.binread(File.join(root, relative))
+        bytes = yield(relative, bytes) if block_given?
         digest.update(relative.encode("UTF-8"))
         digest.update("\0")
-        digest.update(File.binread(File.join(root, relative)))
+        digest.update(bytes)
         digest.update("\0")
       end
       digest.hexdigest
@@ -84,11 +99,12 @@ module PromptEngineer
     def self.lock_for_tree(repository, commit, files)
       entries = files.map do |relative, source|
         raise LegacyLockError, "path escape" if absolute_or_escape?(relative)
+        raise LegacyLockError, "missing file #{relative}" unless File.file?(source)
         {
           "path" => relative,
-          "source_path" => source,
           "sha256" => Digest::SHA256.file(source).hexdigest,
-          "mode" => (File.stat(source).mode & 0o777).to_s(8)
+          "mode" => (File.stat(source).mode & 0o777).to_s(8),
+          "object_id" => git_object_id(source) || Digest::SHA256.file(source).hexdigest
         }
       end.sort_by { |entry| entry.fetch("path").b }
       lock = {
@@ -98,34 +114,61 @@ module PromptEngineer
         "commit" => commit,
         "legacy_path" => "skills/prompt-engineer",
         "companion_path" => "skills/scripts/skills/prompt_engineer",
-        "dependency_closure" => entries.map { |entry| entry.fetch("path") },
-        "files" => entries
+        "dependency_closure" => {
+          "status" => "complete",
+          "reason" => "verified fixture closure",
+          "paths" => entries.map { |entry| entry.fetch("path") }
+        },
+        "evidence" => {
+          "status" => "pinned",
+          "files" => entries,
+          "object_ids" => entries.map { |entry| {"path" => entry.fetch("path"), "object_id" => entry.fetch("object_id")} },
+          "aggregate_digest" => nil
+        }
       }
-      lock["aggregate_digest"] = lock_digest(lock)
+      lock.fetch("evidence")["aggregate_digest"] = lock_digest(lock)
       lock
     end
 
     def self.verify_legacy_lock(lock, root)
       validate_lock_shape(lock)
       raise LegacyLockError, "unpinned legacy tree" unless lock.fetch("status") == "pinned"
-      raise LegacyLockError, "invalid commit" unless lock.fetch("commit") =~ /\A[0-9a-f]{40}\z/
+      commit = lock.fetch("commit")
+      raise LegacyLockError, "invalid commit" unless commit.is_a?(String) && commit =~ /\A[0-9a-f]{40}\z/
       raise LegacyLockError, "legacy root is not a directory" unless File.directory?(root)
+      raise LegacyLockError, "legacy root is symlinked" if File.symlink?(root)
 
-      files = lock.fetch("files")
+      root = File.realpath(root)
+      verify_git_identity(lock, root)
+
+      files = lock.fetch("evidence").fetch("files")
       paths = files.map { |entry| entry.fetch("path") }
-      raise LegacyLockError, "incomplete dependency closure" unless lock.fetch("dependency_closure").all? { |path| paths.include?(path) }
+      raise LegacyLockError, "duplicate locked path" unless paths.uniq.length == paths.length
+      closure = lock.fetch("dependency_closure")
+      raise LegacyLockError, "incomplete dependency closure" unless closure.fetch("paths").sort_by(&:b) == paths.sort_by(&:b)
+      actual_files = regular_paths(root).reject { |path| path == ".git" || path.start_with?(".git/") }
+      extras = actual_files - paths
+      missing = paths - actual_files
+      raise LegacyLockError, "extra file #{extras.first}" unless extras.empty?
+      raise LegacyLockError, "missing file #{missing.first}" unless missing.empty?
       files.each do |entry|
+        unless entry.keys.sort == %w[mode object_id path sha256].sort
+          raise LegacyLockError, "file evidence keys are not closed"
+        end
         relative = entry.fetch("path")
         raise LegacyLockError, "path escape" if absolute_or_escape?(relative)
-        source = entry["source_path"] || File.join(root, relative)
+        reject_symlink_components(root, relative)
+        source = File.join(root, relative)
         raise LegacyLockError, "missing file #{relative}" unless File.file?(source)
         actual = Digest::SHA256.file(source).hexdigest
         raise LegacyLockError, "digest mismatch for #{relative}" unless actual == entry.fetch("sha256")
         mode = (File.stat(source).mode & 0o777).to_s(8)
         raise LegacyLockError, "mode mismatch for #{relative}" unless mode == entry.fetch("mode").to_s
+        object_id = git_object_id(source, root) || actual
+        raise LegacyLockError, "object identity mismatch for #{relative}" unless object_id == entry.fetch("object_id")
       end
       expected = lock_digest(lock)
-      raise LegacyLockError, "aggregate digest mismatch" unless expected == lock.fetch("aggregate_digest")
+      raise LegacyLockError, "aggregate digest mismatch" unless expected == lock.fetch("evidence").fetch("aggregate_digest")
       true
     rescue KeyError, Errno::ENOENT, Errno::EACCES => error
       raise LegacyLockError, error.message
@@ -144,7 +187,8 @@ module PromptEngineer
       @manifest = Contracts.load_yaml(File.join(@root, "manifest.yml"))
       validate_manifest
       @tree_digest = Corpus.tree_digest(@root)
-      if @verify_digest && @manifest.fetch("tree_digest") != Corpus.manifest_tree_digest(@root)
+      @manifest_digest = Corpus.manifest_digest(@root)
+      if @verify_digest && @manifest.fetch("tree_digest") != @manifest_digest
         raise Error, "corpus tree digest mismatch"
       end
       @triggers = Contracts.load_yaml(File.join(@root, "triggers.yml"))
@@ -177,6 +221,10 @@ module PromptEngineer
 
       def private_rubric(case_id)
         fetch_case(case_id).fetch("private")
+      end
+
+      def manifest_digest
+        @manifest_digest
       end
 
       def activation_pair
@@ -246,6 +294,7 @@ module PromptEngineer
         absolute = File.expand_path(File.join(root, "cases", id, relative))
         case_root = File.expand_path(File.join(root, "cases", id))
         raise Error, "artifact path escape for #{id}" unless absolute == case_root || absolute.start_with?(case_root + File::SEPARATOR)
+        Corpus.send(:reject_symlink_components, case_root, relative)
         raise Error, "missing artifact #{relative} for #{id}" unless File.file?(absolute)
         raise Error, "artifact symlink for #{id}" if File.symlink?(absolute)
       end
@@ -253,26 +302,99 @@ module PromptEngineer
     end
 
     def self.validate_lock_shape(lock)
-      required = %w[schema_version status repository commit legacy_path companion_path dependency_closure files aggregate_digest]
       raise LegacyLockError, "legacy lock must be an object" unless lock.is_a?(Hash)
-      missing = required - lock.keys
-      raise LegacyLockError, "legacy lock missing #{missing.first}" unless missing.empty?
+      raise LegacyLockError, "legacy lock keys are not closed" unless lock.keys.sort == LEGACY_LOCK_KEYS.sort
       raise LegacyLockError, "unsupported legacy lock schema" unless lock.fetch("schema_version") == 1
       raise LegacyLockError, "legacy lock status is invalid" unless %w[blocked pinned].include?(lock.fetch("status"))
-      raise LegacyLockError, "legacy lock files must be an array" unless lock.fetch("files").is_a?(Array)
+      closure = lock.fetch("dependency_closure")
+      raise LegacyLockError, "dependency closure keys are not closed" unless closure.is_a?(Hash) && closure.keys.sort == %w[paths reason status].sort
+      raise LegacyLockError, "dependency closure status is invalid" unless %w[blocked complete].include?(closure.fetch("status"))
+      raise LegacyLockError, "dependency closure reason is required" unless closure.fetch("reason").is_a?(String) && !closure.fetch("reason").empty?
+      raise LegacyLockError, "dependency closure paths must be an array" unless closure.fetch("paths").is_a?(Array)
+      evidence = lock.fetch("evidence")
+      raise LegacyLockError, "legacy evidence keys are not closed" unless evidence.is_a?(Hash) && evidence.keys.sort == LEGACY_EVIDENCE_KEYS.sort
+      raise LegacyLockError, "legacy evidence files must be an array" unless evidence.fetch("files").is_a?(Array)
+      raise LegacyLockError, "legacy evidence object IDs must be an array" unless evidence.fetch("object_ids").is_a?(Array)
+      if lock.fetch("status") == "blocked"
+        raise LegacyLockError, "blocked closure must be blocked" unless closure.fetch("status") == "blocked"
+        unless evidence == {"status" => "absent", "files" => [], "object_ids" => [], "aggregate_digest" => nil}
+          raise LegacyLockError, "blocked lock evidence must be explicitly empty"
+        end
+      else
+        raise LegacyLockError, "pinned closure must be complete" unless closure.fetch("status") == "complete"
+        raise LegacyLockError, "pinned evidence must have a digest" unless evidence.fetch("status") == "pinned" && evidence.fetch("aggregate_digest").is_a?(String)
+      end
       true
     end
 
     def self.lock_digest(lock)
       copy = Marshal.load(Marshal.dump(lock))
-      copy.delete("aggregate_digest")
+      copy.fetch("evidence")["aggregate_digest"] = nil
       Canonical.digest(copy).strip
+    end
+
+    def self.verify_git_identity(lock, root)
+      git_directory = File.join(root, ".git")
+      return true unless File.directory?(git_directory)
+
+      actual_commit = git_output(root, "rev-parse", "HEAD")
+      raise LegacyLockError, "commit identity mismatch" unless actual_commit == lock.fetch("commit")
+      repository = lock.fetch("repository")
+      return true if repository.start_with?("fixture://")
+
+      actual_repository = git_output(root, "remote", "get-url", "origin")
+      raise LegacyLockError, "repository identity mismatch" unless actual_repository == repository
+      true
+    rescue Errno::ENOENT
+      raise LegacyLockError, "repository identity unavailable"
+    end
+
+    def self.git_output(root, *arguments)
+      output, _error, status = Open3.capture3("git", "-C", root, *arguments)
+      raise LegacyLockError, "repository identity unavailable" unless status.success?
+
+      output.strip
+    end
+
+    def self.git_object_id(path, root = nil)
+      root ||= find_git_root(File.dirname(path))
+      return nil unless root
+      output, _error, status = Open3.capture3("git", "-C", root, "hash-object", "--no-filters", path)
+      status.success? ? output.strip : nil
+    end
+
+    def self.find_git_root(path)
+      current = File.realpath(path)
+      loop do
+        return current if File.directory?(File.join(current, ".git"))
+        parent = File.dirname(current)
+        return nil if parent == current
+        current = parent
+      end
+    rescue Errno::ENOENT
+      nil
     end
 
     def self.absolute_or_escape?(path)
       path.to_s.start_with?("/") || path.to_s.split("/").include?("..")
     end
     private_class_method :absolute_or_escape?
+
+    def self.reject_symlink_components(root, relative)
+      current = File.expand_path(root)
+      raise Error, "symlinked artifact ancestor #{root}" if File.symlink?(current)
+      relative.to_s.split("/").each do |component|
+        next if component == "." || component.empty?
+        raise Error, "artifact path escape" if component == ".."
+        current = File.join(current, component)
+        begin
+          raise Error, "symlinked artifact ancestor #{current}" if File.symlink?(current)
+        rescue Errno::ENOENT
+          break
+        end
+      end
+    end
+    private_class_method :reject_symlink_components
 
     def absolute_or_escape?(path)
       self.class.send(:absolute_or_escape?, path)

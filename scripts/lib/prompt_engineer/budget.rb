@@ -14,9 +14,11 @@ module PromptEngineer
     INITIAL_JUDGE_RUNS = 32
     CONDITIONAL_JUDGE_RUNS = 32
     OPERATOR_TIME_SECONDS = 8 * 60 * 60
+    TOTAL_SESSION_CAP = BEHAVIORAL_RUNS + TRIGGER_RUNS + MAX_JUDGE_RUNS
+    SESSION_CAPS = {behavioral: BEHAVIORAL_RUNS, trigger: TRIGGER_RUNS, judge: MAX_JUDGE_RUNS}.freeze
 
     Lease = Struct.new(:id, :model, :reserved_cost, :timeout_seconds, :status,
-                       :usage, :actual_cost, :reserved_at)
+                       :usage, :actual_cost, :reserved_at, :kind)
 
     class Error < StandardError; end
 
@@ -33,7 +35,10 @@ module PromptEngineer
       money_limit = options.fetch(:money_limit)
       prices = options.fetch(:prices)
       session_timeout_seconds = options.fetch(:session_timeout_seconds, 8 * 60 * 60)
-      max_sessions = options.fetch(:max_sessions, BEHAVIORAL_RUNS + TRIGGER_RUNS + MAX_JUDGE_RUNS)
+      if options.key?(:max_sessions) && options.fetch(:max_sessions) != TOTAL_SESSION_CAP
+        raise Error, "session caps are fixed"
+      end
+      max_sessions = TOTAL_SESSION_CAP
       raise Error, "money limit must be positive" unless money_limit.is_a?(Numeric) && money_limit > 0
       raise Error, "timeout must be positive" unless session_timeout_seconds.is_a?(Numeric) && session_timeout_seconds > 0
       raise Error, "max sessions must be positive" unless max_sessions.is_a?(Integer) && max_sessions > 0
@@ -45,6 +50,8 @@ module PromptEngineer
       @spent = 0.0
       @reserved = 0.0
       @session_count = 0
+      @session_counts = Hash.new(0)
+      @reserved_time = 0
       @leases = {}
       @next_id = 0
       @lock = Mutex.new
@@ -56,6 +63,7 @@ module PromptEngineer
       cost = 0.0
       usage.each do |dimension, amount|
         rate = price.fetch(dimension.to_s) { raise Error, "price missing for #{dimension}" }
+        raise Error, "price must be nonnegative" unless rate.is_a?(Numeric) && rate >= 0
         cost += rate.to_f * amount.to_f
       end
       cost
@@ -63,18 +71,22 @@ module PromptEngineer
       raise Error, "price missing for #{model}"
     end
 
-    def reserve!(model, pessimistic_usage, timeout_seconds = @session_timeout_seconds)
+    def reserve!(model, pessimistic_usage, timeout_seconds = @session_timeout_seconds, kind: :behavioral)
       @lock.synchronize do
+        raise Error, "unknown session kind" unless SESSION_CAPS.key?(kind)
         raise Error, "session timeout exceeds operator time" if timeout_seconds > OPERATOR_TIME_SECONDS
+        raise Error, "operator time ceiling exceeded" if @reserved_time + timeout_seconds > OPERATOR_TIME_SECONDS
         cost = reserve_cost(model, pessimistic_usage)
-        raise Error, "session ceiling exceeded" if @session_count >= @max_sessions
+        raise Error, "session ceiling exceeded" if @session_counts[kind] >= SESSION_CAPS.fetch(kind)
         raise Error, "money ceiling exceeded" if @spent + @reserved + cost > @money_limit
         @next_id += 1
         lease = Lease.new("lease-#{@next_id}", model, cost, timeout_seconds, :reserved,
-                          nil, nil, Time.now.to_i)
+                          nil, nil, Time.now.to_i, kind)
         @leases[lease.id] = lease
         @reserved += cost
         @session_count += 1
+        @session_counts[kind] += 1
+        @reserved_time += timeout_seconds
         lease
       end
     end
@@ -133,6 +145,22 @@ module PromptEngineer
 
     def remaining_sessions
       @lock.synchronize { @max_sessions - @session_count }
+    end
+
+    def remaining(kind = nil)
+      @lock.synchronize do
+        if kind
+          raise Error, "unknown session kind" unless SESSION_CAPS.key?(kind)
+
+          SESSION_CAPS.fetch(kind) - @session_counts[kind]
+        else
+          @max_sessions - @session_count
+        end
+      end
+    end
+
+    def remaining_time
+      @lock.synchronize { OPERATOR_TIME_SECONDS - @reserved_time }
     end
 
     def remaining_money
