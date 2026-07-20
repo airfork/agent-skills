@@ -53,7 +53,7 @@ module PromptEngineer
       # with zeroes while hashing, so that field is the sole binding value.
       digest_paths(root, regular_paths(root)) do |relative, bytes|
         if relative == "manifest.yml"
-          bytes.sub(/tree_digest: "[0-9a-f]{64}"/, 'tree_digest: "' + ("0" * 64) + '"')
+          manifest_binding_bytes(bytes)
         else
           bytes
         end
@@ -80,9 +80,11 @@ module PromptEngineer
     end
 
     def self.digest_paths(root, paths)
+      root = File.expand_path(root)
       initial_tree = tree_identity_snapshot(root)
       digest = Digest::SHA256.new
       paths.sort_by { |path| path.b }.each do |relative|
+        relative_components(relative)
         bytes = stable_file_bytes(File.join(root, relative), root)
         bytes = yield(relative, bytes) if block_given?
         digest.update(relative.encode("UTF-8"))
@@ -93,6 +95,13 @@ module PromptEngineer
       raise Error, "corpus tree changed during digest" unless initial_tree == tree_identity_snapshot(root)
       digest.hexdigest
     end
+
+    def self.manifest_binding_bytes(bytes)
+      manifest = Contracts.parse_yaml(bytes)
+      manifest["tree_digest"] = "0" * 64
+      Canonical.json(manifest)
+    end
+    private_class_method :manifest_binding_bytes
 
     def self.stable_file_bytes(path, root = nil)
       raise Error, "no-follow reads unavailable" unless NOFOLLOW_FLAG && OPENAT_FUNCTION
@@ -127,7 +136,7 @@ module PromptEngineer
         relative = path.sub(%r{\A#{Regexp.escape(root_path)}/?}, "")
         raise Error, "path escape" if relative == path
         directory_fd = open_directory_descriptor(root_path)
-        components = relative.split("/")
+        components = relative_components(relative)
       else
         parent = File.realpath(File.dirname(path))
         directory_fd = open_directory_descriptor(parent)
@@ -183,7 +192,7 @@ module PromptEngineer
       base = root ? File.realpath(root) : File.realpath(File.dirname(path))
       relative = root ? path.sub(%r{\A#{Regexp.escape(base)}/?}, "") : File.basename(path)
       raise Error, "path escape" if relative == path
-      components = ["."] + relative.split("/")
+      components = ["."] + relative_components(relative)
       current = base
       components.map do |component|
         current = component == "." ? current : File.join(current, component)
@@ -208,6 +217,23 @@ module PromptEngineer
     end
     private_class_method :tree_identity_snapshot
 
+    def self.relative_components(relative)
+      value = relative.to_s
+      raise Error, "path escape" if value.start_with?("/") || value.split("/").include?("..")
+
+      components = value.split("/").reject { |component| component.empty? || component == "." }
+      raise Error, "path escape" if components.empty?
+
+      components
+    end
+    private_class_method :relative_components
+
+    def self.load_yaml_from_root(root, relative)
+      components = relative_components(relative)
+      path = File.join(root, *components)
+      Contracts.parse_yaml(stable_file_bytes(path, root))
+    end
+
     def self.activation_diff(left, right, path = [], output = {})
       if left.is_a?(Hash) && right.is_a?(Hash)
         (left.keys | right.keys).each do |key|
@@ -223,7 +249,7 @@ module PromptEngineer
     end
 
     def self.load_legacy_lock(path)
-      lock = Contracts.load_yaml(path)
+      lock = Contracts.parse_yaml(stable_file_bytes(path))
       validate_lock_shape(lock)
       lock
     rescue Contracts::Error => error
@@ -321,16 +347,17 @@ module PromptEngineer
       raise Error, "corpus root is symlinked" if File.symlink?(@root)
       raise Error, "corpus root has symlinked ancestor" unless File.realpath(@root) == @root
       raise Error, "corpus root is not a directory" unless File.directory?(@root)
-      @manifest = Contracts.load_yaml(File.join(@root, "manifest.yml"))
+      @manifest = Corpus.load_yaml_from_root(@root, "manifest.yml")
       validate_manifest
       @tree_digest = Corpus.tree_digest(@root)
       @manifest_digest = Corpus.manifest_digest(@root)
       if @verify_digest && @manifest.fetch("tree_digest") != @tree_digest
         raise Error, "corpus tree digest mismatch"
       end
-      @triggers = Contracts.load_yaml(File.join(@root, "triggers.yml"))
+      @triggers = Corpus.load_yaml_from_root(@root, "triggers.yml")
       validate_triggers
       @cases = CASE_IDS.map { |id| load_case(id) }
+      raise Error, "corpus tree changed during load" unless Corpus.tree_digest(@root) == @tree_digest
       self
     rescue Contracts::Error, Errno::ENOENT, Errno::EACCES => error
       raise Error, error.message
@@ -365,11 +392,12 @@ module PromptEngineer
       end
 
       def activation_pair
-      explicit = Contracts.load_yaml(File.join(root, "activation", "explicit", "agents", "openai.yaml"))
-      implicit = Contracts.load_yaml(File.join(root, "activation", "implicit", "agents", "openai.yaml"))
+      explicit = Corpus.load_yaml_from_root(root, "activation/explicit/agents/openai.yaml")
+      implicit = Corpus.load_yaml_from_root(root, "activation/implicit/agents/openai.yaml")
       differences = Corpus.activation_diff(explicit, implicit)
       expected = [["policy", "allow_implicit_invocation"]]
       raise Error, "activation pair differs outside policy.allow_implicit_invocation" unless differences.keys == expected
+      raise Error, "corpus tree changed during activation load" unless Corpus.tree_digest(root) == tree_digest
       [explicit, implicit]
       end
 
@@ -412,8 +440,8 @@ module PromptEngineer
 
       def load_case(id)
       directory = File.join(root, "cases", id)
-      public = Contracts.load_yaml(File.join(directory, "public.yml"))
-      private_rubric = Contracts.load_yaml(File.join(directory, "private.yml"))
+      public = Corpus.load_yaml_from_root(root, "cases/#{id}/public.yml")
+      private_rubric = Corpus.load_yaml_from_root(root, "cases/#{id}/private.yml")
       raise Error, "public keys are not closed for #{id}" unless public.keys.sort == PUBLIC_KEYS.sort
       raise Error, "private keys are not closed for #{id}" unless private_rubric.keys.sort == PRIVATE_KEYS.sort
       raise Error, "public case ID mismatch for #{id}" unless public.fetch("case_id") == id
@@ -480,10 +508,16 @@ module PromptEngineer
       actual_commit = git_output(root, "rev-parse", "HEAD")
       raise LegacyLockError, "commit identity mismatch" unless actual_commit == lock.fetch("commit")
       repository = lock.fetch("repository")
-      return true if repository.start_with?("fixture://")
+      if repository.start_with?("fixture://")
+        raise LegacyLockError, "fixture repository identity is invalid" unless repository =~ /\Afixture:\/\/[a-z0-9][a-z0-9._-]*\z/
+
+        return true
+      end
 
       actual_repository = git_output(root, "remote", "get-url", "origin")
-      raise LegacyLockError, "repository identity mismatch" unless actual_repository == repository
+      unless normalize_repository_identity(actual_repository) == normalize_repository_identity(repository)
+        raise LegacyLockError, "repository identity mismatch"
+      end
       true
     rescue Errno::ENOENT
       raise LegacyLockError, "repository identity unavailable"
@@ -495,6 +529,15 @@ module PromptEngineer
 
       output.strip
     end
+
+    def self.normalize_repository_identity(repository)
+      normalized = repository.to_s.strip
+      normalized = normalized.sub(%r{\A(?:https?://|git://)github\.com/}, "")
+      normalized = normalized.sub(%r{\A(?:ssh://)?git@github\.com:}, "")
+      normalized = normalized.sub(%r{\Agithub\.com/}, "")
+      normalized.sub(/\.git\z/, "").sub(%r{/\z}, "")
+    end
+    private_class_method :normalize_repository_identity
 
     def self.git_object_id(path, root = nil)
       root ||= find_git_root(File.dirname(path))

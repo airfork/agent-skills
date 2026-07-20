@@ -74,10 +74,13 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
   end
 
   def test_yaml_parser_rejects_nonfinite_yaml_scalars
-    %w[.nan .inf -.inf 1.0e+9999].each do |scalar|
+    %w[.nan .inf -.inf 1.0e+9999 .1e+9999].each do |scalar|
       assert_contract_error PromptEngineer::Contracts::YamlError, "finite" do
         PromptEngineer::Contracts.parse_yaml("value: #{scalar}\n")
       end
+    end
+    assert_contract_error PromptEngineer::Contracts::YamlError do
+      PromptEngineer::Contracts.parse_yaml("value: !!float \"1e9999\"\n")
     end
   end
 
@@ -151,6 +154,8 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     ].each do |field|
       assert_includes executor.fetch("required"), field
     end
+    assert_equal false, executor.fetch("properties").fetch("timestamps").fetch("additionalProperties")
+    assert_equal %w[started_at ended_at], executor.fetch("properties").fetch("timestamps").fetch("required")
 
     judge = PromptEngineer::Contracts.load_schema(fixture("schemas/judge-result-v1.yml"))
     %w[
@@ -166,6 +171,11 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_includes dimensions.fetch("items").fetch("required"), "dimension"
     assert_includes dimensions.fetch("items").fetch("required"), "score"
     assert_includes dimensions.fetch("items").fetch("required"), "point_results"
+    point = dimensions.fetch("items").fetch("properties").fetch("point_results").fetch("items")
+    assert_includes point.fetch("required"), "status"
+    assert_equal %w[pass fail uncertain], point.fetch("properties").fetch("status").fetch("enum")
+    assert_includes point.fetch("required"), "citation_required"
+    assert_equal false, judge.fetch("properties").fetch("timestamps").fetch("additionalProperties")
   end
 
   def test_corpus_freezes_cases_triggers_tree_digest_and_activation_pair
@@ -188,6 +198,16 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal true, implicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal false, explicit.fetch("policy").fetch("allow_implicit_invocation")
     assert_equal({}, PromptEngineer::Corpus.activation_diff(explicit, implicit).reject { |path, _| path == ["policy", "allow_implicit_invocation"] })
+  end
+
+  def test_manifest_tree_digest_binding_ignores_yaml_quote_style
+    with_fixture_tree do |root|
+      manifest_path = File.join(root, "manifest.yml")
+      bytes = File.binread(manifest_path)
+      File.write(manifest_path, bytes.sub(/tree_digest: "([0-9a-f]{64})"/, "tree_digest: '\\1'"))
+      corpus = PromptEngineer::Corpus.load(root)
+      assert_equal corpus.manifest.fetch("tree_digest"), corpus.tree_digest
+    end
   end
 
   def test_all_declared_case_artifacts_are_tracked
@@ -259,6 +279,36 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
         end
       ensure
         PromptEngineer::Corpus.define_singleton_method(:open_descriptor_nofollow, original_open)
+      end
+    end
+  end
+
+  def test_descriptor_relative_reads_reject_path_traversal
+    Dir.mktmpdir("prompt-engineer-relative-path") do |root|
+      path = File.join(root, "safe.txt")
+      File.write(path, "safe")
+      assert_contract_error PromptEngineer::Corpus::Error, "path escape" do
+        PromptEngineer::Corpus.stable_file_bytes(File.join(root, "..", File.basename(root), "safe.txt"), root)
+      end
+      assert_contract_error PromptEngineer::Corpus::Error, "path escape" do
+        PromptEngineer::Corpus.digest_paths(root, ["../safe.txt"])
+      end
+    end
+  end
+
+  def test_corpus_yaml_reads_use_stable_descriptor_reader
+    with_fixture_tree do |root|
+      original_load = PromptEngineer::Contracts.method(:load_yaml)
+      PromptEngineer::Contracts.define_singleton_method(:load_yaml) do |path|
+        raise "path-based corpus YAML read" if path.start_with?(root)
+
+        original_load.call(path)
+      end
+      begin
+        corpus = PromptEngineer::Corpus.load(root)
+        corpus.activation_pair
+      ensure
+        PromptEngineer::Contracts.define_singleton_method(:load_yaml, original_load)
       end
     end
   end
@@ -356,6 +406,11 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
                    valid.fetch("dependency_closure").fetch("paths")
       refute valid.fetch("evidence").fetch("files").first.key?("source_path")
       assert PromptEngineer::Corpus.verify_legacy_lock(valid, root)
+      system("git", "-C", root, "remote", "add", "origin", "git@github.com:solatis/claude-config.git")
+      github_lock = PromptEngineer::Corpus.lock_for_tree(
+        "solatis/claude-config", commit, {"skills/prompt-engineer/SKILL.md" => path}
+      )
+      assert PromptEngineer::Corpus.verify_legacy_lock(github_lock, root)
       File.write(File.join(root, "extra.txt"), "extra")
       assert_contract_error PromptEngineer::Corpus::LegacyLockError, "extra" do
         PromptEngineer::Corpus.verify_legacy_lock(valid, root)
@@ -382,6 +437,8 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_equal 64, PromptEngineer::Budget::MAX_JUDGE_RUNS
     assert_equal 28.0, budget.reserve_cost("codex:gpt-test", {"input" => 10, "output" => 9})
     lease = budget.reserve!("codex:gpt-test", {"input" => 10, "output" => 9})
+    assert_raises(FrozenError) { lease.status = :settled }
+    assert_equal :reserved, budget.lease(lease.id).status
     assert_equal 95, budget.remaining(:behavioral)
     assert_equal :reserved, lease.status
     budget.settle!(lease.id, {"input" => 1, "output" => 2})
@@ -439,6 +496,9 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     assert_contract_error PromptEngineer::Budget::Error, "money" do
       PromptEngineer::Budget.new(money_limit: 10**1000, prices: {})
     end
+    assert_contract_error PromptEngineer::Budget::Error, "timeout" do
+      PromptEngineer::Budget.new(money_limit: 1, prices: {}, session_timeout_seconds: 10**1000)
+    end
   end
 
   def test_reservation_rejects_negative_timeout_and_settlement_usage_caps
@@ -459,10 +519,15 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     total_budget = PromptEngineer::Budget.new(
       money_limit: 50,
-      prices: {"total:model" => {"input_tokens" => 1.0, "output_tokens" => 1.0, "total_tokens" => 0.0, "token_cap" => 4}}
+      prices: {"total:model" => {"input_tokens" => 1.0, "output_tokens" => 1.0, "total_tokens" => 0.0, "token_cap" => 4}},
+      session_timeout_seconds: 60
     )
     total_lease = total_budget.reserve!("total:model", {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 4})
     assert_equal :settled, total_budget.settle!(total_lease.id, {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 4}).status
+    mismatch_lease = total_budget.reserve!("total:model", {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 4})
+    assert_contract_error PromptEngineer::Budget::Error, "token" do
+      total_budget.settle!(mismatch_lease.id, {"input_tokens" => 2, "output_tokens" => 2, "total_tokens" => 5})
+    end
   end
 
   def test_budget_rejects_nonfinite_prices_usage_and_timeout_and_freezes_prices
@@ -499,6 +564,16 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     end
     assert_contract_error PromptEngineer::Budget::Error, "token" do
       PromptEngineer::Budget.new(money_limit: 10, prices: {"model" => {:token_cap => -1}})
+    end
+    billable_budget = PromptEngineer::Budget.new(
+      money_limit: 50,
+      prices: {"billable:model" => {"input_tokens" => 1.0, "output_tokens" => 1.0, "cache_tokens" => 1.0, "reasoning_tokens" => 1.0, "token_cap" => 5}}
+    )
+    assert_contract_error PromptEngineer::Budget::Error, "token" do
+      billable_budget.reserve_cost("billable:model", {"input_tokens" => 1, "output_tokens" => 1, "cache_tokens" => 2, "reasoning_tokens" => 2})
+    end
+    assert_contract_error PromptEngineer::Budget::Error, "timeout" do
+      billable_budget.reserve!("billable:model", {"input_tokens" => 1, "output_tokens" => 1}, 10**1000)
     end
   end
 
@@ -539,7 +614,9 @@ class PromptEngineerEvaluationContractTest < Minitest::Test
     paths.each do |relative|
       bytes = File.binread(File.join(root, relative))
       if relative == "manifest.yml"
-        bytes = bytes.sub(/tree_digest: "[0-9a-f]{64}"/, 'tree_digest: "' + ("0" * 64) + '"')
+        manifest = PromptEngineer::Contracts.parse_yaml(bytes)
+        manifest["tree_digest"] = "0" * 64
+        bytes = PromptEngineer::Canonical.json(manifest)
       end
       digest.update(relative.encode("UTF-8"))
       digest.update("\0")

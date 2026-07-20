@@ -35,6 +35,7 @@ module PromptEngineer
       walk_ast(document.root, [])
       value = safe_load(text)
       reject_non_string_keys(value, [])
+      reject_nonfinite_values(value, [])
       value
     rescue YamlError
       raise
@@ -141,8 +142,11 @@ module PromptEngineer
       if node.is_a?(Psych::Nodes::Scalar) && node.plain && node.value =~ /\A[+-]?\.(?:nan|inf)\z/i
         raise YamlError, "nonfinite YAML scalar at #{render_path(path)}"
       end
+      if node.is_a?(Psych::Nodes::Scalar) && node.tag && node.tag =~ /:(?:int|float)\z/
+        raise YamlError, "explicit numeric scalar tags are not permitted at #{render_path(path)}"
+      end
       if node.is_a?(Psych::Nodes::Scalar) && node.plain &&
-          node.value =~ /\A[+-]?[0-9][0-9_]*(?:\.[0-9_]*)?[eE][+-]?[0-9_]+\z/
+          node.value =~ /\A[+-]?(?:(?:[0-9][0-9_]*\.[0-9_]*|\.[0-9_]+|[0-9][0-9_]*))[eE][+-]?[0-9_]+\z/
         converted = Float(node.value.delete("_"))
         raise YamlError, "nonfinite YAML scalar at #{render_path(path)}" unless converted.finite?
       end
@@ -215,6 +219,19 @@ module PromptEngineer
       end
     end
     private_class_method :reject_non_string_keys
+
+    def reject_nonfinite_values(value, path)
+      if value.is_a?(Numeric) && !finite_real?(value)
+        raise YamlError, "nonfinite YAML value at #{render_path(path)}"
+      end
+      case value
+      when Hash
+        value.each { |key, child| reject_nonfinite_values(child, path + [key]) }
+      when Array
+        value.each_with_index { |child, index| reject_nonfinite_values(child, path + [index]) }
+      end
+    end
+    private_class_method :reject_nonfinite_values
 
     def validate_value(value, schema, path)
       if value.is_a?(Numeric) && !finite_real?(value)

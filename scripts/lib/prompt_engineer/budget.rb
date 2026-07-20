@@ -40,7 +40,7 @@ module PromptEngineer
       end
       max_sessions = TOTAL_SESSION_CAP
       raise Error, "money limit must be positive" unless finite_numeric?(money_limit) && money_limit.to_f.finite? && money_limit > 0
-      raise Error, "timeout must be positive" unless finite_numeric?(session_timeout_seconds) && session_timeout_seconds > 0
+      raise Error, "timeout must be positive" unless finite_numeric?(session_timeout_seconds) && session_timeout_seconds.to_f.finite? && session_timeout_seconds > 0
       raise Error, "max sessions must be positive" unless max_sessions.is_a?(Integer) && max_sessions > 0
 
       @money_limit = money_limit.to_f
@@ -81,7 +81,7 @@ module PromptEngineer
     def reserve!(model, pessimistic_usage, timeout_seconds = @session_timeout_seconds, kind: :behavioral)
       @lock.synchronize do
         raise Error, "unknown session kind" unless SESSION_CAPS.key?(kind)
-        raise Error, "timeout must be positive" unless finite_numeric?(timeout_seconds) && timeout_seconds > 0
+        raise Error, "timeout must be positive" unless finite_numeric?(timeout_seconds) && timeout_seconds.to_f.finite? && timeout_seconds > 0
         raise Error, "session timeout exceeds operator time" if timeout_seconds > OPERATOR_TIME_SECONDS
         raise Error, "operator time ceiling exceeded" if @reserved_time + timeout_seconds > OPERATOR_TIME_SECONDS
         cost = reserve_cost(model, pessimistic_usage)
@@ -95,7 +95,7 @@ module PromptEngineer
         @session_count += 1
         @session_counts[kind] += 1
         @reserved_time += timeout_seconds
-        lease
+        snapshot_lease(lease)
       end
     end
 
@@ -106,12 +106,12 @@ module PromptEngineer
         raise Error, "lease is not reservable" unless lease.status == :reserved
         actual = reserve_cost(lease.model, usage)
         raise Error, "settled cost exceeds reservation" if actual > lease.reserved_cost
-        lease.usage = usage
+        lease.usage = deep_freeze(deep_copy(usage))
         lease.actual_cost = actual
         lease.status = :settled
         @reserved -= lease.reserved_cost
         @spent += actual
-        lease
+        snapshot_lease(lease)
       end
     end
 
@@ -120,7 +120,7 @@ module PromptEngineer
         lease = fetch_lease(lease_id)
         raise Error, "lease is not reservable" unless lease.status == :reserved
         lease.status = :expired
-        lease
+        snapshot_lease(lease)
       end
     end
 
@@ -129,7 +129,7 @@ module PromptEngineer
         lease = fetch_lease(lease_id)
         raise Error, "lease is not reservable" unless lease.status == :reserved
         lease.status = :crashed
-        lease
+        snapshot_lease(lease)
       end
     end
 
@@ -143,12 +143,12 @@ module PromptEngineer
         lease.status = :closed
         @reserved -= lease.reserved_cost
         @spent += lease.reserved_cost
-        lease
+        snapshot_lease(lease)
       end
     end
 
     def lease(lease_id)
-      @lock.synchronize { fetch_lease(lease_id) }
+      @lock.synchronize { snapshot_lease(fetch_lease(lease_id)) }
     end
 
     def remaining_sessions
@@ -176,7 +176,7 @@ module PromptEngineer
     end
 
     def leases
-      @lock.synchronize { @leases.values.dup }
+      @lock.synchronize { @leases.values.map { |lease| snapshot_lease(lease) } }
     end
 
     private
@@ -197,24 +197,39 @@ module PromptEngineer
       end
       cap = price && (price["token_cap"] || price[:token_cap])
       if cap
-        tokens = if usage.key?("total_tokens") || usage.key?(:total_tokens)
-                   usage.key?("total_tokens") ? usage.fetch("total_tokens") : usage.fetch(:total_tokens)
-                 else
-                   input = usage.key?("input_tokens") ? usage.fetch("input_tokens") : usage.fetch(:input_tokens, nil)
-                   output = usage.key?("output_tokens") ? usage.fetch("output_tokens") : usage.fetch(:output_tokens, nil)
-                   if input || output
-                     (input || 0) + (output || 0)
-                   else
-                     usage.fetch("input", usage.fetch(:input, 0)) +
-                       usage.fetch("output", usage.fetch(:output, 0))
-                   end
-                 end
+        tokens = token_usage_total(usage)
         raise Error, "token cap exceeded" if tokens > cap
+      end
+    end
+
+    def token_usage_total(usage)
+      total_keys = ["total_tokens", :total_tokens].select { |key| usage.key?(key) }
+      if total_keys.length == 2 && usage.fetch("total_tokens") != usage.fetch(:total_tokens)
+        raise Error, "token accounting mismatch"
+      end
+      component_total = usage.inject(0) do |total, (dimension, amount)|
+        name = dimension.to_s
+        billable = %w[input output cache reasoning].include?(name) || name.end_with?("_tokens")
+        total + (billable && name != "total_tokens" ? amount : 0)
+      end
+      if total_keys.empty?
+        component_total
+      else
+        authoritative = usage.fetch(total_keys.first)
+        raise Error, "token accounting mismatch" if component_total > 0 && authoritative != component_total
+
+        authoritative
       end
     end
 
     def fetch_lease(lease_id)
       @leases.fetch(lease_id) { raise Error, "unknown lease #{lease_id}" }
+    end
+
+    def snapshot_lease(lease)
+      copy = Lease.new(*lease.to_a)
+      deep_freeze(copy)
+      copy.freeze
     end
 
     def finite_numeric?(value)
@@ -250,6 +265,17 @@ module PromptEngineer
         value.each { |child| deep_freeze(child) }
       end
       value.freeze
+    end
+
+    def deep_copy(value)
+      case value
+      when Hash
+        value.each_with_object({}) { |(key, child), copy| copy[deep_copy(key)] = deep_copy(child) }
+      when Array
+        value.map { |child| deep_copy(child) }
+      else
+        value
+      end
     end
     end
   end
