@@ -22,12 +22,39 @@ class PromptEngineerCutoverTest < Minitest::Test
       qualification: "QUALIFIED_EXPLICIT",
       capabilities: supported_capabilities,
       runtime: "ruby-2.6",
-      sandbox: "supported"
+      sandbox: "supported",
+      evidence_manifest: evidence_manifest
     )
     assert_equal "BLOCKED", decision.fetch("decision")
     refute decision.fetch("mutations_permitted")
     assert_includes decision.fetch("reasons"), "capability evidence authenticity is unproven"
     assert_raises(PromptEngineer::Cutover::Error) { PromptEngineer::Cutover.apply!(decision) }
+  end
+
+  def test_cutover_requires_host_binding_and_manifest_bound_capability_digests
+    mismatched_host = supported_capabilities
+    mismatched_host.fetch("claude")["host"] = "codex"
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: mismatched_host,
+      runtime: "ruby-2.6",
+      sandbox: "supported",
+      evidence_manifest: evidence_manifest
+    )
+    assert_includes decision.fetch("reasons"), "claude capability host does not match key"
+
+    mismatched_digest = supported_capabilities
+    manifest = evidence_manifest
+    manifest.fetch("files").find { |file| file.fetch("path") == "codex/export-capabilities.json" }["sha256"] = "b" * 64
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: mismatched_digest,
+      runtime: "ruby-2.6",
+      sandbox: "supported",
+      evidence_manifest: manifest
+    )
+    assert_includes decision.fetch("reasons"), "codex capability evidence is not bound to immutable manifest"
+    refute decision.fetch("mutations_permitted")
   end
 
   private
@@ -47,5 +74,25 @@ class PromptEngineerCutoverTest < Minitest::Test
         }
       }
     end
+  end
+
+  def evidence_manifest
+    {
+      "schema" => "prompt-engineer-task0-evidence-manifest-v1",
+      "root" => "/tmp/prompt-engineer-evidence",
+      "captured_at" => "2026-07-19",
+      "retention_deadline" => "cutover plus five-use observation window",
+      "self_digest" => "excluded; this manifest is the immutable index root",
+      "files" => %w[codex claude].map do |host|
+        {
+          "path" => "#{host}/export-capabilities.json",
+          "mode" => "0444",
+          "size" => 1,
+          "sha256" => "a" * 64,
+          "origin" => "test evidence",
+          "fixture_derivation" => nil
+        }
+      end
+    }
   end
 end

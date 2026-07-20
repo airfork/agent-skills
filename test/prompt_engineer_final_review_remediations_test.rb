@@ -98,6 +98,40 @@ class PromptEngineerFinalReviewRemediationsTest < Minitest::Test
     end
   end
 
+  def test_evaluation_complete_requires_exact_nodes_unique_nonces_and_no_pending_leases
+    with_store do |store|
+      base_tasks = store.pending_tasks
+      complete_events = base_tasks.flat_map.with_index do |task, index|
+        nonce = format("%064x", index + 1)
+        [
+          {"event" => "lease_created", "id" => task.fetch("id"), "nonce" => nonce},
+          {"event" => "executor_ingested", "node_id" => task.fetch("id"), "nonce" => nonce}
+        ]
+      end
+
+      assert stub_events(store, complete_events) { store.evaluation_complete? }
+
+      too_few = complete_events.reject do |event|
+        event["event"] == "executor_ingested" && event["node_id"] == base_tasks.last.fetch("id")
+      end
+      assert_equal 129, too_few.count { |event| event["event"] == "executor_ingested" }
+      refute stub_events(store, too_few) { store.evaluation_complete? }
+
+      duplicate_nonce = complete_events.map(&:dup)
+      ingestions = duplicate_nonce.select { |event| event["event"] == "executor_ingested" }
+      ingestions.last["nonce"] = ingestions.first.fetch("nonce")
+      refute stub_events(store, duplicate_nonce) { store.evaluation_complete? }
+
+      missing_node = complete_events.map(&:dup)
+      ingestions = missing_node.select { |event| event["event"] == "executor_ingested" }
+      ingestions.last["node_id"] = "node-not-in-base-dag"
+      refute stub_events(store, missing_node) { store.evaluation_complete? }
+
+      pending_lease = complete_events + [{"event" => "lease_created", "id" => base_tasks.first.fetch("id"), "nonce" => "e" * 64}]
+      refute stub_events(store, pending_lease) { store.evaluation_complete? }
+    end
+  end
+
   private
 
   def with_store_inputs
@@ -188,6 +222,11 @@ class PromptEngineerFinalReviewRemediationsTest < Minitest::Test
       },
       raw_export
     ]
+  end
+
+  def stub_events(store, events)
+    store.define_singleton_method(:read_events) { events }
+    yield
   end
 
   def release_evidence

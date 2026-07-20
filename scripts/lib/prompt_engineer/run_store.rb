@@ -171,8 +171,17 @@ module PromptEngineer
     end
 
     def evaluation_complete?
-      ingested_nodes = read_events.select { |event| event["event"] == "executor_ingested" }.map { |event| event.fetch("node_id") }
-      ingested_nodes.uniq.length == expected_ingested_count && ingested_nodes.uniq.sort == @task_index.keys.sort
+      events = read_events
+      leases = events.select { |event| event["event"] == "lease_created" }
+      ingestions = events.select { |event| event["event"] == "executor_ingested" }
+      ingested_nodes = ingestions.map { |event| event.fetch("node_id") }
+      ingested_nonces = ingestions.map { |event| event.fetch("nonce") }
+      leased_nonces = leases.map { |event| event.fetch("nonce") }
+      ingested_nodes.uniq.length == expected_ingested_count &&
+        ingested_nodes.uniq.sort == @task_index.keys.sort &&
+        ingested_nonces.uniq.length == ingested_nonces.length &&
+        leased_nonces.uniq.length == leased_nonces.length &&
+        leased_nonces.sort == ingested_nonces.sort
     end
 
     def close!(reason, evidence_digest: nil)
@@ -541,7 +550,14 @@ module PromptEngineer
       raise Error, "ledger contains duplicate prepared event" if events.drop(1).any? { |event| event["event"] == "prepared" }
 
       nodes = events.select { |event| event["event"] == "node_created" }
+      expected_nodes = @manifest.fetch("dag").values_at("initial_count", "stability_count", "trigger_count").sum
+      raise Error, "ledger node count is not frozen" unless nodes.length == expected_nodes
       raise Error, "ledger contains duplicate node IDs" unless nodes.map { |event| event.fetch("id") }.uniq.length == nodes.length
+      nodes.each do |node|
+        binding = node.slice("kind", "case_id", "host", "arm", "repeat_index", "trigger_id")
+        expected_id = "node-#{PromptEngineer::Canonical.digest(binding)[0, 32]}"
+        raise Error, "ledger node identity mismatch" unless node.fetch("id") == expected_id
+      end
       leases = {}
       closed = false
       events.each do |event|

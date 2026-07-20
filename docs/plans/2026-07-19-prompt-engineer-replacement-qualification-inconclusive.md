@@ -17,9 +17,9 @@ evidence gates are unavailable:
   cutover mutation was performed.
 
 The implemented CLI reports these boundaries as unsupported/inconclusive, and
-the cutover gate refuses mutation until qualification is genuinely `PASS` and
-all capability, runtime, sandbox, budget, legacy, and host-coverage gates are
-evidenced.
+the cutover gate refuses mutation until qualification has a scorer-qualified
+decision and all capability, runtime, sandbox, budget, legacy, and host-coverage
+gates are evidenced.
 
 Verification completed in the isolated worktree:
 

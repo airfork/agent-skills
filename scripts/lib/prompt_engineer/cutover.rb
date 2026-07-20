@@ -12,13 +12,13 @@ module PromptEngineer
 
     module_function
 
-    def evaluate(qualification:, capabilities:, runtime:, sandbox:)
+    def evaluate(qualification:, capabilities:, runtime:, sandbox:, evidence_manifest: nil)
       reasons = []
       reasons << "qualification is not a scorer decision" unless QUALIFICATION_DECISIONS.include?(qualification)
       reasons << "qualification decision is not qualified" unless %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT].include?(qualification)
       trusted_capabilities = defined?(PromptEngineer::Capabilities::RECORDS) && capabilities.equal?(PromptEngineer::Capabilities::RECORDS)
       reasons << "capability evidence authenticity is unproven" unless trusted_capabilities
-      reasons.concat(capability_errors(capabilities))
+      reasons.concat(capability_errors(capabilities, evidence_manifest))
       reasons << "Ruby 2.6 compatibility evidence is unavailable" unless runtime == "ruby-2.6"
       reasons << "sandbox support is unavailable" unless sandbox == "supported"
       {
@@ -32,7 +32,7 @@ module PromptEngineer
       raise Error, "cutover mutations are disabled until all qualification gates pass"
     end
 
-    def capability_errors(capabilities)
+    def capability_errors(capabilities, evidence_manifest)
       return ["capability evidence is not an object"] unless capabilities.is_a?(Hash)
       return ["capability hosts are not exactly codex and claude"] unless capabilities.keys.sort == REQUIRED_HOSTS.sort
 
@@ -42,6 +42,7 @@ module PromptEngineer
           reasons << "#{host} capability record is not exact and nonempty"
           next
         end
+        reasons << "#{host} capability host does not match key" unless record["host"] == host
         reasons << "#{host} capability is not supported" unless record.fetch("status") == "supported"
         reasons << "#{host} normalizer evidence is missing" unless nonempty_string?(record.fetch("normalizer"))
         reasons << "#{host} capability reason is missing" unless nonempty_string?(record.fetch("reason"))
@@ -50,6 +51,12 @@ module PromptEngineer
                evidence.values.all? { |value| nonempty_string?(value) } &&
                evidence.fetch("sha256").match?(DIGEST)
           reasons << "#{host} capability evidence is not exact and nonempty"
+        end
+        if evidence_manifest
+          manifest_file = Array(evidence_manifest["files"]).find { |file| file.is_a?(Hash) && file["path"] == evidence["artifact"] }
+          unless manifest_file && manifest_file["sha256"] == evidence["sha256"]
+            reasons << "#{host} capability evidence is not bound to immutable manifest"
+          end
         end
       end
     end
