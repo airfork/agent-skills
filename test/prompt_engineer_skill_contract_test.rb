@@ -68,6 +68,43 @@ class PromptEngineerSkillContractTest < Minitest::Test
     assert_match(/\$prompt-engineer/, openai)
   end
 
+  def test_description_excludes_capability_architecture_and_model_availability_failures
+    description = skill_text_description
+
+    %w[capability architecture].each do |layer|
+      assert_includes description, layer
+    end
+    assert_includes description, "model availability"
+  end
+
+  def test_each_profile_requires_comparable_evidence_and_zero_tolerance_checks
+    evaluation = File.read(File.join(SKILL_DIR, "references", "evaluation.md")).downcase
+
+    profile_requirements = {
+      "quick" => ["comparable evidence", "representative input", "zero-tolerance", "allowed only when"],
+      "standard" => ["baseline and candidate", "fresh, equivalent", "zero-tolerance", "allowed only when"],
+      "ecosystem" => ["baseline and candidate", "end-to-end", "producer-consumer", "zero-tolerance", "allowed only when"]
+    }
+
+    profile_requirements.each do |profile, requirements|
+      section = evaluation.split("## #{profile}", 2).fetch(1).split(/^## /, 2).first
+      requirements.each do |requirement|
+        assert_includes section, requirement, "#{profile} profile missing #{requirement}"
+      end
+    end
+    assert_includes evaluation, "missing required evidence"
+    assert_includes evaluation, "inconclusive"
+  end
+
+  def test_contexts_route_instruction_layers_tool_schema_and_embedded_components
+    contexts = File.read(File.join(SKILL_DIR, "references", "prompt-contexts.md")).downcase
+
+    %w[system developer user].each { |layer| assert_includes contexts, layer }
+    assert_includes contexts, "tool-schema"
+    assert_includes contexts, "embedded-component"
+    assert_match(/route.{0,120}(owner|responsible layer)/, contexts)
+  end
+
   def test_candidate_manifest_contract
     manifest = Psych.safe_load(File.read(File.join(REPO, "skills.yaml")), aliases: false)
     candidate = manifest.fetch("skills").find { |skill| skill.fetch("name") == "prompt-engineer" }
@@ -151,6 +188,12 @@ class PromptEngineerSkillContractTest < Minitest::Test
   end
 
   private
+
+  def skill_text_description
+    skill = File.read(File.join(SKILL_DIR, "SKILL.md"))
+    frontmatter = skill.split("\n---\n", 2).first.sub("---\n", "")
+    Psych.safe_load(frontmatter, aliases: false).fetch("description").downcase
+  end
 
   def nonblank_lines(text)
     text.lines.reject { |line| line.strip.empty? }

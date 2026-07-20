@@ -11,6 +11,16 @@ not a consequential behavior claim. Establish the target and constraint, check
 for non-prompt causes, and inspect a representative input. A wording proposal
 may be useful, but call it a proposal unless a comparison was actually run.
 
+### Minimum acceptance
+
+The Quick profile's comparable evidence is a check of the proposal against the
+stated target, constraints, and one representative input. `Supported` is
+allowed only when the target and constraint are explicit, the representative
+input meets the observable success criteria, and every zero-tolerance failure
+check passes. Quick cannot support a behavioral improvement claim without a
+baseline/candidate comparison; if its required evidence is missing, use
+`INCONCLUSIVE`.
+
 ## Standard
 
 Use for a consequential change to one prompt or one prompt-bearing skill.
@@ -23,6 +33,15 @@ Use for a consequential change to one prompt or one prompt-bearing skill.
 4. Score the same criteria for both variants, record regressions and missing
    observations, and decide whether the claim is supported.
 
+### Minimum acceptance
+
+The Standard profile's comparable evidence is a baseline and candidate run in
+fresh, equivalent contexts with symmetric inputs, tools, and data. `Supported`
+is allowed only when the same observable success criteria pass for both
+contexts and every zero-tolerance failure check passes for the candidate. If
+the paired comparison or any required evidence is missing, use
+`INCONCLUSIVE`.
+
 If the contexts, inputs, tools, or observations are not comparable, report
 `INCONCLUSIVE` rather than filling the gap with confidence or authority.
 
@@ -34,6 +53,15 @@ the next stage. Evaluate representative end-to-end flows as well as the local
 prompt. A shorter or more fluent local response is not an improvement if it
 drops authorization, constraints, verification truth, required fields, or the
 outer schema.
+
+### Minimum acceptance
+
+The Ecosystem profile's comparable evidence is a baseline and candidate
+comparison over representative end-to-end flows plus each affected
+producer-consumer contract. `Supported` is allowed only when every affected
+boundary preserves its contract, the end-to-end success criteria pass, and all
+zero-tolerance failure checks pass. If a stage, boundary, comparison, or other
+required evidence is missing, use `INCONCLUSIVE`.
 
 ## Scoring and claims
 
@@ -63,6 +91,10 @@ Use these decision labels:
 Do not present a persuasive explanation, technique name, or claimed authority
 as evidence. State the scope of the result, the cases observed, what was not
 tested, and the next smallest useful check.
+
+A profile may not receive the `Supported` label when its required evidence or
+zero-tolerance check is missing; missing required evidence forces
+`INCONCLUSIVE`.
 
 ## Regression handling
 

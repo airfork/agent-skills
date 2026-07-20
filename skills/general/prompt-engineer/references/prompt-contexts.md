@@ -4,6 +4,27 @@ Identify the layer being changed before selecting an evaluation profile. A
 prompt-like word in a request or repository is not enough to activate this
 workflow.
 
+## Instruction-layer routing
+
+Classify the requested change as a system, developer, or user layer change
+before editing. Preserve the higher-priority layer's authority and route a
+request that lacks permission for that layer to the responsible owner. Do not
+pretend a user-layer rewrite can change a system or developer instruction.
+
+## Tool-schema routing
+
+Inspect tool-schema names, arguments, return shapes, and validation rules as a
+separate contract from prompt wording. Route a mismatch in a tool schema or
+tool implementation to its responsible owner; do not use prompt text to claim
+that an unavailable tool, argument, or result shape exists.
+
+## Embedded-component routing
+
+When a prompt is embedded in a skill, template, code/configuration component,
+or generated artifact, identify the owning component and every consumer before
+editing. Route each case to its responsible layer owner and evaluate the
+embedded component in its containing workflow, not as an isolated paragraph.
+
 ## Single prompts
 
 Inspect the prompt's user goal, input contract, available context, authority,

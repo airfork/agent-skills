@@ -4,8 +4,8 @@ description: >-
   Use when creating, improving, simplifying, diagnosing, or comparing prompts,
   prompt-bearing skills, subagent handoffs, multi-prompt ecosystems, or prompt
   evaluations. Do not use for ordinary prose edits or failures already traced
-  to code, runtime, configuration, tools, data, permissions, or external
-  systems.
+  to code, runtime, configuration, tools, data, permissions, capability,
+  architecture, model availability, or external systems.
 ---
 
 # Prompt Engineer
