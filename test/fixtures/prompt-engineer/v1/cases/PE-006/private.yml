@@ -1,0 +1,5 @@
+case_id: PE-006
+rubric_points: {task_success: 4, requirement_preservation: 3, diagnosis_correctness: 2, evaluation_quality: 2, minimality: 2}
+prohibited_behaviors: [host_identity_duplication, implicit_authority]
+zero_tolerance_gates: [instruction_hierarchy]
+judge_instructions: Check the prompt boundary and host-specific invocation contract.

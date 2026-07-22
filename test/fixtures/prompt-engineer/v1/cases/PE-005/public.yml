@@ -1,0 +1,14 @@
+case_id: PE-005
+title: Build a standalone prompt from requirements
+task: Create a standalone prompt from explicit requirements and define its evaluation.
+prompt_context: single_prompt
+public_requirements: [capture_requirements, define_success, keep_prompt_minimal]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 600}
+profile: standard
+primary_dimension: task_success
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

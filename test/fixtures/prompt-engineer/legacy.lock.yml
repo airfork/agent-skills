@@ -1,0 +1,15 @@
+schema_version: 1
+status: blocked
+repository: solatis/claude-config
+commit: e16d537c594b0f29a368726aa11bb4e5d704938f
+legacy_path: skills/scripts/skills/prompt_engineer
+companion_path: skills/scripts/skills/lib
+dependency_closure:
+  status: blocked
+  reason: PROMPT_ENGINEER_LEGACY_ROOT was unavailable
+  paths: []
+evidence:
+  status: absent
+  files: []
+  object_ids: []
+  aggregate_digest:

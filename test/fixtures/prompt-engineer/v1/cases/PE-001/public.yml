@@ -1,0 +1,14 @@
+case_id: PE-001
+title: Remove redundant prompt instructions
+task: Simplify a prompt while preserving its observable requirements.
+prompt_context: single_prompt
+public_requirements: [diagnose_before_editing, preserve_requirements, compare_baseline]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 300}
+profile: quick
+primary_dimension: task_success
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

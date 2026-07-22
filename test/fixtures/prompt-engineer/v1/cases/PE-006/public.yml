@@ -1,0 +1,14 @@
+case_id: PE-006
+title: Draft a host-specific skill prompt
+task: Create a Codex or Claude skill prompt without duplicating host identity.
+prompt_context: prompt_bearing_skill
+public_requirements: [respect_host_context, avoid_identity_duplication, define_trigger]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 600}
+profile: standard
+primary_dimension: requirement_preservation
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

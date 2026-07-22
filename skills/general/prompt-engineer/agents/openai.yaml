@@ -1,0 +1,7 @@
+interface:
+  display_name: "Prompt Engineer"
+  short_description: "Diagnose and improve prompts with evidence"
+  default_prompt: "Use $prompt-engineer to diagnose and improve this prompt with the lightest evidence-backed evaluation that can support the requested claim."
+
+policy:
+  allow_implicit_invocation: false

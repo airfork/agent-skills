@@ -1,131 +1,101 @@
 module PromptEngineer
   module Cutover
-    QUALIFICATION_FIELDS = %w[status decision report_digest].freeze
-    CAPABILITY_FIELDS = %w[
-      status ruby_2_6 libc native_qualification sandbox
+    class Error < StandardError; end
+
+    QUALIFICATION_DECISIONS = %w[
+      QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT NOT_QUALIFIED INCONCLUSIVE
     ].freeze
-    QUALIFICATION_DECISIONS = %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT].freeze
-    EVIDENCE_STATUSES = %w[PASS PARTIAL UNAVAILABLE UNSUPPORTED BLOCKED].freeze
-    LIVE_ACTIONS = %w[replace install symlink delete].freeze
+    REQUIRED_HOSTS = %w[codex claude].freeze
+    CAPABILITY_FIELDS = %w[host status normalizer reason evidence].freeze
+    EVIDENCE_FIELDS = %w[artifact pointer root sha256].freeze
+    DIGEST = /\A[0-9a-f]{64}\z/.freeze
 
     module_function
 
-    def evaluate(qualification_result:, capability_record:)
-      qualification_errors, qualification_blocks = validate_qualification(
-        qualification_result
-      )
-      capability_errors, capability_blocks = validate_capability(capability_record)
-      inconclusive = qualification_errors + capability_errors
-      blocked = qualification_blocks + capability_blocks
-
-      if !inconclusive.empty?
-        result("INCONCLUSIVE", inconclusive)
-      elsif !blocked.empty?
-        result("BLOCKED", blocked)
-      else
-        result("READY", [])
+    def evaluate(qualification: nil, capabilities: nil, runtime: nil, sandbox: nil, evidence_manifest: nil, qualification_result: nil, capability_record: nil)
+      if qualification_result || capability_record
+        return legacy_evaluate(qualification_result, capability_record)
       end
-    end
-
-    def validate_qualification(record)
-      return [["qualification_result_invalid"], []] unless record.is_a?(Hash)
-
-      errors = unknown_fields(record, QUALIFICATION_FIELDS, "qualification")
-      errors.concat(missing_fields(record, QUALIFICATION_FIELDS, "qualification"))
-      return [errors, []] unless errors.empty?
-
-      errors = []
-      blocks = []
-      status = record.fetch("status")
-      decision = record.fetch("decision")
-      digest = record.fetch("report_digest")
-
-      unless EVIDENCE_STATUSES.include?(status)
-        errors << "qualification_status_invalid"
-      end
-      unless QUALIFICATION_DECISIONS.include?(decision)
-        errors << "qualification_decision_invalid"
-      end
-      unless digest.is_a?(String) && !digest.empty?
-        errors << "qualification_report_digest_invalid"
-      end
-
-      if errors.empty? && status != "PASS"
-        if status == "INCONCLUSIVE"
-          errors << "qualification_inconclusive"
-        else
-          blocks << "qualification_not_pass"
-        end
-      end
-
-      [errors, blocks]
-    end
-
-    def validate_capability(record)
-      return [["capability_record_invalid"], []] unless record.is_a?(Hash)
-
-      errors = unknown_fields(record, CAPABILITY_FIELDS, "capability")
-      errors.concat(missing_fields(record, CAPABILITY_FIELDS, "capability"))
-      return [errors, []] unless errors.empty?
-
-      errors = []
-      blocks = []
-      CAPABILITY_FIELDS.each do |field|
-        value = record.fetch(field)
-        unless EVIDENCE_STATUSES.include?(value)
-          errors << "#{field}_evidence_invalid"
-        end
-      end
-      return [errors, blocks] unless errors.empty?
-
-      if record.fetch("status") != "PASS"
-        blocks << "capability_#{record.fetch("status").downcase}"
-      end
-      %w[ruby_2_6 libc].each do |field|
-        value = record.fetch(field)
-        if value != "PASS"
-          blocks << "#{field}_#{value.downcase}"
-        end
-      end
-      if record.fetch("native_qualification") != "PASS"
-        blocks << "native_qualification_not_pass"
-      end
-      if record.fetch("sandbox") != "PASS"
-        blocks << "sandbox_#{record.fetch("sandbox").downcase}"
-      end
-
-      [errors, blocks]
-    end
-
-    def unknown_fields(record, allowed, prefix)
-      record.keys.reject { |key| allowed.include?(key) }.map do |key|
-        "#{prefix}_unknown_field_#{key}"
-      end
-    end
-
-    def missing_fields(record, required, prefix)
-      required.reject { |key| record.key?(key) }.map do |key|
-        if prefix == "qualification" && key == "report_digest"
-          "qualification_report_digest_missing"
-        elsif prefix == "capability" && key == "ruby_2_6"
-          "ruby_2_6_evidence_missing"
-        elsif prefix == "capability" && key == "libc"
-          "libc_evidence_missing"
-        else
-          "#{prefix}_#{key}_missing"
-        end
-      end
-    end
-
-    def result(status, reason_codes)
+      reasons = []
+      reasons << "qualification is not a scorer decision" unless QUALIFICATION_DECISIONS.include?(qualification)
+      reasons << "qualification decision is not qualified" unless %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT].include?(qualification)
+      trusted_capabilities = defined?(PromptEngineer::Capabilities::RECORDS) && capabilities.equal?(PromptEngineer::Capabilities::RECORDS)
+      reasons << "capability evidence authenticity is unproven" unless trusted_capabilities
+      reasons.concat(capability_errors(capabilities, evidence_manifest))
+      reasons << "Ruby 2.6 compatibility evidence is unavailable" unless runtime == "ruby-2.6"
+      reasons << "sandbox support is unavailable" unless sandbox == "supported"
       {
-        "status" => status,
-        "reason_codes" => reason_codes,
-        "mutations_allowed" => false,
-        "live_actions" => LIVE_ACTIONS.each_with_object({}) do |action, actions|
-          actions[action] = false
-        end
+        "decision" => reasons.empty? ? "READY" : "BLOCKED",
+        "mutations_permitted" => reasons.empty?,
+        "reasons" => reasons
       }
     end
+
+    def legacy_evaluate(qualification_result, capability_record)
+      unless qualification_result.is_a?(Hash) && capability_record.is_a?(Hash)
+        return legacy_result("INCONCLUSIVE", ["qualification_result_invalid"])
+      end
+      required_qualification = %w[status decision report_digest]
+      required_capability = %w[status ruby_2_6 libc native_qualification sandbox]
+      missing = required_qualification.reject { |key| qualification_result.key?(key) }.map { |key| "qualification_#{key}_missing" }
+      missing.concat(required_capability.reject { |key| capability_record.key?(key) }.map { |key| "#{key}_evidence_missing" })
+      return legacy_result("INCONCLUSIVE", missing) unless missing.empty?
+      return legacy_result("INCONCLUSIVE", ["qualification_status_invalid"]) unless %w[PASS PARTIAL UNAVAILABLE UNSUPPORTED BLOCKED].include?(qualification_result["status"])
+      return legacy_result("INCONCLUSIVE", ["qualification_decision_invalid"]) unless %w[QUALIFIED_EXPLICIT QUALIFIED_IMPLICIT].include?(qualification_result["decision"])
+      return legacy_result("INCONCLUSIVE", ["qualification_report_digest_invalid"]) unless qualification_result["report_digest"].is_a?(String) && !qualification_result["report_digest"].empty?
+      invalid = capability_record.values.reject { |value| %w[PASS PARTIAL UNAVAILABLE UNSUPPORTED BLOCKED].include?(value) }
+      return legacy_result("INCONCLUSIVE", ["capability_evidence_invalid"]) unless invalid.empty?
+      blocks = []
+      blocks << "capability_#{capability_record["status"].downcase}" unless capability_record["status"] == "PASS"
+      %w[ruby_2_6 libc].each { |key| blocks << "#{key}_#{capability_record[key].downcase}" unless capability_record[key] == "PASS" }
+      blocks << "native_qualification_not_pass" unless capability_record["native_qualification"] == "PASS"
+      blocks << "sandbox_#{capability_record["sandbox"].downcase}" unless capability_record["sandbox"] == "PASS"
+      legacy_result(blocks.empty? ? "READY" : "BLOCKED", blocks)
+    end
+    private_class_method :legacy_evaluate
+
+    def legacy_result(status, reason_codes)
+      {"status" => status, "reason_codes" => reason_codes, "mutations_allowed" => false, "live_actions" => %w[replace install symlink delete].to_h { |action| [action, false] }}
+    end
+    private_class_method :legacy_result
+
+    def apply!(_decision)
+      raise Error, "cutover mutations are disabled until all qualification gates pass"
+    end
+
+    def capability_errors(capabilities, evidence_manifest)
+      return ["capability evidence is not an object"] unless capabilities.is_a?(Hash)
+      return ["capability hosts are not exactly codex and claude"] unless capabilities.keys.sort == REQUIRED_HOSTS.sort
+
+      REQUIRED_HOSTS.each_with_object([]) do |host, reasons|
+        record = capabilities.fetch(host)
+        unless record.is_a?(Hash) && record.keys.sort == CAPABILITY_FIELDS.sort
+          reasons << "#{host} capability record is not exact and nonempty"
+          next
+        end
+        reasons << "#{host} capability host does not match key" unless record["host"] == host
+        reasons << "#{host} capability is not supported" unless record.fetch("status") == "supported"
+        reasons << "#{host} normalizer evidence is missing" unless nonempty_string?(record.fetch("normalizer"))
+        reasons << "#{host} capability reason is missing" unless nonempty_string?(record.fetch("reason"))
+        evidence = record.fetch("evidence")
+        unless evidence.is_a?(Hash) && evidence.keys.sort == EVIDENCE_FIELDS.sort &&
+               evidence.values.all? { |value| nonempty_string?(value) } &&
+               evidence.fetch("sha256").match?(DIGEST)
+          reasons << "#{host} capability evidence is not exact and nonempty"
+        end
+        if evidence_manifest
+          manifest_file = Array(evidence_manifest["files"]).find { |file| file.is_a?(Hash) && file["path"] == evidence["artifact"] }
+          unless manifest_file && manifest_file["sha256"] == evidence["sha256"]
+            reasons << "#{host} capability evidence is not bound to immutable manifest"
+          end
+        end
+      end
+    end
+    private_class_method :capability_errors
+
+    def nonempty_string?(value)
+      value.is_a?(String) && !value.empty?
+    end
+    private_class_method :nonempty_string?
   end
 end

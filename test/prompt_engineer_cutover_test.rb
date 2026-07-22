@@ -1,72 +1,98 @@
 require "minitest/autorun"
-
-$LOAD_PATH.unshift(File.expand_path("../scripts/lib", __dir__))
-require "prompt_engineer/cutover"
+require_relative "../scripts/lib/prompt_engineer"
+require_relative "../scripts/lib/prompt_engineer/cutover"
 
 class PromptEngineerCutoverTest < Minitest::Test
-  def test_blocks_partial_and_unsupported_capability_evidence
-    result = PromptEngineer::Cutover.evaluate(
-      qualification_result: {
-        "status" => "PASS",
-        "decision" => "QUALIFIED_EXPLICIT",
-        "report_digest" => "report-digest"
-      },
-      capability_record: {
-        "status" => "PARTIAL",
-        "ruby_2_6" => "UNAVAILABLE",
-        "libc" => "UNAVAILABLE",
-        "native_qualification" => "BLOCKED",
-        "sandbox" => "UNSUPPORTED"
-      }
+  def test_capability_and_runtime_gates_block_cutover_without_mutation
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "INCONCLUSIVE",
+      capabilities: PromptEngineer::Capabilities.report,
+      runtime: "ruby-4.0",
+      sandbox: "unsupported"
     )
-
-    assert_equal "BLOCKED", result.fetch("status")
-    assert_equal [
-      "capability_partial",
-      "ruby_2_6_unavailable",
-      "libc_unavailable",
-      "native_qualification_not_pass",
-      "sandbox_unsupported"
-    ], result.fetch("reason_codes")
-    assert_equal false, result.fetch("mutations_allowed")
-    assert_equal false, result.fetch("live_actions").fetch("replace")
-    assert_equal false, result.fetch("live_actions").fetch("install")
-    assert_equal false, result.fetch("live_actions").fetch("symlink")
-    assert_equal false, result.fetch("live_actions").fetch("delete")
+    assert_equal "BLOCKED", decision.fetch("decision")
+    refute decision.fetch("mutations_permitted")
+    assert_includes decision.fetch("reasons").join("; "), "qualification"
+    assert_includes decision.fetch("reasons").join("; "), "sandbox"
+    assert_raises(PromptEngineer::Cutover::Error) { PromptEngineer::Cutover.apply!(decision) }
   end
 
-  def test_returns_inconclusive_when_required_evidence_is_absent
-    result = PromptEngineer::Cutover.evaluate(
-      qualification_result: {"status" => "PASS"},
-      capability_record: {"status" => "PASS"}
+  def test_even_a_ready_shape_cannot_apply_without_explicit_mutating_implementation
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: supported_capabilities,
+      runtime: "ruby-2.6",
+      sandbox: "supported",
+      evidence_manifest: evidence_manifest
     )
-
-    assert_equal "INCONCLUSIVE", result.fetch("status")
-    assert_includes result.fetch("reason_codes"), "qualification_report_digest_missing"
-    assert_includes result.fetch("reason_codes"), "ruby_2_6_evidence_missing"
-    assert_includes result.fetch("reason_codes"), "libc_evidence_missing"
-    assert_equal false, result.fetch("mutations_allowed")
+    assert_equal "BLOCKED", decision.fetch("decision")
+    refute decision.fetch("mutations_permitted")
+    assert_includes decision.fetch("reasons"), "capability evidence authenticity is unproven"
+    assert_raises(PromptEngineer::Cutover::Error) { PromptEngineer::Cutover.apply!(decision) }
   end
 
-  def test_complete_evidence_still_grants_no_live_mutation_authority
-    result = PromptEngineer::Cutover.evaluate(
-      qualification_result: {
-        "status" => "PASS",
-        "decision" => "QUALIFIED_EXPLICIT",
-        "report_digest" => "report-digest"
-      },
-      capability_record: {
-        "status" => "PASS",
-        "ruby_2_6" => "PASS",
-        "libc" => "PASS",
-        "native_qualification" => "PASS",
-        "sandbox" => "PASS"
-      }
+  def test_cutover_requires_host_binding_and_manifest_bound_capability_digests
+    mismatched_host = supported_capabilities
+    mismatched_host.fetch("claude")["host"] = "codex"
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: mismatched_host,
+      runtime: "ruby-2.6",
+      sandbox: "supported",
+      evidence_manifest: evidence_manifest
     )
+    assert_includes decision.fetch("reasons"), "claude capability host does not match key"
 
-    assert_equal "READY", result.fetch("status")
-    assert_equal [], result.fetch("reason_codes")
-    assert_equal false, result.fetch("mutations_allowed")
-    assert result.fetch("live_actions").values.all? { |allowed| allowed == false }
+    mismatched_digest = supported_capabilities
+    manifest = evidence_manifest
+    manifest.fetch("files").find { |file| file.fetch("path") == "codex/export-capabilities.json" }["sha256"] = "b" * 64
+    decision = PromptEngineer::Cutover.evaluate(
+      qualification: "QUALIFIED_EXPLICIT",
+      capabilities: mismatched_digest,
+      runtime: "ruby-2.6",
+      sandbox: "supported",
+      evidence_manifest: manifest
+    )
+    assert_includes decision.fetch("reasons"), "codex capability evidence is not bound to immutable manifest"
+    refute decision.fetch("mutations_permitted")
+  end
+
+  private
+
+  def supported_capabilities
+    %w[codex claude].each_with_object({}) do |host, result|
+      result[host] = {
+        "host" => host,
+        "status" => "supported",
+        "normalizer" => "native",
+        "reason" => "verified native evidence",
+        "evidence" => {
+          "root" => "/tmp/prompt-engineer-evidence",
+          "artifact" => "#{host}/export-capabilities.json",
+          "pointer" => "#/",
+          "sha256" => "a" * 64
+        }
+      }
+    end
+  end
+
+  def evidence_manifest
+    {
+      "schema" => "prompt-engineer-task0-evidence-manifest-v1",
+      "root" => "/tmp/prompt-engineer-evidence",
+      "captured_at" => "2026-07-19",
+      "retention_deadline" => "cutover plus five-use observation window",
+      "self_digest" => "excluded; this manifest is the immutable index root",
+      "files" => %w[codex claude].map do |host|
+        {
+          "path" => "#{host}/export-capabilities.json",
+          "mode" => "0444",
+          "size" => 1,
+          "sha256" => "a" * 64,
+          "origin" => "test evidence",
+          "fixture_derivation" => nil
+        }
+      end
+    }
   end
 end

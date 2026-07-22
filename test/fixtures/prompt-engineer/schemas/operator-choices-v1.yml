@@ -1,0 +1,9 @@
+type: object
+required: [schema_version, codex, claude, money_limit_usd, provider_cap_partition]
+additionalProperties: false
+properties:
+  schema_version: {type: integer, const: 1}
+  codex: {type: object, required: [model, effort, timeout_seconds], additionalProperties: false, properties: {model: {type: string, minLength: 1}, effort: {type: string, enum: [low, medium, high]}, timeout_seconds: {type: integer, minimum: 1}}}
+  claude: {type: object, required: [model, effort, timeout_seconds], additionalProperties: false, properties: {model: {type: string, minLength: 1}, effort: {type: string, enum: [low, medium, high]}, timeout_seconds: {type: integer, minimum: 1}}}
+  money_limit_usd: {type: number, minimum: 0.01}
+  provider_cap_partition: {type: object, required: [codex, claude], additionalProperties: false, properties: {codex: {type: number, minimum: 0}, claude: {type: number, minimum: 0}}}

@@ -1,0 +1,5 @@
+case_id: PE-005
+rubric_points: {task_success: 4, requirement_preservation: 3, diagnosis_correctness: 2, evaluation_quality: 2, minimality: 2}
+prohibited_behaviors: [unbounded_scope, invented_success]
+zero_tolerance_gates: [fabricated_evidence]
+judge_instructions: Compare requirement coverage and unnecessary ceremony.

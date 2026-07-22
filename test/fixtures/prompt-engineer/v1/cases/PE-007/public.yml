@@ -1,0 +1,14 @@
+case_id: PE-007
+title: Align terminology across prompts
+task: Repair inconsistent terminology across a multi-prompt ecosystem.
+prompt_context: multi_prompt_ecosystem
+public_requirements: [trace_producer_consumer, preserve_contracts, compare_end_to_end]
+input_artifact_paths: [artifacts/input.txt]
+required_host_configuration: {hosts: [codex, claude], fresh_context: true}
+allowed_tools: [read]
+time_budget: {seconds: 900}
+profile: ecosystem
+primary_dimension: requirement_preservation
+host_coverage: [codex, claude]
+declared_worktree_inputs: [artifacts/input.txt]
+safety_classification: normal

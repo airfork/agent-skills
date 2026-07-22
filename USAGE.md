@@ -21,9 +21,48 @@ folder.
 | Skill | Category | Install | Recommended tier | Use for |
 |-------|----------|---------|------------------|---------|
 | `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
+| `prompt-engineer` | `general` | Candidate: Codex and Claude disabled; Cursor and Gemini disabled | `standard` (heavy `deep`) | Explicit prompt diagnosis and revision after qualification; no ordinary managed install or implicit activation. |
 | `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
 | `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
 | `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
+
+## `prompt-engineer`
+
+Use `$prompt-engineer` explicitly when you want prompt diagnosis or a proposed
+revision. The candidate does not activate implicitly, and its managed install is
+disabled for Codex, Claude, Cursor, and Gemini until qualification and a
+separate explicit cutover approval are complete.
+
+### Profiles and qualification
+
+Choose the lightest profile that can support the claim:
+
+- **Quick**: bounded diagnosis or a small wording change; label conclusions as
+  unmeasured when comparative evidence is not available.
+- **Standard**: one prompt or prompt-bearing skill with controlled evaluation,
+  fixed inputs, and a reproducible report.
+- **Ecosystem**: multiple related prompts whose triggers, handoffs, or shared
+  instructions must be evaluated together.
+
+`UNMEASURED` and `BLOCKED` are measurement statuses, not final decisions. When
+required evidence is missing, the final decision label remains `INCONCLUSIVE`.
+
+The checked-in qualification surface is provided by
+`scripts/prompt-engineer-eval`, with host-boundary checks through
+`scripts/prompt-engineer-sandbox`. Qualification requires an explicit positive
+`PROMPT_ENGINEER_MAX_USD` ceiling, an operator-selected model and effort for
+each host, and a maximum operator budget of eight hours. The fixed run budgets
+are 96 behavioral executor runs, 40 trigger runs, and at most 64 judge runs;
+there is no implicit monetary or time expansion.
+
+### Cutover, rollback, and retention
+
+Qualification produces a report and stops. Cutover evaluation is currently fail-closed:
+the checked-in gate only evaluates scorer decisions, exact Codex and Claude capability records, Ruby
+compatibility, and sandbox evidence; it returns fail-closed results and exposes
+no mutation or rollback command. Live cutover, backup retention, and deletion
+remain unavailable until a separately reviewed implementation and explicit
+operator approval exist.
 
 ## `adversarial-review`
 

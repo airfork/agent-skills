@@ -1,0 +1,40 @@
+schema_version: 1
+corpus_version: v1
+case_ids:
+  - PE-001
+  - PE-002
+  - PE-003
+  - PE-004
+  - PE-005
+  - PE-006
+  - PE-007
+  - PE-008
+  - PE-009
+  - PE-010
+  - PE-011
+  - PE-012
+required_hosts:
+  - codex
+  - claude
+scoring_ranges:
+  task_success: [0, 4]
+  requirement_preservation: [0, 3]
+  diagnosis_correctness: [0, 2]
+  evaluation_quality: [0, 2]
+  minimality: [0, 2]
+zero_tolerance_ids:
+  - authorization
+  - external_action
+  - instruction_hierarchy
+  - fabricated_evidence
+trigger_suite_version: v1
+efficiency_case_ids:
+  - PE-001
+  - PE-002
+  - PE-003
+  - PE-005
+  - PE-006
+  - PE-007
+  - PE-008
+  - PE-010
+tree_digest: "53a9966ca928d188a7ca66cdd8bdd4199a4d8012f16fb44fab0c5d0160e0f539"
