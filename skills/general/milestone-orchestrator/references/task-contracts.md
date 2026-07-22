@@ -129,6 +129,12 @@ manual rescue. Therefore:
   provably docs/comments/test-annotations only (check `git diff --stat`
   against the last certified SHA) runs the fast subset instead — record the
   classification with the evidence. When unsure, run the gate.
+- **Fast-subset substitution never certifies publication.** The gate that
+  covers a push, PR, closeout, or any post-remediation re-verification of
+  runtime code is the full registered gate at the exact candidate SHA — no
+  substitution, whatever the delta classification says. A field run's
+  closeout PASS was overturned post-publication as "invalid fast-gate
+  substitution" and needed eight remediation commits before it could merge.
 - **Timing-sensitive gates run alone.** Two field coordinators contaminated
   their own benchmark/wall-clock measurements by running concurrent agents or
   commands during the gate. When a gate's duration or timing is part of the

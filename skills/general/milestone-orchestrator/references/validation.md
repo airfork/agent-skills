@@ -161,6 +161,29 @@ m77's ledger destruction); blast-radius ownership rule (m77's five
 packet-scope errors); filter-coverage rule (m77 certified a red branch
 green); off-ledger RUN handoff warning (m76's invisible RUN).
 
+## Fourth field audit (2026-07-22)
+
+Eight runs (ai-civ m78/m79/m80-PREPARE, exodus m35–m38, kards m56 closeout).
+Maturity round: `lite` ran two mainlines (m37 parked in 5 dispatches; m38);
+dispatch budgets trend down (60→50→40 in ai-civ); packet-scope errors fell
+from five (m77) to one-or-two self-caught; the m77 doc-staleness grind did
+not recur; commit-STATE-at-boundaries was breached once (m78 F-033), then
+absorbed, then explicitly "earned its keep" diagnosing m36's cwd-leak
+corruption; update-attempt, load_1m, and gates-run-alone all adopted (m56's
+27% calibration CV was proven to be the coordinator's own concurrent
+activity — clean re-run CV 0.34%); m34's queued T2 recovery executed and
+closed; zero wrongful kills or budget exhaustions anywhere. v1.7 fixes from
+this round: fast-subset substitution never certifies publication (m79
+reopened post-closeout over "invalid fast-gate substitution"); proof-bearing
+milestones review their conclusion at high effort even under lite/standard
+(m37's standard review passed a causal proof a high review later overturned);
+inherited instruments must be proven able to fail at clone time (exodus's
+recurring self-certifying cloned-gate tax); foreign-writer
+provenance-before-mutation and absolute-path/`git -C` disciplines (m36's
+codex intrusion and cwd leak). Remaining cost drivers are now mostly
+product-content (economy rebalances, premise falsifications) and shared-box
+contention — not orchestration.
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and

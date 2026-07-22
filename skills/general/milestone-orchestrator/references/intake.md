@@ -108,6 +108,14 @@ either direction.
 | `adversarial` | Architecture-shaping, security-sensitive, migration-heavy, ambiguous, cross-cutting, or expensive-to-rework milestones | This repository's `adversarial-review` skill at default tier — spec first, then the plan with coverage and drift checks (combined into one pass under `lite`). |
 | `adversarial --high` / `--ultra` | The same risks at unusually large scale or with especially high uncertainty | Per that skill's tier table (`--ultra` is Claude-only). |
 
+**Proof-bearing milestones cap how cheap review may go.** When the primary
+deliverable is a causal proof, falsification result, or a park-or-promote
+ruling — anything where the milestone's *conclusion* is the product — the
+artifact carrying that conclusion is reviewed at high effort even under a
+`lite` profile or `standard` depth. A field lite run's standard-tier review
+passed a causal proof that a later high review overturned post-closeout; the
+park decision survived by luck, not process.
+
 At adversarial depths, resolve or explicitly reject all promoted findings per
 that skill's judge and convergence rules; a non-converged review blocks RUN
 unless the user accepts the documented open question. At `standard` depth,
@@ -175,6 +183,13 @@ RUN starts only after these pass or the approved plan records a safe fallback:
       owner)
 - [ ] Long gates (registered timeout > ~10 min) identified, and a fast
       targeted verification command registered for every implementation task
+- [ ] Inherited instruments proven able to fail: every gate script, filter,
+      or preflight check cloned from a predecessor milestone is re-targeted
+      to this milestone's IDs/paths and demonstrated RED on a deliberate
+      seeded failure before its first acceptance use. Field runs re-discover
+      self-certifying cloned instruments (filters that exclude the new
+      tests, preflights keyed to stale task IDs) at final review every
+      cycle; anti-vacuity at clone time is cheaper
 - [ ] Dirty paths classified: unrelated (preserve), relevant milestone input
       (approved checkpoint/snapshot strategy required), or conflict (resolve
       before RUN)

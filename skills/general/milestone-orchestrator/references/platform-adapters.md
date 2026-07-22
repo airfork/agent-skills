@@ -101,6 +101,22 @@ integrated and independently verified:
 Never close pre-existing configured tabs, terminals, browsers, or worktrees.
 On any doubt or failure: retain, record the reason, report at closeout.
 
+**Foreign writers in run-owned worktrees.** Run worktrees are not exclusive
+by construction — field runs have had foreign agent processes write and even
+push into them mid-run, and long-dead foreign gate processes contend for CPU
+throughout. On detecting unexpected changes in a run worktree: identify the
+author's provenance BEFORE mutating anything (no stash, reset, or checkout
+first — a field coordinator stashed foreign work pre-inspection and had to
+restore it byte-for-byte), record the incident in STATE, and after resolution
+re-verify every frozen anchor and gate certification at the new tip. Kill
+foreign processes only by explicit owner authorization and explicit PID —
+never by pattern.
+
+**No relative paths in coordinator shells.** A `cd` that persists across
+tool calls redirects every later relative path — a field coordinator wrote
+STATE into a task worktree through exactly this leak. Coordinators use
+absolute paths and `git -C` for every repository operation.
+
 ### Browser routing
 
 - **Chrome DevTools:** deep DOM/console/network/performance debugging.
