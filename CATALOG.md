@@ -10,8 +10,8 @@ For invocation syntax, flags, tiers, targets, and action permissions, see
 |------|-----------------------|
 | `fast` | GPT-5.6 Luna, Claude Sonnet medium, or Gemini low-effort/default. |
 | `standard` | GPT-5.6 Terra, Claude Sonnet high, or Gemini default. |
-| `deep` | GPT-5.6 Sol, Claude Opus 4.8 high, or Gemini's highest available reasoning model. |
-| `ultracode` | Claude Opus 4.8 high with UltraCode. |
+| `deep` | GPT-5.6 Sol, Claude Opus 5 high, or Gemini's highest available reasoning model. |
+| `ultracode` | Claude Opus 5 high with UltraCode. |
 
 ## Skills
 

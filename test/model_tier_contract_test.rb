@@ -14,12 +14,12 @@ class ModelTierContractTest < Minitest::Test
     "README.md" => {
       "fast" => "| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |",
       "standard" => "| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |",
-      "deep" => "| `deep` | GPT-5.6 Sol | Opus 4.8 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |",
+      "deep" => "| `deep` | GPT-5.6 Sol | Opus 5 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |",
     },
     "CATALOG.md" => {
       "fast" => "| `fast` | GPT-5.6 Luna, Claude Sonnet medium, or Gemini low-effort/default. |",
       "standard" => "| `standard` | GPT-5.6 Terra, Claude Sonnet high, or Gemini default. |",
-      "deep" => "| `deep` | GPT-5.6 Sol, Claude Opus 4.8 high, or Gemini's highest available reasoning model. |",
+      "deep" => "| `deep` | GPT-5.6 Sol, Claude Opus 5 high, or Gemini's highest available reasoning model. |",
     },
   }.freeze
   ACTIVE_METADATA = %w[README.md CATALOG.md skills.yaml].freeze
