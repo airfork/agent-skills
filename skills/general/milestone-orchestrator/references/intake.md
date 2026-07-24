@@ -86,6 +86,23 @@ five coordinator packet-scope errors on the same root cause: "the approved
 PLAN's path-ownership map does not cover the blast radius of its own SPEC."
 The plan review (either depth) must check this mapping explicitly.
 
+**Calibrate every gating quantity before freezing it.** An acceptance witness
+naming a numeric threshold, an aggregation rule, or a population/exclusion
+rule is a measurement contract; freezing one that real behavior cannot satisfy
+costs a mid-RUN SPEC amendment and an owner interrupt. Dry-run each against
+real baseline data before approval, record the observed distribution and the
+command that produced it (`MEASUREMENT.md` beside SPEC, or a SPEC section when
+small), and pin each bound outside the observed range rather than tight
+against one sample. State explicitly which population the witness ranges over,
+and how early termination, structurally unrecoverable outliers, and absent
+samples are treated. A field run spent four owner-authorized SPEC amendments
+on exactly that list — an unsatisfiable floor, an unrecoverable outlier, a
+per-run mean that under-credited a real effect fivefold against the pooled
+figure, and a cap the feature was designed to exceed — with the feature
+working and the gate computation exact in every case; only the frozen contract
+was wrong. The plan review (either depth) must check that every gating
+quantity carries provenance.
+
 `PLAN.md` also records the **execution profile** (`full` or `lite`, per the
 SKILL.md table) with its rationale, the grounding digest (or a pointer to
 `DIGEST.md`), and the computed worker-dispatch budget. The profile is part of
@@ -104,7 +121,7 @@ either direction.
 
 | Depth | Default for | Mechanics |
 |-------|-------------|-----------|
-| `standard` | `lite`-profile milestones and well-understood `full` ones | One fresh-context reviewer at high reasoning effort reviews `SPEC.md` and `PLAN.md` together: acceptance coverage, spec-plan drift, path-ownership gaps and overlaps, verification-command sanity (do they run from a fresh checkout?), feasibility, and unstated assumptions. |
+| `standard` | `lite`-profile milestones and well-understood `full` ones | One fresh-context reviewer at high reasoning effort reviews `SPEC.md` and `PLAN.md` together: acceptance coverage, spec-plan drift, path-ownership gaps and overlaps, gating-quantity provenance, verification-command sanity (do they run from a fresh checkout?), feasibility, and unstated assumptions. |
 | `adversarial` | Architecture-shaping, security-sensitive, migration-heavy, ambiguous, cross-cutting, or expensive-to-rework milestones | This repository's `adversarial-review` skill at default tier — spec first, then the plan with coverage and drift checks (combined into one pass under `lite`). |
 | `adversarial --high` / `--ultra` | The same risks at unusually large scale or with especially high uncertainty | Per that skill's tier table (`--ultra` is Claude-only). |
 
@@ -183,6 +200,10 @@ RUN starts only after these pass or the approved plan records a safe fallback:
       owner)
 - [ ] Long gates (registered timeout > ~10 min) identified, and a fast
       targeted verification command registered for every implementation task
+- [ ] Every gating quantity calibrated: each frozen threshold, aggregation
+      rule, and population/exclusion rule carries a recorded measurement and
+      the command that produced it, with bounds pinned outside the observed
+      range rather than tight against a single sample
 - [ ] Inherited instruments proven able to fail: every gate script, filter,
       or preflight check cloned from a predecessor milestone is re-targeted
       to this milestone's IDs/paths and demonstrated RED on a deliberate
