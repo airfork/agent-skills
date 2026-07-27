@@ -3,7 +3,8 @@
 # self-inflicted defects observed across real runs before RUN starts:
 # unresolved decision markers, verification commands that cannot run from a
 # fresh checkout, absolute-path portability traps, long gates without an
-# execution policy, and repo contract files no task owns.
+# execution policy, repo contract files no task owns, gating quantities frozen
+# without a recorded measurement, and concurrent tasks sharing owned paths.
 #
 # Usage:
 #   preflight-lint MILESTONE_DIR [--repo DIR]
@@ -19,6 +20,18 @@ PLAN_OPEN_MARKER = "<!-- milestone-orchestrator-plan:v1 -->".freeze
 PLAN_CLOSE_MARKER = "<!-- /milestone-orchestrator-plan -->".freeze
 LONG_GATE_SECONDS = 600
 CONTRACT_FILE_PATTERN = /\A(PROJECT_STATUS|STATUS|CHANGELOG)[^\/]*\z/i
+
+# Threshold-shaped prose: a comparison against a number, a bounded phrase, or a
+# multiplier. Deliberately narrow — a false WARN costs a glance, but noise here
+# trains coordinators to skip the whole report.
+GATING_QUANTITY_PATTERNS = [
+  /[≤≥](?:\s*)\d/,
+  /[<>]=?\s*\d/,
+  /\b(?:at least|at most|no more than|no fewer than|must not exceed|may not exceed)\s+\d/i,
+  /\b\d+(?:\.\d+)?x\b/,
+].freeze
+MEASUREMENT_FILE_PATTERN = /measurement/i
+MEASUREMENT_HEADING_PATTERN = /^\#{1,6}\s.*\b(?:measurement|calibrat\w*|baseline)\b/i
 
 def usage!(message)
   warn message
@@ -67,6 +80,38 @@ end
     if line =~ /<(?:decide|placeholder|fill[- ]?in)[^>]*>/i
       add.call("ERROR", "unresolved_marker", "#{name}:#{lineno}",
                "unresolved placeholder token #{$~[0].inspect}")
+    end
+  end
+end
+
+# --- gating quantities frozen without a recorded measurement ---
+#
+# Four owner-authorized SPEC amendments in one field run all froze a threshold,
+# aggregation rule, or population rule before anyone measured the distribution
+# it had to survive. The check is heuristic (prose, not schema), so it warns.
+
+spec_path = File.join(dir, "SPEC.md")
+if File.file?(spec_path)
+  spec_text = File.read(spec_path)
+  gating_lines = spec_text.each_line.with_index(1).select do |line, _|
+    GATING_QUANTITY_PATTERNS.any? { |pattern| line =~ pattern }
+  end
+
+  unless gating_lines.empty?
+    has_measurement_file =
+      Dir.children(dir).any? { |f| f =~ MEASUREMENT_FILE_PATTERN && File.file?(File.join(dir, f)) }
+    plan_md = File.join(dir, "PLAN.md")
+    plan_text = File.file?(plan_md) ? File.read(plan_md) : ""
+    has_measurement_section =
+      [spec_text, plan_text].any? { |text| text =~ MEASUREMENT_HEADING_PATTERN }
+
+    unless has_measurement_file || has_measurement_section
+      sample = gating_lines.first(3).map { |_, lineno| "SPEC.md:#{lineno}" }.join(", ")
+      add.call("WARN", "uncalibrated_gate", "SPEC.md",
+               "#{gating_lines.length} threshold-shaped acceptance line(s) (#{sample}) with no " \
+               "measurement record: add MEASUREMENT.md beside SPEC, or a measurement/calibration " \
+               "section, recording the observed distribution and the command that produced it. " \
+               "Pin each bound outside the observed range, not tight against one sample")
     end
   end
 end
@@ -144,6 +189,38 @@ if plan
                  "owned path #{p.inspect} escapes the repository")
       end
     end
+  end
+
+  # state-schema.md: "Two implementation tasks that can run concurrently must
+  # not share owned_paths." Concurrency is the absence of a transitive
+  # depends_on edge either way, so this is computable rather than heuristic.
+  impl = tasks.select { |_, t| t.is_a?(Hash) && t["type"] == "implementation" }
+  reachable = impl.keys.to_h { |id| [id, Array(impl[id]["depends_on"]).dup] }
+  loop do
+    changed = false
+    reachable.each do |id, deps|
+      additions = deps.flat_map { |d| reachable[d] || [] }.uniq - deps - [id]
+      next if additions.empty?
+      deps.concat(additions)
+      changed = true
+    end
+    break unless changed
+  end
+
+  covers = lambda do |a, b|
+    a == b || b.start_with?("#{a.chomp("/")}/") || a.start_with?("#{b.chomp("/")}/")
+  end
+
+  impl.keys.combination(2) do |left, right|
+    next if reachable[left].include?(right) || reachable[right].include?(left)
+    shared = Array(impl[left]["owned_paths"]).select do |p|
+      Array(impl[right]["owned_paths"]).any? { |q| covers.call(p, q) }
+    end
+    next if shared.empty?
+    add.call("ERROR", "concurrent_path_overlap", "tasks.#{left}+#{right}",
+             "#{left} and #{right} have no dependency edge either way, so they can run " \
+             "concurrently, but both own #{shared.sort.inspect}; order them with depends_on " \
+             "or split the ownership")
   end
 
   # Repo contract files (status ledgers, changelogs) that no task owns have

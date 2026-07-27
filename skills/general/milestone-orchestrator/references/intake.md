@@ -197,7 +197,10 @@ RUN starts only after these pass or the approved plan records a safe fallback:
 - [ ] `scripts/preflight-lint <milestone-dir>` reports zero errors; warnings
       resolved or explicitly accepted in PLAN (long gates get the
       task-contracts.md execution policy; unowned repo contract files get an
-      owner)
+      owner; an `uncalibrated_gate` warning means SPEC froze thresholds with no
+      measurement record — see the calibration rule above). The lint errors on
+      `concurrent_path_overlap`: two implementation tasks with no dependency
+      edge either way that own intersecting paths
 - [ ] Long gates (registered timeout > ~10 min) identified, and a fast
       targeted verification command registered for every implementation task
 - [ ] Every gating quantity calibrated: each frozen threshold, aggregation

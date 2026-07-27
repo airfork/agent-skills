@@ -144,6 +144,100 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
     assert_match(/run-verification/, stdout)
   end
 
+  def test_uncalibrated_gating_quantity_warns
+    write_spec("# Spec\n\nThe shortfall ratio must be <= 0.75 across seeds.\n")
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code
+    assert_match(/WARN uncalibrated_gate SPEC\.md/, stdout)
+    assert_match(/SPEC\.md:3/, stdout)
+  end
+
+  def test_measurement_file_satisfies_gating_quantity_check
+    write_spec("# Spec\n\nThe shortfall ratio must be <= 0.75 across seeds.\n")
+    File.write(File.join(@milestone_dir, "MEASUREMENT.md"), "# Witness measurement\n\nobserved 0.44-0.85\n")
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code
+    refute_match(/uncalibrated_gate/, stdout)
+  end
+
+  def test_measurement_section_satisfies_gating_quantity_check
+    write_spec("# Spec\n\nRatio must be <= 0.75.\n\n## Baseline measurement\n\nobserved 0.44-0.85\n")
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code
+    refute_match(/uncalibrated_gate/, stdout)
+  end
+
+  def test_prose_without_thresholds_does_not_warn
+    write_spec("# Spec\n\nShip 3 components across 2 subsystems by the v14 promotion.\n")
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code
+    refute_match(/uncalibrated_gate/, stdout)
+  end
+
+  def test_concurrent_tasks_sharing_owned_paths_is_error
+    write_spec
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}},
+               tasks: {
+                 "TASK-001" => {
+                   "type" => "implementation", "depends_on" => [], "owned_paths" => ["src/metrics/"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 },
+                 "TASK-002" => {
+                   "type" => "implementation", "depends_on" => [],
+                   "owned_paths" => ["src/metrics/runner.cs"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 }
+               })
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 1, exit_code
+    assert_match(/ERROR concurrent_path_overlap tasks\.TASK-001\+TASK-002/, stdout)
+    assert_match(/src\/metrics\//, stdout)
+  end
+
+  def test_dependency_ordered_tasks_may_share_owned_paths
+    write_spec
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}},
+               tasks: {
+                 "TASK-001" => {
+                   "type" => "implementation", "depends_on" => [], "owned_paths" => ["src/a.rb"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 },
+                 "TASK-002" => {
+                   "type" => "implementation", "depends_on" => ["TASK-001"], "owned_paths" => ["src/a.rb"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 }
+               })
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code, stdout
+    refute_match(/concurrent_path_overlap/, stdout)
+  end
+
+  def test_transitive_dependency_ordering_is_respected
+    write_spec
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}},
+               tasks: {
+                 "TASK-001" => {
+                   "type" => "implementation", "depends_on" => [], "owned_paths" => ["src/a.rb"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 },
+                 "TASK-002" => {
+                   "type" => "implementation", "depends_on" => ["TASK-001"], "owned_paths" => ["src/b.rb"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 },
+                 "TASK-003" => {
+                   "type" => "implementation", "depends_on" => ["TASK-002"], "owned_paths" => ["src/a.rb"],
+                   "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+                 }
+               })
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code, stdout
+    refute_match(/concurrent_path_overlap/, stdout)
+  end
+
   def test_unowned_contract_file_warns
     File.write(File.join(@repo, "PROJECT_STATUS.md"), "status\n")
     system("git", "-C", @repo, "add", "PROJECT_STATUS.md")
