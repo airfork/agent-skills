@@ -16,7 +16,11 @@ the `worker_dispatches` budget, closeout fenced by the
 document, and writes atomically — a rejected mutation leaves the file
 byte-identical. Run `control-state --help`-style usage from its header
 comment; `check-remote --observed absent|OID` gives the fenced
-remote-ref-expectation check before any push.
+remote-ref-expectation check before any push. Size the lease TTL to the run:
+a 2-hour default under a 6-hour run with multi-hour coordinator-side gates
+expires mid-batch (harmless — rejected mutations leave the file untouched —
+but recurring friction); acquire with a TTL covering the expected run and
+renew before starting any long coordinator-side batch.
 
 Templates may use angle-bracket instructional tokens (`<like-this>`); an
 initialized RUN state may not contain unresolved tokens.

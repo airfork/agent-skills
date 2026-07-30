@@ -117,11 +117,16 @@ overlapping writers or integration surprises, replan to `full`.
   PR-ready and reviewer notification need their own recorded flags. Merge and
   deploy are always disabled; stop and hand off instead.
 - **Mandatory final review.** Before presenting merge options, run a
-  whole-branch code review with the host's correct workflow: Codex workers use
-  this repository's `code-review` skill; Claude workers use Claude's own
-  `/code-review`; never substitute one for the other. Run it at high effort
-  by default; raise the effort only for milestones whose risk earned an
-  adversarial PREPARE review.
+  whole-branch review at high effort: fresh-context reviewers over multiple
+  independent lenses, none of them the implementers. The preferred
+  realization is the host's own workflow — Codex workers use this
+  repository's `code-review` skill; Claude workers use Claude's own
+  `/code-review`; never substitute one for the other. When the host workflow
+  cannot be launched (probe it at preflight), a recorded fresh-context
+  multi-lens whole-branch review at the same effort satisfies the mandate —
+  record the substitution and why; never skip, and never let two runs on the
+  same host interpret this differently. Raise the effort only for milestones
+  whose risk earned an adversarial PREPARE review.
 - **Isolated writers.** One writer per owned path/component. Independent
   slices run in separate worktrees; overlapping or tightly coupled work is
   serialized. Unrelated dirty user state is preserved and never enters

@@ -103,6 +103,24 @@ working and the gate computation exact in every case; only the frozen contract
 was wrong. The plan review (either depth) must check that every gating
 quantity carries provenance.
 
+Three extensions field runs paid for:
+
+- **Power, not just provenance.** A pass/fail threshold over a stochastic
+  metric records its false-fail probability at the planned sample size
+  (exact binomial or equivalent) in the measurement record. A
+  park-triggering gate needs a sample size that makes false-fail acceptably
+  rare — a field run parked an entire milestone on a 100-seed band gate
+  whose false-fail rate was ~11% band-centred and ~46% at the band edge; the
+  successor proved the config was dead-centre and the park was noise.
+- **Inherited thresholds are never grandfathered into decision gates.** A
+  holdover number promoted to park-or-promote authority is re-calibrated
+  under this rule like a new one.
+- **Calibrate on the arm the witness will judge.** A witness affected by the
+  milestone's feature is dry-run on the feature-ON arm, not merely baseline
+  — a field run spent four owner amendments on witnesses calibrated against
+  feature-OFF data applied to a feature that changed exactly what they
+  measured. Record which arm each quantity was calibrated against.
+
 `PLAN.md` also records the **execution profile** (`full` or `lite`, per the
 SKILL.md table) with its rationale, the grounding digest (or a pointer to
 `DIGEST.md`), and the computed worker-dispatch budget. The profile is part of
@@ -210,7 +228,10 @@ RUN starts only after these pass or the approved plan records a safe fallback:
 - [ ] Inherited instruments proven able to fail: every gate script, filter,
       or preflight check cloned from a predecessor milestone is re-targeted
       to this milestone's IDs/paths and demonstrated RED on a deliberate
-      seeded failure before its first acceptance use. Field runs re-discover
+      seeded failure before its first acceptance use — and demonstrated to
+      RUN at all in a fresh worktree, bootstrap/restore included (a field
+      run's chained predecessor gate died 40 minutes in for lack of a
+      dependency restore). Field runs re-discover
       self-certifying cloned instruments (filters that exclude the new
       tests, preflights keyed to stale task IDs) at final review every
       cycle; anti-vacuity at clone time is cheaper

@@ -146,6 +146,18 @@ manual rescue. Therefore:
   broke, certifying a red branch green. When registering per-task fast
   commands in PLAN, include every test project/module that covers the task's
   owned paths; when in doubt, widen the filter.
+- **Contract-changing tasks also register their consumers' gates.** A task
+  that mutates a shared contract (schema, fixture format, exported API) must
+  register the verification commands of that contract's consumers, not only
+  its own suite — a field run's schema change silently reddened the consumer
+  suite its registered gates never ran, costing a mid-run subdivision.
+- **Gate-shaped checks must not mask their exit codes.** Any check the
+  coordinator runs whose pass/fail feeds a gate (secret scan, staged-diff
+  inspection) runs via `run-verification` or in a form whose exit status IS
+  the check's — never piped through `head`/`tail` or padded with
+  `|| echo ok`. A field run's secret scan took `head`'s exit code and
+  "reported nothing whether or not it matched," retroactively weakening
+  every prior scan in the run.
 
 ## Review and remediation loop
 
@@ -184,6 +196,12 @@ those workers instead.)
 - Ordinary conflicts are the integration worker's job. An architectural
   mismatch triggers a replan; a genuine SPEC contradiction escalates to the
   user.
+- **Integrate before branching dependents.** Every adjudicated-green task is
+  integrated before any task that depends on it (or on the same surfaces) is
+  branched, and each dispatch packet records the merge-base ancestry it
+  assumes. A field run branched a dependent off a tree missing an
+  adjudicated predecessor's changes and burned an attempt reporting the gap
+  as a fresh blocker.
 
 ## Supervision
 

@@ -184,6 +184,28 @@ codex intrusion and cwd leak). Remaining cost drivers are now mostly
 product-content (economy rebalances, premise falsifications) and shared-box
 contention — not orchestration.
 
+## Fifth field audit (2026-07-29) — closing pass
+
+Five runs (ai-civ m81, exodus m39/m40, kards m60-PREPARE; m57–m59 ran
+outside the orchestrator). Finding density is an order of magnitude down
+from the first audits, and per-run overhead was judged proportionate in
+every completed run. m60's PREPARE adopts the calibration rule better than
+the rule requires (pre-committed calibration arms, anti-circularity guards
+on a live-probe floor). v1.8 rules from the residual findings: statistical
+power recorded for park-triggering stochastic thresholds and no
+grandfathered inherited thresholds (m39 was ~90%-likely false-parked by an
+uncalibrated 100-seed holdover band); calibrate witnesses on the feature-ON
+arm (m81's four amendments shared that single root cause); the mandatory
+final review is defined by its properties (fresh-context, multi-lens, high
+effort) with the host workflow as preferred realization, so an unlaunchable
+/code-review no longer produces inconsistent interpretations (m39 vs m40);
+contract-changing tasks register their consumers' gates (m40's schema task);
+gate-shaped checks may not mask exit codes (m81's silently-green secret
+scan); integrate-before-branching-dependents with merge-base recorded in
+packets (m81); inherited chained gates proven to run in fresh worktrees;
+lease TTL sized to the run. Residual cost is product content and shared-box
+environment; further audits on demand rather than per-cycle.
+
 ## Pressure-test protocol (for layer 1)
 
 Before any post-skill trial, freeze a versioned protocol containing corpus and
