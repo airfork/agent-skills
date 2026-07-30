@@ -60,6 +60,11 @@ Three ledger disciplines field runs learned expensively:
       "type": "implementation",
       "depends_on": [],
       "owned_paths": ["lib/example.rb"],
+      "owned_paths_predicate": {
+        "argv": ["git", "grep", "-l", "Example.new", "--", "lib"],
+        "cwd": ".",
+        "timeout_seconds": 60
+      },
       "acceptance_ids": ["AC-001"],
       "verification_command_ids": ["verify-example"]
     }
@@ -83,6 +88,17 @@ duplicate IDs or dangling references; task `type` is one of `implementation`,
 that can run concurrently must not share `owned_paths`. Verification workers
 run only registered command IDs from the approved PLAN digest recorded in
 STATE — never worker-supplied command lines.
+
+`owned_paths_predicate` is **optional**. Declare it when a task's ownership is
+stateable as a search — "every file that constructs X", "every runner taking
+flag Y" — rather than an arbitrary list. `scripts/preflight-lint` executes it
+at preflight and errors when it emits a repo-relative path that `owned_paths`
+does not cover (exact match or directory prefix); paths owned beyond the
+predicate are fine, so a task may own files the search does not return. It
+runs under the same trust and shape rules as `verification_commands` — argv
+arrays only, relative non-escaping `cwd`, from the approved frozen PLAN — and
+is killed at `timeout_seconds` (default 60). A predicate that matches nothing
+is an error, not a pass: it cannot be validating anything.
 
 ## STATE canonical block
 

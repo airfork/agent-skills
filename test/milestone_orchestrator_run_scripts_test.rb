@@ -238,6 +238,106 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
     refute_match(/concurrent_path_overlap/, stdout)
   end
 
+  def predicate_task(predicate, owned_paths: ["src/a.rb"])
+    {
+      "TASK-001" => {
+        "type" => "implementation", "depends_on" => [], "owned_paths" => owned_paths,
+        "owned_paths_predicate" => predicate,
+        "acceptance_ids" => ["AC-001"], "verification_command_ids" => ["verify-ok"]
+      }
+    }
+  end
+
+  def lint_with_predicate(predicate, owned_paths: ["src/a.rb"])
+    write_spec
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}},
+               tasks: predicate_task(predicate, owned_paths: owned_paths))
+    run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+  end
+
+  # Mirrors the field failure: the predicate finds files the frozen list missed.
+  def test_predicate_emitting_unowned_path_is_error
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "puts 'src/a.rb'; puts 'src/forgotten.rb'"], "cwd" => "."}
+    )
+    assert_equal 1, exit_code
+    assert_match(/ERROR predicate_uncovered_path tasks\.TASK-001\.owned_paths/, stdout)
+    assert_match(/src\/forgotten\.rb/, stdout)
+    refute_match(/src\/a\.rb"\]/, stdout)
+  end
+
+  def test_predicate_fully_covered_passes
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "puts 'src/a.rb'"], "cwd" => "."}
+    )
+    assert_equal 0, exit_code, stdout
+    refute_match(/predicate/, stdout)
+  end
+
+  def test_directory_ownership_covers_emitted_files
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "puts 'src/metrics/one.cs'; puts 'src/metrics/two.cs'"], "cwd" => "."},
+      owned_paths: ["src/metrics/"]
+    )
+    assert_equal 0, exit_code, stdout
+    refute_match(/predicate/, stdout)
+  end
+
+  def test_owning_more_than_the_predicate_returns_is_fine
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "puts 'src/a.rb'"], "cwd" => "."},
+      owned_paths: ["src/a.rb", "src/brand-new.rb"]
+    )
+    assert_equal 0, exit_code, stdout
+    refute_match(/predicate/, stdout)
+  end
+
+  def test_predicate_matching_nothing_is_error
+    stdout, _stderr, exit_code = lint_with_predicate({"argv" => ["ruby", "-e", "exit 1"], "cwd" => "."})
+    assert_equal 1, exit_code
+    assert_match(/ERROR predicate_failed/, stdout)
+    assert_match(/matches nothing/, stdout)
+  end
+
+  def test_unrunnable_predicate_is_error
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["./definitely-not-here"], "cwd" => "."}
+    )
+    assert_equal 1, exit_code
+    assert_match(/ERROR predicate_failed/, stdout)
+  end
+
+  def test_shell_string_predicate_is_rejected
+    stdout, _stderr, exit_code = lint_with_predicate({"argv" => "grep -rl foo src/", "cwd" => "."})
+    assert_equal 1, exit_code
+    assert_match(/ERROR invalid_predicate/, stdout)
+  end
+
+  def test_predicate_cwd_escape_is_error
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "puts 'src/a.rb'"], "cwd" => "../.."}
+    )
+    assert_equal 1, exit_code
+    assert_match(/ERROR path_escape tasks\.TASK-001\.owned_paths_predicate/, stdout)
+  end
+
+  def test_predicate_timeout_is_error
+    stdout, _stderr, exit_code = lint_with_predicate(
+      {"argv" => ["ruby", "-e", "sleep 30"], "cwd" => ".", "timeout_seconds" => 1}
+    )
+    assert_equal 1, exit_code
+    assert_match(/ERROR predicate_failed/, stdout)
+    assert_match(/exceeded 1s/, stdout)
+  end
+
+  def test_tasks_without_predicates_are_unaffected
+    write_spec
+    write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
+    stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
+    assert_equal 0, exit_code, stdout
+    refute_match(/predicate/, stdout)
+  end
+
   def test_unowned_contract_file_warns
     File.write(File.join(@repo, "PROJECT_STATUS.md"), "status\n")
     system("git", "-C", @repo, "add", "PROJECT_STATUS.md")

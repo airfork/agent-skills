@@ -15,6 +15,7 @@
 # Output: one finding per line (`ERROR code path message` / `WARN ...`).
 # Exit codes: 0 no errors (warnings allowed), 1 errors present, 2 usage.
 require "json"
+require "tempfile"
 
 PLAN_OPEN_MARKER = "<!-- milestone-orchestrator-plan:v1 -->".freeze
 PLAN_CLOSE_MARKER = "<!-- /milestone-orchestrator-plan -->".freeze
@@ -221,6 +222,93 @@ if plan
              "#{left} and #{right} have no dependency edge either way, so they can run " \
              "concurrently, but both own #{shared.sort.inspect}; order them with depends_on " \
              "or split the ownership")
+  end
+
+  # Optional ownership predicates. A task may declare the search that defines
+  # its owned paths; the lint re-runs it and fails on anything the frozen list
+  # does not cover. Field replans added six files matching "constructs
+  # Game.New" and ten runners needing a flag threaded through — both stated as
+  # predicates in prose, both enumerated by hand, both incomplete.
+  covered_by_owned = lambda do |emitted, owned|
+    owned.any? { |o| emitted == o || emitted.start_with?("#{o.chomp("/")}/") }
+  end
+
+  tasks.each do |task_id, task|
+    next unless task.is_a?(Hash)
+    predicate = task["owned_paths_predicate"]
+    next if predicate.nil?
+    where = "tasks.#{task_id}.owned_paths_predicate"
+
+    argv = predicate.is_a?(Hash) ? predicate["argv"] : nil
+    unless argv.is_a?(Array) && !argv.empty? && argv.all? { |a| a.is_a?(String) }
+      add.call("ERROR", "invalid_predicate", where,
+               "must be an object with a non-empty argv array of strings (no shell strings)")
+      next
+    end
+
+    cwd_rel = predicate["cwd"] || "."
+    if cwd_rel.start_with?("/") || cwd_rel.split("/").include?("..")
+      add.call("ERROR", "path_escape", where, "cwd #{cwd_rel.inspect} escapes the repository")
+      next
+    end
+
+    timeout = predicate["timeout_seconds"]
+    timeout = 60 unless timeout.is_a?(Integer) && timeout.positive?
+
+    out_file = Tempfile.new("preflight-predicate")
+    begin
+      pid = Process.spawn(*argv, chdir: File.expand_path(cwd_rel, repo),
+                          out: out_file.fileno, err: File::NULL, pgroup: true)
+      deadline = Time.now + timeout
+      status = nil
+      timed_out = false
+      loop do
+        _, status = Process.waitpid2(pid, Process::WNOHANG)
+        break if status
+        if Time.now > deadline
+          timed_out = true
+          begin
+            Process.kill("-KILL", pid)
+          rescue Errno::ESRCH, Errno::EPERM
+            begin
+              Process.kill("KILL", pid)
+            rescue Errno::ESRCH, Errno::EPERM
+              nil
+            end
+          end
+          _, status = Process.waitpid2(pid)
+          break
+        end
+        sleep 0.05
+      end
+      out_file.flush
+      emitted = File.read(out_file.path).split("\n").map(&:strip).reject(&:empty?)
+    rescue Errno::ENOENT, Errno::EACCES => e
+      add.call("ERROR", "predicate_failed", where, "cannot run #{argv.first.inspect}: #{e.message}")
+      next
+    ensure
+      out_file.close
+      out_file.unlink
+    end
+
+    if timed_out
+      add.call("ERROR", "predicate_failed", where, "predicate exceeded #{timeout}s and was killed")
+      next
+    end
+    if emitted.empty?
+      add.call("ERROR", "predicate_failed", where,
+               "predicate produced no paths (exit #{status&.exitstatus}); a declared predicate " \
+               "that matches nothing cannot be validating the ownership list")
+      next
+    end
+
+    owned = Array(task["owned_paths"])
+    uncovered = emitted.reject { |p| covered_by_owned.call(p, owned) }.sort.uniq
+    next if uncovered.empty?
+    add.call("ERROR", "predicate_uncovered_path", "tasks.#{task_id}.owned_paths",
+             "ownership predicate emits #{uncovered.length} path(s) the frozen owned_paths does " \
+             "not cover: #{uncovered.first(8).inspect}#{uncovered.length > 8 ? " ..." : ""}; add " \
+             "them now or narrow the predicate")
   end
 
   # Repo contract files (status ledgers, changelogs) that no task owns have

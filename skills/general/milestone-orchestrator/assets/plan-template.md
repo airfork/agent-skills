@@ -65,3 +65,9 @@ budgets use the defaults; none may be removed.>
 }
 ```
 <!-- /milestone-orchestrator-plan -->
+
+<Optional per task: `"owned_paths_predicate": {"argv": [...], "cwd": ".",
+"timeout_seconds": 60}` — declare it when a task's ownership is a search
+("every file that constructs X", "every runner taking flag Y") rather than an
+arbitrary list. Preflight-lint runs it and errors on any emitted path
+`owned_paths` does not cover. See references/state-schema.md.>
