@@ -49,7 +49,7 @@ class MilestoneOrchestratorSkillContractTest < Minitest::Test
     assert_includes text, "Manager-only coordinator"
     assert_includes text, "Merge and\n  deploy are always disabled"
     assert_includes text, "Lifecycle is not correctness"
-    assert_includes text, "Codex workers use\n  this repository's `code-review` skill"
+    assert_includes text, "Codex workers use this\n  repository's `code-review` skill"
     assert_includes text, "Claude workers use Claude's own\n  `/code-review`"
     assert_includes text, "no AI attribution"
   end
