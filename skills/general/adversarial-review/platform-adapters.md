@@ -141,6 +141,37 @@ reasoning-effort control, so unless the host proves otherwise those are
 `unavailable` and the run reports `DEGRADED CAPABILITIES` in place of an ordinary
 `PASSED`.
 
+## Filesystem Backends
+
+The control plane probes the host for descriptor-relative filesystem calls and
+directory descriptors, and selects a backend from what it finds rather than from
+a platform name. Both backends run the same workflow and produce the same
+verdicts; they differ only in which filesystem races they can close.
+
+The `posix` backend binds every operation to an open directory descriptor and
+locks the run directory itself, so a concurrent same-UID process cannot swap a
+path component or replace the run directory mid-transaction without detection.
+
+The `portable` backend covers hosts without those calls, native Windows in
+particular. It keeps atomic publish, hard-linked lock anchors, immutable IDs,
+durable resumable state, and cross-process file locking. It cannot bind to a
+directory descriptor, lock a directory, flush directory metadata, or assert
+POSIX mode bits, so it declares `descriptor_relative_paths`,
+`directory_locking`, `durable_directory_metadata`, and `posix_permissions` as
+not enforced. Where the host also cannot supply usable inode numbers,
+`inode_identity` is declared unenforced too.
+
+Every run records its backend and unenforced guarantees in provenance, and a
+portable run's report carries a `DEGRADED FILESYSTEM HARDENING` section. This
+is a control-plane property, not a reviewer capability: it is disclosed
+separately from the capability gate and never changes the verdict. Do not
+describe a portable run as equivalent to a hardened one, and do not claim
+symlink-swap or crash-window protections the portable backend cannot provide.
+
+`ADVERSARIAL_REVIEW_FS_BACKEND=portable` forces the weaker backend so a POSIX
+host can exercise it. Only the weaker direction can be forced, and forcing it is
+recorded in provenance.
+
 ## Security Boundary
 
 The control plane protects against untrusted documents and model output,

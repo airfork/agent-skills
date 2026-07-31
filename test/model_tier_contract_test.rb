@@ -160,7 +160,7 @@ class ModelTierContractTest < Minitest::Test
     refute_includes skill,
                     "Load details from\n[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and\n[platform-adapters.md](platform-adapters.md)."
     assert_includes skill,
-                    "Load `platform-adapters.md` only for executor selection or adapter troubleshooting."
+                    "Load `platform-adapters.md` only for executor selection, adapter troubleshooting, or backend detail."
     assert_includes skill,
                     "Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging."
     assert_includes adapters, "repository_root"
@@ -438,6 +438,29 @@ class ModelTierContractTest < Minitest::Test
     assert_includes skill, "replaces only an ordinary `PASSED`"
     assert_match(/`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict/im, skill)
     assert_includes skill, "Retained verdicts disclose degraded capabilities separately."
+  end
+
+  def test_adversarial_review_documents_both_filesystem_backends
+    skill = read("skills/general/adversarial-review/SKILL.md")
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+
+    assert_includes skill, "## Filesystem Backends"
+    assert_includes adapters, "## Filesystem Backends"
+
+    # The requirement line must no longer claim POSIX is mandatory.
+    assert_includes skill, "Require Ruby 2.6 or newer plus repository spec/plan files."
+    refute_match(/Require Ruby 2\.6 or newer on a POSIX host/, skill)
+    assert_includes skill, "including native Windows, runs the portable backend"
+
+    [skill, adapters].each do |text|
+      assert_includes text, "DEGRADED FILESYSTEM HARDENING"
+      assert_match(/never changes the verdict/, text)
+    end
+
+    assert_match(/probes the host.*rather than from\s*\na platform name/m, adapters)
+    assert_includes adapters, "do not claim\nsymlink-swap or crash-window protections the portable backend cannot provide"
+    assert_includes adapters, "ADVERSARIAL_REVIEW_FS_BACKEND=portable"
+    assert_match(/Only the weaker direction can be forced/, adapters)
   end
 
   def test_adversarial_review_adapter_ineligibility_is_not_universal_cli_fallback

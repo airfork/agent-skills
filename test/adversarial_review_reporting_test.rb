@@ -13,6 +13,68 @@ require "adversarial_review"
 class AdversarialReviewReportingTest < Minitest::Test
   include AdversarialReviewHelper
 
+  def portable_filesystem
+    {
+      "backend" => "portable",
+      "descriptor_relative_paths" => false,
+      "directory_locking" => false,
+      "durable_directory_metadata" => false,
+      "posix_permissions" => false,
+      "inode_identity" => true
+    }
+  end
+
+  def posix_filesystem
+    {
+      "backend" => "posix",
+      "descriptor_relative_paths" => true,
+      "directory_locking" => true,
+      "durable_directory_metadata" => true,
+      "posix_permissions" => true,
+      "inode_identity" => true
+    }
+  end
+
+  def test_provenance_records_the_active_filesystem_backend
+    summary = AdversarialReview::Reporting.summary(summary_source("filesystem" => portable_filesystem))
+    filesystem = summary.fetch("provenance").fetch("filesystem")
+
+    assert_equal "portable", filesystem.fetch("backend")
+    assert_equal(
+      %w[descriptor_relative_paths directory_locking durable_directory_metadata posix_permissions],
+      filesystem.fetch("degraded")
+    )
+    assert_equal false, filesystem.fetch("guarantees").fetch("directory_locking")
+  end
+
+  def test_report_discloses_degraded_filesystem_hardening_without_changing_the_verdict
+    portable = AdversarialReview::Reporting.summary(summary_source("filesystem" => portable_filesystem))
+    hardened = AdversarialReview::Reporting.summary(summary_source("filesystem" => posix_filesystem))
+
+    portable_markdown = AdversarialReview::Reporting.markdown(portable)
+    hardened_markdown = AdversarialReview::Reporting.markdown(hardened)
+
+    assert_includes portable_markdown, "## DEGRADED FILESYSTEM HARDENING"
+    assert_includes portable_markdown, "Backend `portable` did not enforce: descriptor_relative_paths"
+    assert_includes portable_markdown, "| Filesystem backend | portable (not enforced:"
+    refute_includes hardened_markdown, "## DEGRADED FILESYSTEM HARDENING"
+    assert_includes hardened_markdown, "| Filesystem backend | posix (all guarantees enforced) |"
+
+    # The disclosure is a control-plane fact, not a reviewer capability.
+    assert_equal hardened.fetch("verdict"), portable.fetch("verdict")
+    assert_equal hardened.fetch("degraded_capabilities"), portable.fetch("degraded_capabilities")
+  end
+
+  def test_summary_rejects_an_unknown_filesystem_backend
+    error = assert_raises(AdversarialReview::Reporting::Error) do
+      AdversarialReview::Reporting.summary(
+        summary_source("filesystem" => portable_filesystem.merge("backend" => "magic"))
+      )
+    end
+
+    assert_equal "invalid_filesystem", error.code
+  end
+
   def test_builds_a_deterministic_summary_with_complete_provenance
     summary = AdversarialReview::Reporting.summary(summary_source)
 

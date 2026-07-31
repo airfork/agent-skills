@@ -9,7 +9,7 @@ description: >-
 
 # Adversarial Review
 
-Require Ruby 2.6 or newer on a POSIX host with descriptor-relative filesystem calls, plus repository spec/plan files. Load `platform-adapters.md` only for executor selection or adapter troubleshooting.
+Require Ruby 2.6 or newer plus repository spec/plan files. A POSIX host with descriptor-relative filesystem calls gets the hardened backend; every other host, including native Windows, runs the portable backend, which keeps the full workflow but enforces fewer filesystem guarantees and says so in the report. Load `platform-adapters.md` only for executor selection, adapter troubleshooting, or backend detail.
 Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging.
 
 ## Invoke
@@ -58,6 +58,23 @@ mode/output values are rejected regardless of argument order.
 3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
    `PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding.
 4. Use `status --run-dir RUN_DIR --json` to resume. Return generated output.
+
+## Filesystem Backends
+
+The control plane selects its backend by probing the host, never by platform
+name. Report the selected backend; do not describe a portable run as equivalent
+to a hardened one.
+
+| Backend | Selected when | Enforces |
+|---------|---------------|----------|
+| `posix` | descriptor-relative calls and directory descriptors are both available | descriptor-relative paths, directory locking, durable directory metadata, POSIX mode bits, inode identity |
+| `portable` | anything else, including native Windows | atomic publish, hard-linked lock anchors, and cross-process file locking only |
+
+A portable run still produces immutable IDs, durable resumable state, digests,
+and the same verdicts. It cannot close symlink-swap and rename-under-us races,
+so its report carries a `DEGRADED FILESYSTEM HARDENING` section naming the
+guarantees that were not enforced. That disclosure is separate from the
+capability gate and never changes the verdict.
 
 ## Ruby-Unavailable Fallback
 

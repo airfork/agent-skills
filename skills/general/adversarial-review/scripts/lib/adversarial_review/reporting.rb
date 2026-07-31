@@ -156,6 +156,7 @@ module AdversarialReview
           "enabled_tasks" => enabled_tasks,
           "angles" => angles,
           "capabilities" => capabilities,
+          "filesystem" => canonical_filesystem(source["filesystem"]),
           "retries" => angles.sum { |angle| angle.fetch("retries") },
           "usage" => usage,
           "system_sources" => all_findings.flat_map { |finding| finding.fetch("source_angles") }
@@ -317,6 +318,35 @@ module AdversarialReview
        "dirty_digest" => dirty_digest, "status" => status.dup}
     rescue KeyError => error
       invalid!("invalid_repository", "repository provenance is incomplete", {"field" => error.key})
+    end
+
+    FILESYSTEM_GUARANTEES = %w[
+      descriptor_relative_paths directory_locking durable_directory_metadata
+      posix_permissions inode_identity
+    ].freeze
+
+    # Which filesystem guarantees the control plane actually enforced. Defaults
+    # to the running backend so a report can never omit it; an explicit value
+    # lets a resumed run report the backend that produced its state rather than
+    # the one rendering it.
+    def canonical_filesystem(value)
+      declared = value.is_a?(Hash) ? value : Atomic.guarantees
+      backend = declared["backend"]
+      unless %w[posix portable].include?(backend)
+        invalid!("invalid_filesystem", "filesystem backend is unknown", {"backend" => backend})
+      end
+      guarantees = FILESYSTEM_GUARANTEES.each_with_object({}) do |name, collected|
+        held = declared[name]
+        unless [true, false].include?(held)
+          invalid!("invalid_filesystem", "filesystem guarantee must be boolean", {"guarantee" => name})
+        end
+        collected[name] = held
+      end
+      {
+        "backend" => backend,
+        "guarantees" => guarantees,
+        "degraded" => guarantees.reject { |_name, held| held }.keys
+      }
     end
 
     def canonical_cli(cli)
@@ -888,6 +918,17 @@ module AdversarialReview
         lines << degraded.join(", ")
         lines << ""
       end
+      # Reduced filesystem hardening is a property of the control plane, not of
+      # the reviewer, so it is disclosed separately from the capability gate and
+      # never changes the verdict.
+      filesystem = provenance["filesystem"]
+      if filesystem && !filesystem.fetch("degraded").empty?
+        lines << "## DEGRADED FILESYSTEM HARDENING"
+        lines << ""
+        lines << "Backend `#{filesystem.fetch("backend")}` did not enforce: " \
+                 "#{filesystem.fetch("degraded").join(", ")}."
+        lines << ""
+      end
       lines << "## Provenance"
       lines << ""
       lines << "| Field | Value |"
@@ -910,6 +951,16 @@ module AdversarialReview
         lines << table_row(["Target #{target.fetch("role")}", "#{target.fetch("path")} sha256=#{target.fetch("sha256")}"])
       end
       lines << table_row(["Retries", provenance.fetch("retries")])
+      filesystem = provenance["filesystem"]
+      if filesystem
+        degraded_guarantees = filesystem.fetch("degraded")
+        summary = if degraded_guarantees.empty?
+                    "#{filesystem.fetch("backend")} (all guarantees enforced)"
+                  else
+                    "#{filesystem.fetch("backend")} (not enforced: #{degraded_guarantees.join(", ")})"
+                  end
+        lines << table_row(["Filesystem backend", summary])
+      end
       lines << ""
       lines << "### Angles"
       lines << ""
