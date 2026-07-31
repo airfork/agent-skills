@@ -9,10 +9,26 @@ tests=(test/*_test.rb)
 
 case "${1:-}" in
   "")
+    # Run every file even after one fails. Aborting on the first failure hides
+    # the state of every later file, which is worst exactly where the suite is
+    # least understood -- a platform whose first file fails looks like a total
+    # loss when most of the suite may be fine.
+    failed=()
     for test_file in "${tests[@]}"; do
       echo "==> $test_file"
-      ruby -Itest "$test_file"
+      if ! ruby -Itest "$test_file"; then
+        failed+=("$test_file")
+      fi
     done
+
+    if [ ${#failed[@]} -gt 0 ]; then
+      echo
+      echo "Failed test files (${#failed[@]}/${#tests[@]}):" >&2
+      printf '  %s\n' "${failed[@]}" >&2
+      exit 1
+    fi
+    echo
+    echo "All ${#tests[@]} test files passed"
     ;;
   --list)
     printf '%s\n' "${tests[@]}"
