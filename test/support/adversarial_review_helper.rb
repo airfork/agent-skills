@@ -4,6 +4,24 @@ require "rbconfig"
 require "tmpdir"
 
 module AdversarialReviewHelper
+  # The portable filesystem backend deliberately gives up guarantees the POSIX
+  # backend enforces (see Atomic.guarantees). A test that exercises one of those
+  # guarantees is skipped there with the guarantee named, so the suite documents
+  # the difference instead of quietly asserting less.
+  def skip_without_posix_backend(guarantee)
+    return if AdversarialReview::Atomic.posix_backend?
+
+    skip "portable filesystem backend declares #{guarantee} unavailable"
+  end
+
+  # Both backends refuse unsafe paths; the portable backend often refuses them at
+  # an earlier, coarser check because it has no descriptor to pin.
+  def assert_unsafe_code(expected, actual, portable_alternatives: ["unsafe_path"])
+    permitted = AdversarialReview::Atomic.posix_backend? ? [expected] : [expected, *portable_alternatives]
+
+    assert_includes permitted, actual
+  end
+
   def with_repository(files: {}, commit: true)
     Dir.mktmpdir("adversarial-review-test") do |repository|
       git(repository, "init", "--quiet")

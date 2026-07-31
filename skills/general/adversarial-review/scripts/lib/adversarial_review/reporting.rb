@@ -949,17 +949,20 @@ module AdversarialReview
       Atomic.with_bound_directory(File.dirname(lock_path), code: "unsafe_lock") do |parent, directory|
         locked = false
         begin
-          unless directory.flock(File::LOCK_EX)
-            raise State::Error.new(
-              "unsafe_lock", "report lock bootstrap could not lock its parent directory",
-              {"path" => lock_path}, 2
-            )
+          # The portable backend cannot lock a directory; bootstrap then relies
+          # on create_anchored_lock's O_EXCL create, and the run declares
+          # `directory_locking` false rather than implying this lock was held.
+          if directory.supports_directory_lock?
+            unless directory.flock(File::LOCK_EX)
+              raise State::Error.new(
+                "unsafe_lock", "report lock bootstrap could not lock its parent directory",
+                {"path" => lock_path}, 2
+              )
+            end
+            locked = true
           end
-          locked = true
           Atomic.verify_directory_identity!(parent, directory, code: "unsafe_lock")
-          unless Atomic.reject_relative_nonregular(directory, lock_name, "unsafe_lock")
-            Atomic.create_anchored_lock(lock_path)
-          end
+          publish_report_lock!(directory, lock_path, lock_name)
           Atomic.verify_directory_identity!(parent, directory, code: "unsafe_lock")
         ensure
           directory.flock(File::LOCK_UN) if locked && !directory.closed?
@@ -971,6 +974,55 @@ module AdversarialReview
         "unsafe_lock", "report lock path is unsafe",
         {"path" => lock_path, "cause" => error.class.name}, 2
       )
+    end
+
+    # A directory lock makes bootstrap atomic for observers: no other process can
+    # see the lock file between its creation and its anchor being linked. The
+    # portable backend has no such lock, so a concurrent first appender can
+    # observe a half-published pair, and `create_anchored_lock` can lose the
+    # create race outright. Both are transient, so wait for the winner to finish
+    # rather than failing a run over it.
+    BOOTSTRAP_RACE_ATTEMPTS = 100
+    BOOTSTRAP_RACE_INTERVAL = 0.01
+
+    def publish_report_lock!(directory, lock_path, lock_name)
+      if directory.supports_directory_lock?
+        # The directory lock guarantees no half-published pair is observable, so
+        # the lock file alone is proof the pair is complete.
+        return lock_path if Atomic.reject_relative_nonregular(directory, lock_name, "unsafe_lock")
+      elsif await_published_report_lock(directory, lock_name)
+        return lock_path
+      end
+
+      bootstrap_report_lock!(directory, lock_path, lock_name)
+    end
+
+    def bootstrap_report_lock!(directory, lock_path, lock_name)
+      Atomic.create_anchored_lock(lock_path)
+    rescue State::Error => error
+      raise if directory.supports_directory_lock?
+      raise unless error.code == "unsafe_lock"
+      raise unless await_published_report_lock(directory, lock_name, require_lock: true)
+
+      lock_path
+    end
+
+    # True once both lock names are present. With `require_lock` false, a missing
+    # lock file means "nobody has started bootstrap", which is not something to
+    # wait for; only a lock without its anchor is a race worth outwaiting.
+    def await_published_report_lock(directory, lock_name, require_lock: false)
+      BOOTSTRAP_RACE_ATTEMPTS.times do
+        lock_present = Atomic.reject_relative_nonregular(directory, lock_name, "unsafe_lock")
+        return false if !lock_present && !require_lock
+
+        if lock_present &&
+           Atomic.reject_relative_nonregular(directory, "#{lock_name}.anchor", "unsafe_lock")
+          return true
+        end
+
+        sleep BOOTSTRAP_RACE_INTERVAL
+      end
+      false
     end
 
     def read_report(directory, name)

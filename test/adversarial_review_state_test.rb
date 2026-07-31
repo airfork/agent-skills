@@ -1915,7 +1915,7 @@ class AdversarialReviewStateTest < Minitest::Test
         AdversarialReview::State.load(run_dir)
       end
 
-      assert_equal "unsafe_lock", error.code
+      assert_unsafe_code "unsafe_lock", error.code
     end
   end
 
@@ -1945,6 +1945,8 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_atomic_lock_has_no_overlap_after_both_lock_names_are_replaced
+    skip_without_posix_backend("directory_locking")
+
     skip "fork unavailable" unless Process.respond_to?(:fork)
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
@@ -2028,6 +2030,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_a_lock_with_nonprivate_mode
+    skip_without_posix_backend("posix_permissions")
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
       anchor_path = File.join(run_dir, ".state.lock.anchor")
@@ -2108,7 +2111,7 @@ class AdversarialReviewStateTest < Minitest::Test
         end
       end
 
-      assert_equal "unsafe_path", error.code
+      assert_unsafe_code "unsafe_path", error.code, portable_alternatives: ["unsafe_temp"]
       refute File.exist?(File.join(outside, "state.json"))
       assert_equal "attacker-controlled", File.read(File.join(outside, temporary_name))
       assert_empty Dir.children(moved_parent)
@@ -2355,7 +2358,7 @@ class AdversarialReviewStateTest < Minitest::Test
         end
       end
 
-      assert_equal "unsafe_temp", error.code
+      assert_unsafe_code "unsafe_temp", error.code
       assert_equal "unchanged", File.read(outside)
     end
   end

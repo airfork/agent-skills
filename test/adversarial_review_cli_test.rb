@@ -2989,7 +2989,18 @@ class AdversarialReviewCliTest < Minitest::Test
           end
         end
 
-        assert_equal "invalid_task", error.code
+        # Both backends refuse the forged snapshot, but they refuse it in
+        # different places. The POSIX backend holds a directory descriptor, so
+        # the swap is invisible to it and the task itself is rejected. The
+        # portable backend has no descriptor to pin, so the swap lands and the
+        # forged path is rejected instead. Every safety property below holds
+        # either way; only the rejection point moves.
+        expected_codes = if AdversarialReview::Atomic.posix_backend?
+                           ["invalid_task"]
+                         else
+                           %w[invalid_task unsafe_task_path]
+                         end
+        assert_includes expected_codes, error.code
         assert_equal 0, path_reads, "the transaction reopened its authenticated run by path"
         assert_equal authentic_manifest_bytes, File.binread(File.join(run_dir, "manifest.json"))
         assert_equal authentic_state_bytes, File.binread(File.join(run_dir, "state.json"))

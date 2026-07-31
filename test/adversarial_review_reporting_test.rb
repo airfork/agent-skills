@@ -4,12 +4,15 @@ require "digest"
 require "fileutils"
 require "json"
 require "tmpdir"
+require_relative "support/adversarial_review_helper"
 
 SKILL = File.expand_path("../skills/general/adversarial-review", __dir__) unless defined?(SKILL)
 $LOAD_PATH.unshift(File.join(SKILL, "scripts", "lib"))
 require "adversarial_review"
 
 class AdversarialReviewReportingTest < Minitest::Test
+  include AdversarialReviewHelper
+
   def test_builds_a_deterministic_summary_with_complete_provenance
     summary = AdversarialReview::Reporting.summary(summary_source)
 
@@ -655,7 +658,7 @@ class AdversarialReviewReportingTest < Minitest::Test
       error = assert_raises(AdversarialReview::State::Error) do
         AdversarialReview::Reporting.append(target, AdversarialReview::Reporting.summary(summary_source))
       end
-      assert_equal "unsafe_report", error.code
+      assert_unsafe_code "unsafe_report", error.code
       assert_equal "unchanged", File.read(outside)
 
       File.unlink(target)
@@ -666,7 +669,7 @@ class AdversarialReviewReportingTest < Minitest::Test
       error = assert_raises(AdversarialReview::State::Error) do
         AdversarialReview::Reporting.append(target, AdversarialReview::Reporting.summary(summary_source))
       end
-      assert_equal "unsafe_lock", error.code
+      assert_unsafe_code "unsafe_lock", error.code
       refute File.exist?(target)
     end
   end
@@ -767,7 +770,16 @@ class AdversarialReviewReportingTest < Minitest::Test
                 AdversarialReview::Reporting.summary(summary_source("run_id" => run_id))
               )
               exit! 0
-            rescue StandardError
+            rescue StandardError => error
+              # Opt-in diagnostics: a lost race here surfaces only as a failed
+              # child exit, and the backend that races is the one we cannot
+              # attach to locally. AR_RACE_DEBUG=1 surfaces the real error.
+              if ENV["AR_RACE_DEBUG"]
+                warn("#{run_id}: #{error.class}: #{error.message} " \
+                     "[#{error.respond_to?(:code) ? error.code : ""}] " \
+                     "#{error.respond_to?(:details) ? error.details.inspect : ""}")
+                warn(error.backtrace.take(4).join("\n"))
+              end
               exit! 1
             end
           end

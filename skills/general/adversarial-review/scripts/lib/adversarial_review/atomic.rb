@@ -4,6 +4,19 @@ require "fiddle/import"
 require "fcntl"
 
 module AdversarialReview
+  # Durable state primitives with two backends.
+  #
+  # The POSIX backend binds every operation to an open directory descriptor
+  # (openat/linkat/renameat/unlinkat) and locks the directory itself, which
+  # closes the symlink-swap and rename-under-us races that a path-based
+  # implementation cannot.
+  #
+  # The portable backend exists for hosts without those calls, native Windows in
+  # particular. It keeps the state machine, atomic publish, and cross-process
+  # file locking, and gives up the descriptor-relative guarantees. It never
+  # pretends otherwise: `Atomic.guarantees` is recorded in run provenance and
+  # surfaced in the report so a portable run reads as deliberately weaker rather
+  # than equivalent.
   module Atomic
     AT_REMOVEDIR = RUBY_PLATFORM.include?("darwin") ? 0x0080 : 0x0200
     O_DIRECTORY = if Fcntl.const_defined?(:O_DIRECTORY)
@@ -14,6 +27,10 @@ module AdversarialReview
                     0o200000
                   end
     MAX_JSON_BYTES = 16 * 1024 * 1024
+    NOFOLLOW_FLAG = File.const_defined?(:NOFOLLOW) ? File::NOFOLLOW : 0
+    # Windows translates \n on write in text mode, which would corrupt every
+    # persisted digest. Every portable open is explicitly binary.
+    BINARY_FLAG = File.const_defined?(:BINARY) ? File::BINARY : 0
 
     module Native
       extend Fiddle::Importer
@@ -25,12 +42,147 @@ module AdversarialReview
         extern "int renameat(int, const char*, int, const char*)"
         extern "int unlinkat(int, const char*, int)"
         AVAILABLE = true
-      rescue Fiddle::DLError
+      rescue Fiddle::DLError, NotImplementedError
         AVAILABLE = false
       end
     end
 
+    # Probed, not inferred from RUBY_PLATFORM: a host either hands back a usable
+    # directory descriptor or it does not.
+    DIRECTORY_DESCRIPTORS = begin
+      File.open(__dir__, File::RDONLY) { |directory| directory.stat.directory? }
+    rescue StandardError
+      false
+    end
+
+    # Windows can report ino 0 for every file. Comparing that would make inode
+    # identity checks vacuous rather than meaningful, so they are skipped and
+    # declared instead of silently inverted.
+    INODE_IDENTITY = begin
+      File.stat(__FILE__).ino != 0
+    rescue StandardError
+      false
+    end
+
+    # Only the weaker backend may be forced, and only for testing the portable
+    # path on a POSIX host. Forcing the hardened backend onto a host that cannot
+    # support it would fail at the first call anyway.
+    BACKEND = if ENV["ADVERSARIAL_REVIEW_FS_BACKEND"] == "portable"
+                :portable
+              elsif Native::AVAILABLE && DIRECTORY_DESCRIPTORS
+                :posix
+              else
+                :portable
+              end
+
     module_function
+
+    def posix_backend?
+      BACKEND == :posix
+    end
+
+    # Machine-readable statement of what this host's backend actually enforces.
+    # Recorded in provenance; never omitted when degraded.
+    def guarantees
+      {
+        "backend" => BACKEND.to_s,
+        "descriptor_relative_paths" => posix_backend?,
+        "directory_locking" => posix_backend?,
+        "durable_directory_metadata" => posix_backend?,
+        "posix_permissions" => posix_backend?,
+        "inode_identity" => INODE_IDENTITY,
+        "forced" => ENV["ADVERSARIAL_REVIEW_FS_BACKEND"] == "portable"
+      }
+    end
+
+    def degraded?
+      guarantees.any? { |key, value| key != "backend" && key != "forced" && value == false }
+    end
+
+    def degraded_guarantees
+      guarantees.reject { |key, value| key == "backend" || key == "forced" || value != false }.keys
+    end
+
+    # Directory handle shared by both backends. The POSIX form wraps a real open
+    # descriptor; the portable form carries only a validated path.
+    class DirectoryHandle
+      attr_reader :path
+
+      def initialize(path)
+        @path = path
+        @closed = false
+      end
+
+      def stat
+        File.stat(@path)
+      end
+
+      def closed?
+        @closed
+      end
+
+      def close
+        @closed = true
+      end
+    end
+
+    class PosixDirectory < DirectoryHandle
+      def initialize(path, file)
+        super(path)
+        @file = file
+      end
+
+      def fileno
+        @file.fileno
+      end
+
+      def stat
+        @file.stat
+      end
+
+      def fsync
+        @file.fsync
+      end
+
+      def flock(operation)
+        @file.flock(operation)
+      end
+
+      def supports_directory_lock?
+        true
+      end
+
+      def closed?
+        @file.closed?
+      end
+
+      def close
+        @file.close unless @file.closed?
+      end
+    end
+
+    class PortableDirectory < DirectoryHandle
+      def fileno
+        raise NotImplementedError, "portable backend has no directory descriptor"
+      end
+
+      # Directory metadata cannot be flushed without a directory descriptor. A
+      # crash can therefore lose a rename that the POSIX backend would have
+      # durably published; the run declares `durable_directory_metadata` false.
+      def fsync
+        0
+      end
+
+      # Deliberately raises instead of returning a truthy no-op, so an unguarded
+      # caller fails loudly rather than believing it holds a directory lock.
+      def flock(_operation)
+        raise NotImplementedError, "portable backend cannot lock a directory"
+      end
+
+      def supports_directory_lock?
+        false
+      end
+    end
 
     def write_json(path, value)
       destination_name = File.basename(path)
@@ -58,8 +210,7 @@ module AdversarialReview
       created = false
       begin
         reject_relative_nonregular(directory, destination_name)
-        flags = File::WRONLY | File::CREAT | File::EXCL
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags = File::WRONLY | File::CREAT | File::EXCL | NOFOLLOW_FLAG
         file = open_relative(directory, temporary_name, flags, 0o600)
         created = true
         begin
@@ -103,8 +254,7 @@ module AdversarialReview
             "task_collision", "task bundle already exists", {"path" => destination_name}
           )
         end
-        flags = File::WRONLY | File::CREAT | File::EXCL
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags = File::WRONLY | File::CREAT | File::EXCL | NOFOLLOW_FLAG
         file = open_relative(directory, temporary_name, flags, 0o600)
         created = true
         begin
@@ -134,9 +284,7 @@ module AdversarialReview
 
     def read_json_relative(directory, name, code: "invalid_json", unsafe_code: "unsafe_path",
                            unsafe_exit_status: 2)
-      flags = File::RDONLY
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      file = open_relative(directory, name, flags)
+      file = open_relative(directory, name, File::RDONLY | NOFOLLOW_FLAG)
       begin
         reject_nonregular_handle(file, name, unsafe_code)
         if file.stat.size > MAX_JSON_BYTES
@@ -173,9 +321,7 @@ module AdversarialReview
 
     def with_relative_directory(parent_directory, name, expected_identity: nil,
                                 code: "unsafe_path")
-      flags = File::RDONLY | O_DIRECTORY
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      directory = open_relative(parent_directory, name, flags)
+      directory = open_relative_directory(parent_directory, name)
       begin
         stat = directory.stat
         unless stat.directory? && (!expected_identity || same_identity?(expected_identity, stat))
@@ -189,16 +335,27 @@ module AdversarialReview
       raise_state_error(code, "relative directory is unavailable", {"path" => name, "cause" => error.class.name})
     end
 
-    def with_bound_directory(path, code: "unsafe_path", expected_identity: nil)
-      unless Native::AVAILABLE
-        raise_state_error(code, "descriptor-relative filesystem operations are unavailable", {"path" => path})
+    def open_relative_directory(parent_directory, name)
+      validate_relative_name!(name)
+      unless posix_backend?
+        path = File.join(parent_directory.path, name)
+        stat = File.lstat(path)
+        unless stat.directory? && !stat.symlink?
+          raise_state_error("unsafe_path", "relative directory identity is unsafe", {"path" => name})
+        end
+        return PortableDirectory.new(path)
       end
 
+      flags = File::RDONLY | O_DIRECTORY | NOFOLLOW_FLAG
+      file = posix_open_relative(parent_directory, name, flags)
+      PosixDirectory.new(File.join(parent_directory.path, name), file)
+    end
+
+    def with_bound_directory(path, code: "unsafe_path", expected_identity: nil)
       expanded = secure_directory(path)
       expected = File.lstat(expanded)
-      flags = File::RDONLY
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      File.open(expanded, flags) do |directory|
+      directory = open_bound_directory(expanded, code: code)
+      begin
         unless directory.stat.directory? && same_identity?(expected, directory.stat)
           raise_state_error(code, "directory changed while it was opened", {"path" => expanded})
         end
@@ -207,7 +364,18 @@ module AdversarialReview
         end
         verify_directory_identity!(expanded, directory, code: code)
         yield expanded, directory
+      ensure
+        directory.close if directory && !directory.closed?
       end
+    end
+
+    def open_bound_directory(expanded, code: "unsafe_path")
+      return PortableDirectory.new(expanded) unless posix_backend?
+
+      file = File.open(expanded, File::RDONLY | NOFOLLOW_FLAG)
+      PosixDirectory.new(expanded, file)
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+      raise_state_error(code, "directory is unavailable", {"path" => expanded, "cause" => error.class.name})
     end
 
     def verify_directory_identity!(path, directory, code: "unsafe_path")
@@ -219,12 +387,25 @@ module AdversarialReview
       raise_state_error(code, "directory identity changed during atomic operation", {"path" => path})
     end
 
+    # Returns true when inode identity is unavailable: the comparison cannot be
+    # performed on this host, and `guarantees` already reports it as absent.
     def same_identity?(left, right)
+      return true unless INODE_IDENTITY
+
       left.dev == right.dev && left.ino == right.ino
     end
 
     def open_relative(directory, name, flags, mode = 0)
       validate_relative_name!(name)
+      return posix_open_relative(directory, name, flags, mode) if posix_backend?
+
+      portable_flags = (flags & ~NOFOLLOW_FLAG) | BINARY_FLAG
+      path = File.join(directory.path, name)
+      reject_symlink_component!(path)
+      File.open(path, portable_flags, mode)
+    end
+
+    def posix_open_relative(directory, name, flags, mode = 0)
       descriptor = Native.openat(directory.fileno, name, flags, mode)
       raise_native_error("openat", name) if descriptor.negative?
 
@@ -238,10 +419,18 @@ module AdversarialReview
       File.new(descriptor, io_mode)
     end
 
+    # The portable backend cannot open a path and prove atomically that the last
+    # component was not a symlink. Checking first narrows the window; it does not
+    # close it, which is exactly what `descriptor_relative_paths` false declares.
+    def reject_symlink_component!(path)
+      return true unless File.symlink?(path)
+
+      raise_state_error("unsafe_path", "path component must not be a symlink", {"path" => path})
+    end
+
     def reject_relative_nonregular(directory, name, code = "unsafe_path")
-      flags = File::RDONLY
+      flags = File::RDONLY | NOFOLLOW_FLAG
       flags |= Fcntl::O_NONBLOCK if Fcntl.const_defined?(:O_NONBLOCK)
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
       file = open_relative(directory, name, flags)
       unless file.stat.file?
         raise_state_error(code, "path must be a regular file", {"path" => name})
@@ -256,6 +445,12 @@ module AdversarialReview
     def rename_relative(directory, source, destination)
       validate_relative_name!(source)
       validate_relative_name!(destination)
+      unless posix_backend?
+        # File.rename replaces an existing destination on both POSIX and Win32.
+        File.rename(File.join(directory.path, source), File.join(directory.path, destination))
+        return true
+      end
+
       result = Native.renameat(directory.fileno, source, directory.fileno, destination)
       raise_native_error("renameat", "#{source} -> #{destination}") if result.negative?
 
@@ -265,6 +460,11 @@ module AdversarialReview
     def link_relative(directory, source, destination)
       validate_relative_name!(source)
       validate_relative_name!(destination)
+      unless posix_backend?
+        File.link(File.join(directory.path, source), File.join(directory.path, destination))
+        return true
+      end
+
       result = Native.linkat(directory.fileno, source, directory.fileno, destination, 0)
       raise_native_error("linkat", "#{source} -> #{destination}") if result.negative?
 
@@ -273,6 +473,16 @@ module AdversarialReview
 
     def unlink_relative(directory, name, flags = 0)
       validate_relative_name!(name)
+      unless posix_backend?
+        path = File.join(directory.path, name)
+        begin
+          flags == AT_REMOVEDIR ? Dir.rmdir(path) : File.unlink(path)
+        rescue Errno::ENOENT
+          nil
+        end
+        return true
+      end
+
       result = Native.unlinkat(directory.fileno, name, flags)
       raise_native_error("unlinkat", name) if result.negative? && Fiddle.last_error != Errno::ENOENT::Errno
 
@@ -299,17 +509,17 @@ module AdversarialReview
         code: identity_code,
         expected_identity: expected_directory_identity
       ) do |parent, directory|
-        flags = File::RDWR
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags = File::RDWR | NOFOLLOW_FLAG
         file = nil
         anchor = nil
         directory_locked = false
         begin
-          acquired_directory = directory.flock(exclusive ? File::LOCK_EX : File::LOCK_SH)
-          unless acquired_directory
-            raise_state_error("unsafe_lock", "run directory lock could not be acquired", {"path" => parent})
+          if directory.supports_directory_lock?
+            unless directory.flock(exclusive ? File::LOCK_EX : File::LOCK_SH)
+              raise_state_error("unsafe_lock", "run directory lock could not be acquired", {"path" => parent})
+            end
+            directory_locked = true
           end
-          directory_locked = true
           verify_directory_identity!(parent, directory, code: "unsafe_lock")
           file = open_relative(directory, name, flags)
           anchor = open_relative(directory, anchor_name, flags)
@@ -337,8 +547,7 @@ module AdversarialReview
       name = File.basename(path)
       anchor_name = "#{name}.anchor"
       with_bound_directory(File.dirname(path), code: "unsafe_lock") do |parent, directory|
-        flags = File::WRONLY | File::CREAT | File::EXCL
-        flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
+        flags = File::WRONLY | File::CREAT | File::EXCL | NOFOLLOW_FLAG
         created_lock = false
         created_anchor = false
         published = false
@@ -387,7 +596,10 @@ module AdversarialReview
 
     def reject_lock_handle(file, path)
       stat = file.stat
-      return true if stat.file? && (stat.mode & 0o777) == 0o600
+      # Hosts without POSIX permission bits cannot express 0600, so asserting it
+      # there would reject every lock the backend just created. `guarantees`
+      # reports `posix_permissions` false rather than implying the check ran.
+      return true if stat.file? && (!posix_backend? || (stat.mode & 0o777) == 0o600)
 
       raise_state_error("unsafe_lock", "state lock must be a private regular file", {"path" => path})
     end
@@ -420,13 +632,15 @@ module AdversarialReview
     end
 
     def fsync_directory(directory)
+      return 0 unless posix_backend?
+
       File.open(directory, File::RDONLY) { |file| file.fsync }
     end
 
     def secure_directory(path)
       expanded = normalize_root_alias(File.expand_path(path))
-      cursor = File::SEPARATOR
-      expanded.split(File::SEPARATOR).reject(&:empty?).each do |segment|
+      cursor = path_root(expanded)
+      relative_components(expanded).each do |segment|
         cursor = File.join(cursor, segment)
         stat = File.lstat(cursor)
         unless stat.directory? && !stat.symlink?
@@ -438,8 +652,24 @@ module AdversarialReview
       raise_state_error("unsafe_path", "path component is unsafe", {"path" => cursor || path, "cause" => error.class.name})
     end
 
+    # "/a/b" -> "/", "C:/a/b" -> "C:/", "//host/share/a" -> "//host/share/".
+    def path_root(expanded)
+      case expanded
+      when %r{\A([A-Za-z]:)[/\\]} then "#{Regexp.last_match(1)}/"
+      when %r{\A(//[^/]+/[^/]+)/} then "#{Regexp.last_match(1)}/"
+      else File::SEPARATOR
+      end
+    end
+
+    def relative_components(expanded)
+      root = path_root(expanded)
+      expanded[root.length..].to_s.split(File::SEPARATOR).reject(&:empty?)
+    end
+
     def normalize_root_alias(path)
-      segments = path.split(File::SEPARATOR).reject(&:empty?)
+      return path unless path_root(path) == File::SEPARATOR
+
+      segments = relative_components(path)
       return path if segments.empty?
 
       first = File.join(File::SEPARATOR, segments.first)
