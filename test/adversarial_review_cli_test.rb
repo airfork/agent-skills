@@ -198,6 +198,40 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  # A run started on a portable-backend host (Windows) must remain readable and
+  # resumable on a hardened-backend host, and the reverse. The two backends write
+  # the same on-disk format; only the guarantees around writing it differ.
+  def test_run_state_is_portable_between_filesystem_backends
+    skip "host cannot select the hardened backend" unless AdversarialReview::Atomic.posix_backend?
+
+    portable = {"ADVERSARIAL_REVIEW_FS_BACKEND" => "portable"}
+    {"portable-first" => [portable, {}], "hardened-first" => [{}, portable]}
+      .each do |label, (writer_env, reader_env)|
+      with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+        run_dir = File.join(repository, ".git", "backend-run")
+        stdout, stderr, status = run_public_cli(
+          "start", "--repository", repository, "--spec", "docs/spec.md",
+          "--tier", "default", "--mode", "critique", "--output", "chat",
+          "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+          "--run-dir", run_dir, env: writer_env
+        )
+        assert status.success?, "#{label}: #{stderr}"
+        started = JSON.parse(stdout)
+
+        stdout, stderr, status = run_public_cli(
+          "status", "--run-dir", run_dir, "--json", env: reader_env
+        )
+        assert status.success?, "#{label}: #{stderr}"
+        resumed = JSON.parse(stdout)
+
+        assert_equal started.fetch("run_id"), resumed.fetch("run_id"), label
+        assert_equal started.fetch("stage"), resumed.fetch("stage"), label
+        assert_equal started.fetch("pending_tasks").sort,
+                     resumed.fetch("pending_tasks").sort, label
+      end
+    end
+  end
+
   def test_public_cli_generic_start_status_and_duplicate_run_refusal
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "cli-run")

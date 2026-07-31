@@ -168,6 +168,9 @@ separately from the capability gate and never changes the verdict. Do not
 describe a portable run as equivalent to a hardened one, and do not claim
 symlink-swap or crash-window protections the portable backend cannot provide.
 
+Both backends write the same on-disk format, so a run started on one host can be
+resumed on the other: a Windows-started run resumes on Linux and the reverse.
+
 `ADVERSARIAL_REVIEW_FS_BACKEND=portable` forces the weaker backend so a POSIX
 host can exercise it. Only the weaker direction can be forced, and forcing it is
 recorded in provenance.

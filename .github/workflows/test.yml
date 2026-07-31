@@ -1,0 +1,97 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Windows is the reason this job matrix exists: the adversarial-review control
+  # plane has a hardened POSIX backend and a portable one, and only a real
+  # Windows runner exercises the portable backend against Windows filesystem
+  # semantics rather than a forced backend on POSIX.
+  #
+  # The Windows leg has never run; it is the instrument for finding out what
+  # still breaks there, not a claim that nothing does. Tests that create
+  # symlinks are the most likely first failures, since unprivileged symlink
+  # creation on Windows depends on Developer Mode. fail-fast is off so one
+  # platform's failures never mask another's.
+  tests:
+    name: ${{ matrix.os }} ruby ${{ matrix.ruby }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        ruby: ["3.3"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: ${{ matrix.ruby }}
+          bundler-cache: false
+
+      # Minitest 6 extracted Mock into its own gem; Minitest 5 still bundles it.
+      # Best effort so the job works on either.
+      - name: Install minitest-mock
+        shell: bash
+        run: gem install minitest-mock --no-document || echo "using bundled Minitest::Mock"
+
+      - name: Report the selected filesystem backend
+        shell: bash
+        run: |
+          ruby -I skills/general/adversarial-review/scripts/lib \
+            -r adversarial_review \
+            -e 'puts JSON.pretty_generate(AdversarialReview::Atomic.guarantees)'
+
+      - name: Tests
+        shell: bash
+        run: scripts/test
+
+  # Proves the portable backend on a POSIX host, where its behavior can be
+  # compared directly against the hardened backend on identical inputs.
+  portable-backend:
+    name: portable backend (ubuntu)
+    runs-on: ubuntu-latest
+    env:
+      ADVERSARIAL_REVIEW_FS_BACKEND: portable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: false
+
+      # Minitest 6 extracted Mock into its own gem; Minitest 5 still bundles it.
+      # Best effort so the job works on either.
+      - name: Install minitest-mock
+        shell: bash
+        run: gem install minitest-mock --no-document || echo "using bundled Minitest::Mock"
+
+      - name: Tests
+        run: scripts/test
+
+  # The repository contract gate: syntax, manifest, schema, and doc contracts.
+  # POSIX-only because it shells out to bash tooling by design.
+  verify:
+    name: verify (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: "3.3"
+          bundler-cache: false
+
+      # Minitest 6 extracted Mock into its own gem; Minitest 5 still bundles it.
+      # Best effort so the job works on either.
+      - name: Install minitest-mock
+        shell: bash
+        run: gem install minitest-mock --no-document || echo "using bundled Minitest::Mock"
+
+      - name: Verify
+        run: scripts/verify

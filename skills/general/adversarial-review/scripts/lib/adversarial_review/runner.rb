@@ -7,6 +7,16 @@ module AdversarialReview
   module Runner
     DEFAULT_MAX_OUTPUT_BYTES = 1_048_576
     DEFAULT_TERMINATION_GRACE_SECONDS = 0.5
+    # Process groups let a timeout kill the child's whole tree. Without them the
+    # runner can only signal the child it started, so a grandchild can outlive a
+    # timed-out role. Probed rather than assumed so a host without them degrades
+    # instead of raising from spawn.
+    PROCESS_GROUPS = begin
+      Process.getpgid(Process.pid)
+      true
+    rescue StandardError, NotImplementedError
+      false
+    end
     FORBIDDEN_ENVIRONMENT = %w[
       PATH CDPATH ENV BASH_ENV ZDOTDIR SHELLOPTS RUBYOPT RUBYLIB
       GEM_HOME GEM_PATH BUNDLE_GEMFILE
@@ -152,11 +162,11 @@ module AdversarialReview
         # Recheck after interpreter/PATH preparation to minimize the unavoidable
         # portable-Ruby verify-to-spawn window documented by the adapter contract.
         verify_executable!(pinned)
+        spawn_options = {chdir: canonical_chdir, unsetenv_others: true}
+        spawn_options[:pgroup] = true if PROCESS_GROUPS
         stdin, stdout, stderr, wait_thread = Open3.popen3(
           spawn_environment, [pinned.path, pinned.path], *command.drop(1),
-          chdir: canonical_chdir,
-          unsetenv_others: true,
-          pgroup: true
+          **spawn_options
         )
         readers = [stdout, stderr].map do |pipe|
           Thread.new { drain(pipe, max_output_bytes) }.tap do |thread|
@@ -376,6 +386,16 @@ module AdversarialReview
     def path_within?(path, root)
       return false unless File.exist?(root)
 
+      # Without usable inode numbers every comparison below would match on the
+      # first iteration, marking every executable as review-controlled. Compare
+      # canonical paths there instead.
+      unless Atomic::INODE_IDENTITY
+        canonical_root = File.realpath(root)
+        canonical = File.realpath(path)
+        return canonical == canonical_root ||
+               canonical.start_with?("#{canonical_root}#{File::SEPARATOR}")
+      end
+
       root_stat = File.stat(root)
       cursor = File.realpath(path)
       loop do
@@ -425,9 +445,11 @@ module AdversarialReview
     end
     private_class_method :thread_capture
 
+    # Signals the child's process group where the host has them, and the child
+    # alone where it does not. Descendants of the child can survive the latter.
     def terminate_group(pid, signal)
-      Process.kill(signal, -pid)
-    rescue Errno::ESRCH, Errno::EPERM
+      Process.kill(signal, PROCESS_GROUPS ? -pid : pid)
+    rescue Errno::ESRCH, Errno::EPERM, Errno::EINVAL, NotImplementedError
       nil
     end
     private_class_method :terminate_group
