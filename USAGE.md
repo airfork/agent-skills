@@ -20,9 +20,9 @@ folder.
 
 | Skill | Category | Install | Recommended tier | Use for |
 |-------|----------|---------|------------------|---------|
-| `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
+| `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini, Copilot | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
 | `prompt-engineer` | `general` | Candidate: Codex and Claude disabled; Cursor and Gemini disabled | `standard` (heavy `deep`) | Explicit prompt diagnosis and revision after qualification; no ordinary managed install or implicit activation. |
-| `code-review` | `codex-cursor` | Codex, Gemini | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
+| `code-review` | `codex-cursor` | Codex, Gemini, Copilot | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
 | `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
 | `ui-drill` | `claude` | Claude | `standard` | Adaptive tutoring sessions that train UI/UX critique vocabulary and flaw perception with generated mockups. |
 

@@ -19,21 +19,25 @@ model_tiers:
     codex: GPT-5.6 Luna
     claude: Sonnet medium
     gemini: Gemini CLI default low-effort model
+    copilot: Copilot CLI default fast model
     use_for: Small edits, simple transforms, and quick checks.
   standard:
     codex: GPT-5.6 Terra
     claude: Sonnet high
     gemini: Gemini CLI default model
+    copilot: Copilot CLI default model
     use_for: Normal skill execution and repo-aware work.
   deep:
     codex: GPT-5.6 Sol
     claude: Opus 5 high
     gemini: Gemini CLI highest available reasoning model
+    copilot: Copilot CLI highest available reasoning model
     use_for: Broad reviews, ambiguous planning, architecture, and high-risk work.
   ultracode:
     codex: null
     claude: Opus 5 high with UltraCode
     gemini: null
+    copilot: null
     use_for: Claude-only workflows that explicitly benefit from UltraCode.
 
 skills:
@@ -44,6 +48,7 @@ skills:
     interfaces:
       - claude
       - codex
+      - copilot
       - cursor
       - gemini
     recommended_model_tier: deep
@@ -61,8 +66,11 @@ skills:
       gemini:
         enabled: true
         mode: symlink
+      copilot:
+        enabled: true
+        mode: symlink
     description: Script-backed portable control plane for deterministic adversarial review of specs and plans, using first-class generic task bundles, immutable IDs, revise/reject resolution, and resumable provenance-rich reports.
-    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, and Gemini, but review execution never applies global install changes. The qualifying public auto path emits generic bundles because parallel dispatch is unavailable; explicit direct selection stops when ineligible. Direct adapter components are fixture-conformant for embedding orchestrators that supply real dispatch evidence and pass machine-readable capability attestation. Codex named-agent TOMLs remain optional separate setup.
+    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, Copilot, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, Gemini, and Copilot, but review execution never applies global install changes. The qualifying public auto path emits generic bundles because parallel dispatch is unavailable; explicit direct selection stops when ineligible. Direct adapter components are fixture-conformant for embedding orchestrators that supply real dispatch evidence and pass machine-readable capability attestation. Copilot has no direct adapter and runs the generic bundle path. Codex named-agent TOMLs remain optional separate setup. The control plane requires POSIX descriptor-relative filesystem calls for its hardened backend and falls back to a declared-degraded portable backend elsewhere, including native Windows.
 
   - name: prompt-engineer
     path: skills/general/prompt-engineer
@@ -86,6 +94,9 @@ skills:
       gemini:
         enabled: false
         mode: symlink
+      copilot:
+        enabled: false
+        mode: symlink
     description: Evidence-driven prompt diagnosis and revision workflow with explicit profiles, qualification gates, and reversible operator controls.
     notes: Candidate only. Explicit $prompt-engineer invocation is supported for Codex and Claude documentation and qualification work, but ordinary managed installation remains disabled for Codex, Claude, Cursor, and Gemini. Activation requires a separately approved cutover after qualification; implicit invocation stays disabled unless separately approved by the activation commit.
 
@@ -95,6 +106,7 @@ skills:
     status: active
     interfaces:
       - codex
+      - copilot
       - cursor
       - gemini
     recommended_model_tier: deep
@@ -109,8 +121,11 @@ skills:
       gemini:
         enabled: true
         mode: symlink
-    description: Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation, opt-in fix/commit/push/PR flags, and Cursor adapter notes.
-    notes: Finalized under the codex-cursor category and installed into Codex and Gemini through managed symlinks. The portable workflow can run on Gemini/Antigravity through activate_skill plus sequential or available-subagent fallback; do not create a Gemini-specific copy. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep). Flags support --fix, --commit, --push, --pr, and --comment with verification-gated git/GitHub actions.
+      copilot:
+        enabled: true
+        mode: symlink
+    description: Codex-first multi-angle review workflow mirroring the built-in Claude Code /code-review (method-based finder angles, verdict-ladder verification, gap sweep at deep), plus verified-finding remediation, opt-in fix/commit/push/PR flags, and Cursor and Copilot adapter notes.
+    notes: Finalized under the codex-cursor category and installed into Codex, Gemini, and Copilot through managed symlinks. The portable workflow can run on Gemini/Antigravity through activate_skill plus sequential or available-subagent fallback; do not create a Gemini-specific copy. Copilot CLI runs it through its own skill loader and maps finder/verifier dispatch onto custom agents, which cannot pin per-role model or reasoning effort and must disclose that. Tier structure ports the built-in Claude Code effort cells (quick=low inline pass, standard/high=8 angles + 1-vote verify, deep=10 angles + sweep). Flags support --fix, --commit, --push, --pr, and --comment with verification-gated git/GitHub actions. Workflow steps stay shell-neutral so the skill runs on Windows hosts without POSIX shell.
 
   - name: milestone-orchestrator
     path: skills/general/milestone-orchestrator
@@ -132,6 +147,9 @@ skills:
         enabled: false
         mode: symlink
       gemini:
+        enabled: false
+        mode: symlink
+      copilot:
         enabled: false
         mode: symlink
     description: Two-phase milestone workflow with an interactive PREPARE phase (repository grounding, consolidated decision packets, adversarially reviewed SPEC/PLAN, one final approval) and an unattended multi-agent RUN phase covering implementation, review remediation, serial integration, verification, automatic commit/push/draft-PR, mandatory final code review, and lifecycle resource cleanup, always stopping before merge or deploy.
@@ -156,6 +174,9 @@ skills:
         enabled: false
         mode: symlink
       gemini:
+        enabled: false
+        mode: symlink
+      copilot:
         enabled: false
         mode: symlink
     description: Personal UI/UX critique tutoring course that generates deliberately flawed mockups, grades perception and articulation separately, and adapts a nine-module curriculum via a persistent student model.

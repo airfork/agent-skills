@@ -8,7 +8,8 @@ DEFAULT_DESTINATIONS = {
   "codex" => "~/.codex/skills",
   "cursor" => "~/.cursor/skills",
   "claude" => "~/.claude/skills",
-  "gemini" => "~/.gemini/config/skills"
+  "gemini" => "~/.gemini/config/skills",
+  "copilot" => "~/.copilot/skills"
 }.freeze
 
 def inside_directory?(path, root)
@@ -40,6 +41,17 @@ def managed_repo_symlink?(path, repo_root)
   File.symlink?(path) && inside_directory?(File.expand_path(File.readlink(path), File.dirname(path)), repo_root)
 end
 
+# Windows only permits unprivileged symlink creation when Developer Mode is on,
+# so report that as an actionable install failure rather than a bare Errno.
+def create_symlink!(source_path, dest_path)
+  File.symlink(source_path, dest_path)
+rescue NotImplementedError, Errno::EACCES, Errno::EPERM => error
+  warn "Cannot create symlink #{dest_path} -> #{source_path}: #{error.class}"
+  warn "On Windows, enable Developer Mode or run an elevated shell, or copy the" \
+       " skill folder into the install directory manually."
+  exit 1
+end
+
 options = {
   apply: false,
   force: false,
@@ -51,7 +63,7 @@ options = {
 parser = OptionParser.new do |opts|
   opts.banner = "Usage: scripts/sync-skills [options]"
 
-  opts.on("--target TARGET", "Install target: codex, cursor, claude, or gemini. Default: codex.") do |target|
+  opts.on("--target TARGET", "Install target: codex, cursor, claude, gemini, or copilot. Default: codex.") do |target|
     options[:target] = target
   end
 
@@ -192,7 +204,7 @@ operations.each do |operation, name, dest_path, source_path|
   when :link
     if options[:apply]
       FileUtils.mkdir_p(File.dirname(dest_path))
-      File.symlink(source_path, dest_path)
+      create_symlink!(source_path, dest_path)
       puts "Linked #{name}: #{dest_path} -> #{source_path}"
     else
       puts "Would link #{name}: #{dest_path} -> #{source_path}"
@@ -201,7 +213,7 @@ operations.each do |operation, name, dest_path, source_path|
     if options[:apply]
       FileUtils.rm_rf(dest_path)
       FileUtils.mkdir_p(File.dirname(dest_path))
-      File.symlink(source_path, dest_path)
+      create_symlink!(source_path, dest_path)
       puts "Replaced #{name}: #{dest_path} -> #{source_path}"
     else
       puts "Would replace #{name}: #{dest_path} -> #{source_path}"

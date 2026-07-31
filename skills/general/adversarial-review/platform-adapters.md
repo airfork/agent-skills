@@ -116,6 +116,31 @@ emit Generic bundles; only the qualifying public auto boundary converts it. A
 future version can become direct-eligible only after machine attestation and
 caller dispatch evidence pass.
 
+## Copilot Adapter
+
+Copilot has no direct adapter and needs none. `ADVERSARIAL_REVIEW_HOST=copilot`
+is not a direct executor, so `--executor auto` resolves to `generic` and the run
+emits portable task bundles that Copilot dispatches with its own custom agents.
+That is the correct outcome, not a downgrade: Copilot exposes no machine-readable
+attestation of fresh context, model, or reasoning effort, so it could never pass
+the shared gate.
+
+Copilot CLI loads the skill from `~/.copilot/skills/` or `.github/skills/`.
+Confirm with `/skills info adversarial-review`, and reload with `/skills reload`
+after editing the source. Because the control plane runs as a script, Copilot
+prompts before each shell call. The shipped frontmatter deliberately does not
+set `allowed-tools`: pre-approving the shell tool would silence that prompt on
+Copilot while risking a narrowed tool allowlist on hosts that read the same key
+differently. Operators who want the prompt suppressed should add it to their own
+installed copy after reviewing `scripts/`.
+
+Run each emitted bundle in a fresh Copilot custom agent, return the closed
+schema result, declare capabilities with evidence, then `ingest`. Declare
+`model_selection` and `effort_selection` honestly: Copilot documents no per-agent
+reasoning-effort control, so unless the host proves otherwise those are
+`unavailable` and the run reports `DEGRADED CAPABILITIES` in place of an ordinary
+`PASSED`.
+
 ## Security Boundary
 
 The control plane protects against untrusted documents and model output,
@@ -139,15 +164,19 @@ the allowlist limits forwarding but is not credential isolation.
 
 ## Install
 
-The same skill folder installs to Codex, Claude, Cursor, and Gemini. Installation
-is separate from review execution and never occurs as a side effect:
+The same skill folder installs to Codex, Claude, Cursor, Gemini, and Copilot.
+Installation is separate from review execution and never occurs as a side effect:
 
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target claude --dry-run
 scripts/sync-skills --target cursor --dry-run
 scripts/sync-skills --target gemini --dry-run
+scripts/sync-skills --target copilot --dry-run
 ```
+
+On Windows, `--apply` needs Developer Mode or an elevated shell to create the
+symlink; otherwise copy the skill folder into the install directory instead.
 
 Use `--apply` only when the user explicitly requests global symlink changes.
 Codex named-agent TOMLs are optional setup and are never copied by the control

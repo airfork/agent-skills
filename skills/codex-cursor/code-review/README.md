@@ -13,8 +13,10 @@ The workflow mirrors the built-in Claude Code `/code-review` skill: finders are 
 |------|---------|
 | [SKILL.md](SKILL.md) | Main review and address mode workflow |
 | [verifier-rubric.md](verifier-rubric.md) | Verdict ladder (CONFIRMED / PLAUSIBLE / REFUTED) and recall rules for verifier subagents |
-| [platform-adapters.md](platform-adapters.md) | Codex, Cursor, Claude Code, and sequential fallback notes |
+| [platform-adapters.md](platform-adapters.md) | Codex, Copilot, Cursor, Claude Code, and sequential fallback notes |
 | [agents/openai.yaml](agents/openai.yaml) | Minimal OpenAI/Codex-facing manifest |
+| [agents/codex/](agents/codex/) | Optional Codex named-agent definitions for the finder and verifier roles |
+| [agents/copilot/](agents/copilot/) | Optional Copilot custom-agent definitions for the same four roles |
 
 ## Install
 
@@ -23,9 +25,13 @@ Install from the repository root with the managed symlink installer:
 ```bash
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
+scripts/sync-skills --target copilot --dry-run
+scripts/sync-skills --target copilot --apply
 ```
 
-See `platform-adapters.md` for Cursor and Claude Code notes.
+See `platform-adapters.md` for Copilot, Cursor, and Claude Code notes. The
+workflow uses no POSIX-only shell, so it runs on Windows hosts as well; only
+`scripts/sync-skills --apply` needs Developer Mode there to create the symlink.
 
 ## Codex Prompt Examples
 
@@ -90,7 +96,9 @@ The action chain is always `review -> fix -> verify -> commit -> push -> PR/comm
 
 Finder and verifier subagents inherit the parent/default model but must run at elevated reasoning effort: `high` for `standard`/`high` tiers, `xhigh` (or the host maximum) for `deep`. In Codex, use the named agents from `agents/codex/` when the user has already installed that optional setup; otherwise use the generic read-only fallback. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; verifiers must use the same inherited model as finders. On other hosts, verifiers must not use a downgraded or fast model. Verifier quality directly controls what survives.
 
-Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
+Copilot exposes no per-agent reasoning-effort control, so its roles run at the host's maximum available reasoning and the report must disclose that the tier's effort was not enforceable.
+
+Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` or `.agent.md` files into `~/.copilot/agents/` unless the user explicitly asks.
 
 ## Design checks
 

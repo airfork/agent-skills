@@ -11,6 +11,7 @@ Personal install paths:
 | Codex | `~/.codex/skills/code-review/` |
 | Cursor | `~/.cursor/skills/code-review/` |
 | Gemini/Antigravity | `~/.gemini/config/skills/code-review/` |
+| Copilot | `~/.copilot/skills/code-review/` (personal) or `.github/skills/code-review/` (per repository) |
 | Claude Code | Prefer the built-in `/code-review` skill; otherwise expose this workflow through `.claude/commands/code-review.md` and, optionally, `.claude/commands/address-review.md` |
 
 Preferred source-repo install:
@@ -20,7 +21,13 @@ scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target codex --apply
 scripts/sync-skills --target gemini --dry-run
 scripts/sync-skills --target gemini --apply
+scripts/sync-skills --target copilot --dry-run
+scripts/sync-skills --target copilot --apply
 ```
+
+On Windows, `scripts/sync-skills --apply` needs Developer Mode or an elevated
+shell to create the symlink; otherwise copy the skill folder into the install
+directory instead. The workflow itself does not require a POSIX shell.
 
 For Cursor, enable `install.cursor.enabled` in `skills.yaml`, then run `scripts/sync-skills --target cursor --apply`.
 
@@ -46,7 +53,7 @@ Typical mapping:
 
 Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once.
 
-Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
+Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` or `.agent.md` files into `~/.copilot/agents/` unless the user explicitly asks.
 
 When the user explicitly requests that optional setup, copy the definitions from `agents/codex/` (`scripts/sync-skills` does not copy them):
 
@@ -108,6 +115,40 @@ Execute now. Output ONLY the structured format requested above.
 ```
 
 Close or release subagents after collecting their final output when the host supports it.
+
+## Copilot Adapter
+
+Copilot CLI loads this folder from `~/.copilot/skills/` or `.github/skills/` and
+discovers it by the `SKILL.md` frontmatter description. Use `/skills list` and
+`/skills info code-review` to confirm it loaded, and `/skills reload` after
+editing the source.
+
+Copilot delegates through custom agents, so the finder and verifier fan-out maps
+onto real subagents rather than the sequential fallback. Install the optional
+role definitions from `agents/copilot/` only when the user explicitly asks:
+
+```bash
+cp <skill source>/agents/copilot/*.agent.md ~/.copilot/agents/
+```
+
+Repository-scoped installs use `.github/agents/` instead. `scripts/sync-skills`
+never copies these; a home-directory agent wins over a repository agent with the
+same name.
+
+Two capability limits apply and must be disclosed rather than papered over:
+
+| Limit | Required behavior |
+|-------|-------------------|
+| No documented per-agent reasoning-effort control | Run finders and verifiers at the host's maximum available reasoning and state in the report that the requested tier's effort was not enforceable. |
+| No provable read-only sandbox | Enforce the behavioral read-only rules from the role definitions and state that sandbox enforcement was unavailable. |
+
+Where the host honors a `model:` field in the agent frontmatter, pin finders and
+verifiers to the same model; never give the verifier a weaker or faster model
+than the finders. If Copilot cannot prove model inheritance for a role, run that
+role sequentially in the parent and disclose the limitation, exactly as on Codex.
+
+Invoking `$code-review` in review mode authorizes these read-only subagents. Do
+not ask for extra permission before spawning them.
 
 ## Cursor Adapter
 

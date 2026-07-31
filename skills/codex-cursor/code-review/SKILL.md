@@ -149,14 +149,14 @@ Review depth tracks reasoning effort at least as much as prompt structure. The t
 | Role | Policy |
 |------|--------|
 | Prep | For `quick`, prep stays inline with the parent; do not spawn a prep subagent. At other tiers, run inline unless a cheap read-only prep subagent is clearly useful. |
-| Finder | Inherit the parent/default model at **high** reasoning effort for `standard`/`high`, and **xhigh** (or the host's maximum) for `deep`. In Codex, spawn the named `review-finder` agent (`review-finder-deep` at `deep`); the agent definitions in [agents/codex/](agents/codex/) pin the effort and a read-only sandbox. |
+| Finder | Inherit the parent/default model at **high** reasoning effort for `standard`/`high`, and **xhigh** (or the host's maximum) for `deep`. In Codex, spawn the named `review-finder` agent (`review-finder-deep` at `deep`); the agent definitions in [agents/codex/](agents/codex/) pin the effort and a read-only sandbox. In Copilot, spawn the matching custom agent from [agents/copilot/](agents/copilot/), which cannot pin effort or a sandbox and therefore requires the disclosures below. |
 | Verifier | Use the same model and effort policy as finders at every tier. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier; never downgrade verifier model quality or effort relative to the finders. On other hosts, retain the existing prohibition on a downgraded or fast verifier model. A single REFUTED vote kills a finding, so verifier quality directly controls what survives. In Codex, spawn `review-verifier` (`review-verifier-deep` at `deep`). |
 
 If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation. If the host cannot prove a read-only sandbox, enforce the wrapper's behavioral read-only rules and disclose that sandbox enforcement was unavailable.
 
 When using generic fallback subtasks, explicitly preserve the parent session's selected model; if the host cannot prove model inheritance, run the role sequentially in the parent and disclose the limitation.
 
-Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks.
+Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` or `.agent.md` files into `~/.copilot/agents/` unless the user explicitly asks.
 
 If the host cannot set or prove per-subagent reasoning effort, use the host's maximum available effort and disclose that the requested tier was not fully enforceable.
 

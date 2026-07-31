@@ -12,14 +12,14 @@ class ModelTierContractTest < Minitest::Test
   }.freeze
   EXPECTED_HUMAN_ROWS = {
     "README.md" => {
-      "fast" => "| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |",
-      "standard" => "| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |",
-      "deep" => "| `deep` | GPT-5.6 Sol | Opus 5 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |",
+      "fast" => "| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Copilot default fast model | Small edits, simple transforms, quick checks. |",
+      "standard" => "| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Copilot default model | Normal skill execution and repo-aware work. |",
+      "deep" => "| `deep` | GPT-5.6 Sol | Opus 5 high | Gemini highest available reasoning model | Copilot highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |",
     },
     "CATALOG.md" => {
-      "fast" => "| `fast` | GPT-5.6 Luna, Claude Sonnet medium, or Gemini low-effort/default. |",
-      "standard" => "| `standard` | GPT-5.6 Terra, Claude Sonnet high, or Gemini default. |",
-      "deep" => "| `deep` | GPT-5.6 Sol, Claude Opus 5 high, or Gemini's highest available reasoning model. |",
+      "fast" => "| `fast` | GPT-5.6 Luna, Claude Sonnet medium, Gemini low-effort/default, or Copilot's default fast model. |",
+      "standard" => "| `standard` | GPT-5.6 Terra, Claude Sonnet high, Gemini default, or Copilot's default model. |",
+      "deep" => "| `deep` | GPT-5.6 Sol, Claude Opus 5 high, Gemini's highest available reasoning model, or Copilot's highest available reasoning model. |",
     },
   }.freeze
   ACTIVE_METADATA = %w[README.md CATALOG.md skills.yaml].freeze
@@ -192,7 +192,7 @@ class ModelTierContractTest < Minitest::Test
     code_readme = read("skills/codex-cursor/code-review/README.md")
     code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
 
-    install_policy = "Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` unless the user explicitly asks."
+    install_policy = "Named-agent installation is optional setup, never part of review execution; do not copy TOMLs into `~/.codex/agents/` or `.agent.md` files into `~/.copilot/agents/` unless the user explicitly asks."
     assert_includes code_skill, install_policy
     assert_includes code_readme, install_policy
     assert_includes code_adapter, install_policy
@@ -350,7 +350,7 @@ class ModelTierContractTest < Minitest::Test
     assert_includes rubric, "Any split involving `UNPROVEN` goes to arbitration"
     assert_includes rubric, "In round 2 only"
 
-    %w[Generic Codex Claude Cursor Gemini].each do |adapter|
+    %w[Generic Codex Claude Cursor Gemini Copilot].each do |adapter|
       assert_includes adapters, "## #{adapter} Adapter"
     end
     assert_includes adapters, "never silently downgrades model, effort, tier, or vendor"
@@ -366,8 +366,9 @@ class ModelTierContractTest < Minitest::Test
     refute_includes commands, "rtk skills/general/adversarial-review/scripts/adversarial-review"
     assert_match(/script-backed portable control plane/i, catalog)
 
-    assert_equal %w[claude codex cursor gemini], metadata.fetch("interfaces").sort
+    assert_equal %w[claude codex copilot cursor gemini], metadata.fetch("interfaces").sort
     assert metadata.dig("install", "cursor", "enabled")
+    assert metadata.dig("install", "copilot", "enabled")
     assert_equal "deep", metadata.fetch("recommended_model_tier")
     assert_equal "ultracode", metadata.fetch("heavy_model_tier")
   end
@@ -447,6 +448,8 @@ class ModelTierContractTest < Minitest::Test
     assert_match(/Only the public CLI with `--executor auto`.*pre-content.*zero prior external attempts.*converts.*emitted Generic bundles/im, adapters)
     assert_match(/Explicit direct.*exit `4` or `5`.*never converts.*Generic bundles/im, adapters)
 
+    # Copilot is deliberately absent: it has no direct adapter to declare
+    # ineligible, so it documents the generic bundle path instead.
     %w[Codex Claude Cursor Gemini].each do |vendor|
       section = adapters[/## #{vendor} Adapter\n(?<body>.*?)(?=\n## |\z)/m, :body]
       refute_nil section, vendor

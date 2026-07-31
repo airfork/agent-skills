@@ -14,8 +14,9 @@ commands.
 | `scripts/clean` | Remove only the named local generated paths. | Removes only untracked generated paths listed by the script. |
 | `scripts/archive-clean --dry-run` | Preview removal of build, distribution, release, and artifact output. | Read-only preview. |
 | `scripts/archive-clean` | Remove only named release/archive output paths. | Removes only untracked generated paths listed by the script. |
-| `scripts/sync-skills --target codex --dry-run` | Preview managed skill symlink changes. | Read-only. |
+| `scripts/sync-skills --target codex --dry-run` | Preview managed skill symlink changes. Targets are `codex`, `claude`, `cursor`, `gemini`, and `copilot`. | Read-only. |
 | `scripts/sync-skills --target codex --apply` | Apply managed Codex skill symlink changes when explicitly requested. | Changes the selected global skill directory. |
+| `scripts/sync-skills --target copilot --apply` | Apply managed Copilot skill symlink changes into `~/.copilot/skills` when explicitly requested. | Changes the selected global skill directory; needs Developer Mode on Windows. |
 | `scripts/prompt-engineer-eval` | Prepare, inspect, score, and report prompt-engineer qualification artifacts. Host execution and native ingestion remain fail-closed. | Depends on the subcommand; run roots and output paths are explicit. |
 | `scripts/prompt-engineer-sandbox` | Validate sandbox packets and report the current host capability boundary. | Read-only; live launch is unsupported. |
 | `scripts/run-codex-5.6-skill-review <luna\|terra\|sol>` | Run the existing model-bound compatibility review. | May update its report only after a successful review. |

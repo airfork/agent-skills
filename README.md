@@ -23,12 +23,12 @@ Root-level skill folders are allowed temporarily for drafts. Move finalized skil
 
 Use these labels in `CATALOG.md` and `skills.yaml`:
 
-| Tier | Codex/OpenAI default | Claude default | Gemini default | Use for |
-|------|---------------------|----------------|----------------|---------|
-| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Small edits, simple transforms, quick checks. |
-| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Normal skill execution and repo-aware work. |
-| `deep` | GPT-5.6 Sol | Opus 5 high | Gemini highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |
-| `ultracode` | N/A | Opus 5 high with UltraCode | N/A | Claude-only workflows that benefit from UltraCode explicitly. |
+| Tier | Codex/OpenAI default | Claude default | Gemini default | Copilot default | Use for |
+|------|---------------------|----------------|----------------|-----------------|---------|
+| `fast` | GPT-5.6 Luna | Sonnet medium | Gemini low-effort/default | Copilot default fast model | Small edits, simple transforms, quick checks. |
+| `standard` | GPT-5.6 Terra | Sonnet high | Gemini default | Copilot default model | Normal skill execution and repo-aware work. |
+| `deep` | GPT-5.6 Sol | Opus 5 high | Gemini highest available reasoning model | Copilot highest available reasoning model | Broad reviews, ambiguous planning, architecture, high-risk work. |
+| `ultracode` | N/A | Opus 5 high with UltraCode | N/A | N/A | Claude-only workflows that benefit from UltraCode explicitly. |
 
 Model names are local operating labels. Update them when the available model menu changes.
 
@@ -46,6 +46,7 @@ Preview installs:
 scripts/sync-skills --target codex --dry-run
 scripts/sync-skills --target claude --dry-run
 scripts/sync-skills --target gemini --dry-run
+scripts/sync-skills --target copilot --dry-run
 ```
 
 Apply installs:
@@ -54,6 +55,11 @@ Apply installs:
 scripts/sync-skills --target codex --apply
 scripts/sync-skills --target claude --apply
 scripts/sync-skills --target gemini --apply
+scripts/sync-skills --target copilot --apply
 ```
 
+Supported targets are `codex`, `claude`, `cursor`, `gemini`, and `copilot`, installing to `~/.codex/skills`, `~/.claude/skills`, `~/.cursor/skills`, `~/.gemini/config/skills`, and `~/.copilot/skills` respectively.
+
 The script refuses to overwrite unmanaged files or directories unless `--force` is passed. Use `--prune` to remove repo-managed symlinks that are no longer selected for a target.
+
+On Windows, `--apply` needs Developer Mode or an elevated shell to create symlinks; the script reports that explicitly instead of failing with a bare error.

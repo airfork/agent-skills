@@ -126,6 +126,29 @@ class SyncSkillsTest < Minitest::Test
     assert_equal File.join(@repo, "skills/general/gemini-skill"), File.readlink(link_path)
   end
 
+  def test_copilot_target_uses_same_install_metadata
+    create_skill("skills/general/copilot-skill", name: "copilot-skill")
+    write_manifest(<<~YAML)
+      schema_version: 1
+      skills:
+        - name: copilot-skill
+          path: skills/general/copilot-skill
+          status: active
+          install:
+            copilot:
+              enabled: true
+              mode: symlink
+    YAML
+
+    stdout, stderr, status = run_sync("--target", "copilot", "--apply")
+
+    assert status.success?, stderr
+    assert_includes stdout, "Linked copilot-skill"
+    link_path = File.join(@dest, "copilot-skill")
+    assert File.symlink?(link_path), "expected #{link_path} to be a symlink"
+    assert_equal File.join(@repo, "skills/general/copilot-skill"), File.readlink(link_path)
+  end
+
   def test_skips_skills_without_explicit_target_install
     create_skill("skills/general/draft-skill", name: "draft-skill")
     write_manifest(<<~YAML)
