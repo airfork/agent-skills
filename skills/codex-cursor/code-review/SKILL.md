@@ -199,16 +199,16 @@ Maintain a visible task list when the host environment supports one (`update_pla
 
 Run prep inline unless a cheap read-only prep subagent is clearly useful.
 
-1. Confirm the repository root:
-
-   ```bash
-   REPO_ROOT=$(git rev-parse --show-toplevel)
-   cd "$REPO_ROOT"
-   git status --short
-   ```
-
+1. Confirm the repository root with `git rev-parse --show-toplevel` and work from that directory using the host's own working-directory mechanism. Record the pre-existing dirty state with `git status --short` before running anything that could touch files.
 2. Resolve the target and determine whether branch, staged, unstaged, untracked, or PR inputs are in scope.
-3. Resolve the base only when branch commits are in scope:
+3. Resolve the base only when branch commits are in scope. This is a decision rule, not a script — apply it with whatever the host provides:
+
+   1. Run `git symbolic-ref --short refs/remotes/origin/HEAD`. On success, strip a leading `origin/` from the result and use it as the base branch.
+   2. If that command fails or returns nothing, use `main`.
+   3. Set `BASE_SHA` from `git merge-base HEAD origin/<base-branch>`; if that fails, retry `git merge-base HEAD <base-branch>`. If both fail, `BASE_SHA` is empty.
+   4. Set `HEAD_SHA` from `git rev-parse HEAD`.
+
+   On a POSIX shell that rule is exactly the following. It is a convenience implementation, not the normative form — hosts without a POSIX shell follow the numbered rule directly:
 
    ```bash
    # BEGIN BASE_BRANCH_RESOLUTION
@@ -231,69 +231,40 @@ For generated-only, formatting-only, or lockfile-only diffs, do not skip automat
 
 ### Step 2: Build a Review Packet
 
-Create a temporary review packet so every finder reviews the same inputs.
+Create a temporary review packet directory (`REVIEW_DIR`) so every finder reviews the same frozen inputs. Use the host's own temporary-directory and file-writing tools; do not assume a POSIX shell, `mktemp`, output redirection, or `/tmp`. Any writable scratch directory outside the repository works.
 
-```bash
-REVIEW_DIR=$(mktemp -d "${TMPDIR:-/tmp}/code-review.XXXXXX")
-: > "$REVIEW_DIR/committed.diff"
-: > "$REVIEW_DIR/staged.diff"
-: > "$REVIEW_DIR/unstaged.diff"
-: > "$REVIEW_DIR/untracked.files"
-: > "$REVIEW_DIR/changed.files"
-```
+Run the `git` commands below and capture each one's standard output into the named packet file. The commands are identical on every platform; only the capture mechanism differs.
 
-Populate only the files that are in scope:
+| Packet file | Command | Populate when |
+|-------------|---------|---------------|
+| `committed.stat` | `git diff --stat <BASE_SHA>..HEAD` | branch commits in scope and `BASE_SHA` known |
+| `committed.name-status` | `git diff --name-status <BASE_SHA>..HEAD` | same |
+| `committed.diff` | `git diff <BASE_SHA>..HEAD` | same |
+| `staged.stat` | `git diff --cached --stat` | staged changes in scope |
+| `staged.name-status` | `git diff --cached --name-status` | same |
+| `staged.diff` | `git diff --cached` | same |
+| `unstaged.stat` | `git diff --stat` | unstaged changes in scope |
+| `unstaged.name-status` | `git diff --name-status` | same |
+| `unstaged.diff` | `git diff` | same |
+| `untracked.files` | `git ls-files --others --exclude-standard` | untracked files in scope |
 
-```bash
-# Branch commits, when in scope and BASE_SHA is known
-git diff --stat "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.stat"
-git diff --name-status "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.name-status"
-git diff "$BASE_SHA"..HEAD > "$REVIEW_DIR/committed.diff"
-git diff --name-only "$BASE_SHA"..HEAD >> "$REVIEW_DIR/changed.files"
+Create every in-scope packet file even when a command produces no output, so finders can distinguish "empty" from "not collected".
 
-# Staged changes, when in scope
-git diff --cached --stat > "$REVIEW_DIR/staged.stat"
-git diff --cached --name-status > "$REVIEW_DIR/staged.name-status"
-git diff --cached > "$REVIEW_DIR/staged.diff"
-git diff --cached --name-only >> "$REVIEW_DIR/changed.files"
+Build `changed.files` by concatenating the path lists from each in-scope source — `git diff --name-only <BASE_SHA>..HEAD`, `git diff --cached --name-only`, `git diff --name-only`, and the contents of `untracked.files` — then sorting and removing duplicates. Do that in memory or with the host's own tooling; it does not need a shell.
 
-# Unstaged changes, when in scope
-git diff --stat > "$REVIEW_DIR/unstaged.stat"
-git diff --name-status > "$REVIEW_DIR/unstaged.name-status"
-git diff > "$REVIEW_DIR/unstaged.diff"
-git diff --name-only >> "$REVIEW_DIR/changed.files"
+For untracked files in scope, snapshot the text ones into `REVIEW_DIR/untracked/<original relative path>` so finders do not depend on a moving worktree. Classify a file as text the way git does, without calling an external tool: treat it as binary if the first 8000 bytes contain a NUL byte, otherwise treat it as text. Skip anything that is not a regular readable file, and skip binaries rather than copying them.
 
-# Untracked files, when in scope
-git ls-files --others --exclude-standard > "$REVIEW_DIR/untracked.files"
-cat "$REVIEW_DIR/untracked.files" >> "$REVIEW_DIR/changed.files"
-sort -u "$REVIEW_DIR/changed.files" -o "$REVIEW_DIR/changed.files"
-```
+For PR targets, build explicit PR packet files instead of relying on local branch state, where `<PR>` is the PR number or URL from the user's request:
 
-For untracked files in scope, snapshot readable text files into the packet so finders do not depend on a moving worktree:
+| Packet file | Command |
+|-------------|---------|
+| `pr.json` | `gh pr view <PR> --json number,title,state,isDraft,headRefName,baseRefName,url,reviewDecision,mergeStateStatus` |
+| `pr.diff` | `gh pr diff <PR>` |
+| `changed.files` | `gh pr diff <PR> --name-only` |
 
-```bash
-mkdir -p "$REVIEW_DIR/untracked"
-while IFS= read -r path; do
-  [ -f "$path" ] || continue
-  case "$(file -b --mime-type "$path" 2>/dev/null || true)" in
-    text/*|application/json|application/xml|application/javascript|application/x-sh|application/x-yaml)
-      mkdir -p "$REVIEW_DIR/untracked/$(dirname "$path")"
-      cp "$path" "$REVIEW_DIR/untracked/$path"
-      ;;
-  esac
-done < "$REVIEW_DIR/untracked.files"
-```
+If `gh pr diff --name-only` is unavailable on the installed `gh`, derive `changed.files` from the `pr.diff` headers instead.
 
-For PR targets, create explicit PR packet files instead of relying on local branch state (`PR` is the PR number or URL from the user's request):
-
-```bash
-PR=123  # from the user's request
-gh pr view "$PR" --json number,title,state,isDraft,headRefName,baseRefName,url,reviewDecision,mergeStateStatus > "$REVIEW_DIR/pr.json"
-gh pr diff "$PR" > "$REVIEW_DIR/pr.diff"
-gh pr diff "$PR" --name-only > "$REVIEW_DIR/changed.files" 2>/dev/null || true
-```
-
-If the user explicitly asks to include local dirty changes with a PR review, also populate the staged, unstaged, and untracked packet files above, appending their paths to `changed.files`, then run `sort -u "$REVIEW_DIR/changed.files" -o "$REVIEW_DIR/changed.files"`.
+If the user explicitly asks to include local dirty changes with a PR review, also populate the staged, unstaged, and untracked packet files above, add their paths to `changed.files`, and re-sort and de-duplicate it.
 
 Adjust packet content by target:
 

@@ -124,16 +124,18 @@ discovers it by the `SKILL.md` frontmatter description. Use `/skills list` and
 editing the source.
 
 Copilot delegates through custom agents, so the finder and verifier fan-out maps
-onto real subagents rather than the sequential fallback. Install the optional
-role definitions from `agents/copilot/` only when the user explicitly asks:
+onto real subagents rather than the sequential fallback. Copy the four optional
+role definitions from `agents/copilot/` into `~/.copilot/agents/` only when the
+user explicitly asks. On a POSIX shell that is:
 
 ```bash
 cp <skill source>/agents/copilot/*.agent.md ~/.copilot/agents/
 ```
 
-Repository-scoped installs use `.github/agents/` instead. `scripts/sync-skills`
-never copies these; a home-directory agent wins over a repository agent with the
-same name.
+On Windows use the equivalent copy for the host shell; nothing about these files
+is POSIX-specific. Repository-scoped installs use `.github/agents/` instead.
+`scripts/sync-skills` never copies these; a home-directory agent wins over a
+repository agent with the same name.
 
 Two capability limits apply and must be disclosed rather than papered over:
 
@@ -208,6 +210,30 @@ Preserve the same stages as the portable workflow:
 If Gemini cannot launch independent subagents or pin model effort by role, use
 the sequential fallback and disclose it in the final report. Never downgrade
 verifier quality just because the adapter is running in Gemini.
+
+## Windows
+
+The workflow itself is shell-neutral and runs on native Windows under any host
+that provides `git`, so no Windows-specific copy of this skill exists. Two rules
+keep it that way:
+
+- `SKILL.md` states the review packet as a set of named files plus the `git`
+  command whose output fills each one. Capturing that output is the host's job,
+  using its own file-writing tools. Nothing in the normative path depends on
+  `mktemp`, `/tmp`, output redirection, `sort`, `cp`, `file`, or shell parameter
+  expansion.
+- Binary detection for untracked snapshots uses git's own heuristic — a NUL byte
+  in the first 8000 bytes — rather than shelling out to `file`, which does not
+  exist on Windows and is not guaranteed on Linux.
+
+The one POSIX snippet that remains, the `BASE_BRANCH_RESOLUTION` block, is
+explicitly labeled a convenience implementation of the numbered rule directly
+above it. Hosts without a POSIX shell follow the rule and ignore the snippet.
+
+Installing with `scripts/sync-skills --apply` needs Developer Mode or an
+elevated shell on Windows because it creates a symlink; copying the folder into
+`~/.copilot/skills/` or `.github/skills/` works everywhere. Optional custom-agent
+definitions are plain files and need no special handling.
 
 ## GitHub CLI
 
