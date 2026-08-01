@@ -9,6 +9,18 @@ require_relative "support/prompt_engineer_helper"
 require_relative "../scripts/lib/prompt_engineer"
 
 class PromptEngineerEvaluationContractTest < Minitest::Test
+
+  # PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
+  # raises without them. That is a hard requirement of the skill, not of these
+  # tests, so on a host that lacks them there is nothing to assert.
+  def setup
+    return unless defined?(PromptEngineer::Corpus)
+
+    unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
+      skip "host lacks descriptor-relative no-follow reads"
+    end
+  end
+
   include PromptEngineerTestHelper
 
   def test_public_library_loads

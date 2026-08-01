@@ -8,14 +8,17 @@ require_relative "../scripts/lib/prompt_engineer"
 
 class PromptEngineerFinalReviewRemediationsTest < Minitest::Test
 
-# PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
-# raises without them. That is a hard requirement of the skill, not of these
-# tests, so on a host that lacks them there is nothing to assert.
-def setup
-  unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
-    skip "host lacks descriptor-relative no-follow reads"
+  # PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
+  # raises without them. That is a hard requirement of the skill, not of these
+  # tests, so on a host that lacks them there is nothing to assert.
+  def setup
+    return unless defined?(PromptEngineer::Corpus)
+
+    unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
+      skip "host lacks descriptor-relative no-follow reads"
+    end
   end
-end
+
   REPO = File.expand_path("..", __dir__)
   CORPUS = File.join(REPO, "test/fixtures/prompt-engineer/v1")
   POLICY = File.join(REPO, "test/fixtures/prompt-engineer/qualification-policy.example.yml")

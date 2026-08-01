@@ -326,7 +326,7 @@ module AdversarialReview
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         bytes = File.open(absolute, flags) do |file|
           opened = file.stat
-          unless opened.file? && !before.symlink? && before.dev == opened.dev && before.ino == opened.ino
+          unless opened.file? && !before.symlink? && Atomic.same_identity?(before, opened)
             raise Error, "current target identity changed"
           end
           file.read

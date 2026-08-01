@@ -3,14 +3,17 @@ require_relative "../scripts/lib/prompt_engineer"
 
 class PromptEngineerFinalReviewGatesTest < Minitest::Test
 
-# PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
-# raises without them. That is a hard requirement of the skill, not of these
-# tests, so on a host that lacks them there is nothing to assert.
-def setup
-  unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
-    skip "host lacks descriptor-relative no-follow reads"
+  # PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
+  # raises without them. That is a hard requirement of the skill, not of these
+  # tests, so on a host that lacks them there is nothing to assert.
+  def setup
+    return unless defined?(PromptEngineer::Corpus)
+
+    unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
+      skip "host lacks descriptor-relative no-follow reads"
+    end
   end
-end
+
   def test_behavioral_run_store_arms_are_unassisted_and_not_implicit
     assert_equal %w[legacy replacement unassisted], PromptEngineer::RunStore::ARMS
     refute_includes PromptEngineer::RunStore::ARMS, "implicit"

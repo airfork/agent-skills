@@ -7,6 +7,18 @@ require_relative "../scripts/lib/prompt_engineer"
 require_relative "../scripts/lib/prompt_engineer/cli"
 
 class PromptEngineerCliTest < Minitest::Test
+
+  # PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
+  # raises without them. That is a hard requirement of the skill, not of these
+  # tests, so on a host that lacks them there is nothing to assert.
+  def setup
+    return unless defined?(PromptEngineer::Corpus)
+
+    unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
+      skip "host lacks descriptor-relative no-follow reads"
+    end
+  end
+
   def test_choices_writes_canonical_record_and_returns_it_as_json
     Dir.mktmpdir("prompt-engineer-cli") do |directory|
       output_path = File.join(directory, "choices.json")

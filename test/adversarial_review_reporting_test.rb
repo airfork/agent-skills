@@ -16,6 +16,7 @@ class AdversarialReviewReportingTest < Minitest::Test
   # A rooted path is not an absolute path everywhere: Windows needs a drive, so
   # "/tmp/repository" fails the canonical-absolute check there. Derive one.
   FIXTURE_REPOSITORY_ROOT = File.expand_path("/tmp/repository")
+  FIXTURE_CLI_REALPATH = File.expand_path("/usr/local/bin/codex")
 
   def portable_filesystem
     {
@@ -921,7 +922,7 @@ class AdversarialReviewReportingTest < Minitest::Test
       "output" => "both",
       "requested_executor" => "auto",
       "selected_executor" => "codex",
-      "cli" => {"realpath" => "/usr/local/bin/codex", "version" => "codex 1.2.3"},
+      "cli" => {"realpath" => FIXTURE_CLI_REALPATH, "version" => "codex 1.2.3"},
       "requested_model" => "gpt-review",
       "observed_model" => "gpt-review",
       "requested_effort" => "xhigh",

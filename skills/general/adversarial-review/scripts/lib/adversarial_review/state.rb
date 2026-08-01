@@ -3214,7 +3214,7 @@ module AdversarialReview
         File.open(absolute, flags) do |file|
           opened = file.stat
           unless opened.file? && !expected.symlink? &&
-                 expected.dev == opened.dev && expected.ino == opened.ino
+                 Atomic.same_identity?(expected, opened)
             invalid_result!("target_digest_mismatch", "authoritative target identity changed")
           end
           digests[path] = Digest::SHA256.hexdigest(file.read)

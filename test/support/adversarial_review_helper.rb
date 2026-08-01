@@ -97,10 +97,30 @@ module AdversarialReviewHelper
 
   private
 
+  # Spawning a bare "git" without a shell does not find git.exe on every host, so
+  # resolve it against PATH and PATHEXT once and invoke it by absolute path.
+  def self.git_executable
+    return @git_executable unless @git_executable.nil?
+
+    extensions = ENV.fetch("PATHEXT", "").split(File::PATH_SEPARATOR)
+    extensions = [""] if extensions.empty?
+    extensions = [""] + extensions
+    @git_executable = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map { |directory|
+      next if directory.empty?
+
+      extensions.filter_map { |extension|
+        candidate = File.join(directory, "git#{extension}")
+        candidate if File.file?(candidate) && File.executable?(candidate)
+      }.first
+    }.first || "git"
+  end
+
   # Captures output rather than discarding it: a fixture failure on a platform
   # you cannot attach to is only debuggable if the message carries git's own.
   def git(repository, *arguments)
-    output, status = Open3.capture2e("git", "-C", repository, *arguments)
+    output, status = Open3.capture2e(
+      AdversarialReviewHelper.git_executable, "-C", repository, *arguments
+    )
     return if status.success?
 
     raise "git fixture command failed: #{arguments.join(" ")}\n#{output}"

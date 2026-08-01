@@ -2,6 +2,18 @@ require "minitest/autorun"
 require_relative "../scripts/lib/prompt_engineer/cutover"
 
 class PromptEngineerCutoverLegacyContractTest < Minitest::Test
+
+  # PromptEngineer::Corpus requires descriptor-relative, no-follow reads and
+  # raises without them. That is a hard requirement of the skill, not of these
+  # tests, so on a host that lacks them there is nothing to assert.
+  def setup
+    return unless defined?(PromptEngineer::Corpus)
+
+    unless PromptEngineer::Corpus::NOFOLLOW_FLAG && PromptEngineer::Corpus::OPENAT_FUNCTION
+      skip "host lacks descriptor-relative no-follow reads"
+    end
+  end
+
   def test_legacy_shape_blocks_unsupported_evidence_without_mutation
     result = PromptEngineer::Cutover.evaluate(
       qualification_result: {"status" => "PASS", "decision" => "QUALIFIED_EXPLICIT", "report_digest" => "report"},

@@ -3268,6 +3268,9 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   def write_shell_executable(path, body)
+    unless AdversarialReviewHelper.shebang_executables_supported?
+      skip "host cannot execute shebang scripts marked executable with chmod"
+    end
     File.write(path, "#!/bin/sh\nset -eu\n#{body}")
     File.chmod(0o700, path)
   end
