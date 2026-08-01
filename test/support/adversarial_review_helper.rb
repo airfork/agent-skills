@@ -24,10 +24,16 @@ module AdversarialReviewHelper
   end
 
   def with_repository(files: {}, commit: true)
-    Dir.mktmpdir("adversarial-review-test") do |repository|
+    repository = Dir.mktmpdir("adversarial-review-test")
+    begin
       git(repository, "init", "--quiet")
       git(repository, "config", "user.name", "Test User")
       git(repository, "config", "user.email", "test@example.invalid")
+      # Background maintenance writes lock files under .git that can disappear
+      # while the fixture is being torn down, which surfaces as an ENOENT from
+      # deep inside FileUtils rather than as a test failure.
+      git(repository, "config", "gc.auto", "0")
+      git(repository, "config", "maintenance.auto", "false")
 
       files.each do |path, contents|
         absolute = File.join(repository, path)
@@ -41,7 +47,18 @@ module AdversarialReviewHelper
       end
 
       yield repository
+    ensure
+      remove_fixture_tree(repository)
     end
+  end
+
+  # Tolerates entries vanishing mid-walk: teardown races are not test results.
+  def remove_fixture_tree(path)
+    FileUtils.remove_entry(path)
+  rescue Errno::ENOENT
+    nil
+  rescue StandardError
+    FileUtils.rm_rf(path, secure: false)
   end
 
   # The direct adapters are exercised with shebang scripts marked executable via
