@@ -4,7 +4,15 @@ module AdversarialReview
   module Adapters
     class Codex < Base
       MAX_FINAL_RESPONSE_BYTES = 1_048_576
-      FinalResponseIdentity = Struct.new(:device, :inode, :uid, :mode, keyword_init: true)
+# `birthtime` is what distinguishes an in-place write (legitimate: Codex
+# writes the final message) from an unlink-and-recreate (an attack). Inode
+# numbers alone cannot: filesystems that reuse inodes eagerly, ext4 among
+# them, can hand the replacement the same dev/ino/uid/mode. It is nil where
+# the platform does not report a creation time, which weakens the check
+# rather than breaking it.
+FinalResponseIdentity = Struct.new(
+  :device, :inode, :uid, :mode, :birthtime, keyword_init: true
+)
       REQUIRED_HELP_TOKENS = %w[
         --ephemeral --ignore-user-config --ignore-rules --strict-config --sandbox
         --model --cd --json --output-schema --output-last-message
@@ -124,7 +132,8 @@ module AdversarialReview
           )
         end
         FinalResponseIdentity.new(
-          device: stat.dev, inode: stat.ino, uid: stat.uid, mode: stat.mode
+          device: stat.dev, inode: stat.ino, uid: stat.uid, mode: stat.mode,
+          birthtime: creation_time(stat)
         )
       rescue Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
              Errno::ELOOP, Errno::EEXIST
@@ -174,13 +183,25 @@ module AdversarialReview
       end
 
       def verify_final_response_identity!(stat, identity)
+        observed_birthtime = creation_time(stat)
+        birthtime_matches = identity.is_a?(FinalResponseIdentity) &&
+                            (identity.birthtime.nil? || observed_birthtime.nil? ||
+                             observed_birthtime == identity.birthtime)
         unless identity.is_a?(FinalResponseIdentity) && private_final_response?(stat) &&
                stat.dev == identity.device && stat.ino == identity.inode &&
-               stat.uid == identity.uid && stat.mode == identity.mode
+               stat.uid == identity.uid && stat.mode == identity.mode &&
+               birthtime_matches
           raise Runner::SecurityError.new(
             "final_response_changed", "Codex final-response identity or permissions changed"
           )
         end
+      end
+
+      # nil where the platform cannot report a creation time.
+      def creation_time(stat)
+        stat.birthtime
+      rescue NotImplementedError, NoMethodError
+        nil
       end
 
       def private_final_response?(stat)

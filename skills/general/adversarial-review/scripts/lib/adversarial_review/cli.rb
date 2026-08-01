@@ -488,7 +488,7 @@ module AdversarialReview
       raise Error.new("invalid_report", "report parent contains a symlink", 2) if File.symlink?(cursor)
       canonical_parent = File.join(File.realpath(cursor), *missing)
       canonical_path = File.join(canonical_parent, basename)
-      unless File.absolute_path(path) == path && !%w[. ..].include?(basename)
+      unless Atomic.canonical_absolute_path?(path) && !%w[. ..].include?(basename)
         raise Error.new("invalid_report", "report path must resolve through a real parent directory", 2)
       end
       expanded_run = File.expand_path(run_dir)

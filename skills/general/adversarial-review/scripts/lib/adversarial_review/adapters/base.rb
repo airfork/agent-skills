@@ -964,7 +964,7 @@ module AdversarialReview
       end
 
       def validated_isolated_root(path, label)
-        unless path.is_a?(String) && path.start_with?(File::SEPARATOR)
+        unless Atomic.canonical_absolute_path?(path)
           raise ArgumentError, "isolated #{label} must be an absolute path"
         end
         expected = File.lstat(path)
@@ -988,7 +988,7 @@ module AdversarialReview
       end
 
       def validated_external_path(path, label, kind)
-        unless path.is_a?(String) && path.start_with?(File::SEPARATOR)
+        unless Atomic.canonical_absolute_path?(path)
           raise ArgumentError, "#{label} must be an absolute path"
         end
         canonical = File.realpath(path)

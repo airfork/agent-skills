@@ -1843,6 +1843,13 @@ class AdversarialReviewAdaptersTest < Minitest::Test
     end
   end
 
+  def creation_time_supported?
+    File.stat(__FILE__).birthtime
+    true
+  rescue NotImplementedError, NoMethodError
+    false
+  end
+
   def test_codex_final_response_rejects_oversize_replacement_and_symlink
     adapter = AdversarialReview::Adapters::Codex.allocate
     Dir.mktmpdir("adversarial-review-final") do |directory|
@@ -1855,6 +1862,11 @@ class AdversarialReviewAdaptersTest < Minitest::Test
             file.write("x" * (AdversarialReview::Adapters::Codex::MAX_FINAL_RESPONSE_BYTES + 1))
           end
         when "replacement"
+          # Detecting this depends on the platform reporting a creation time:
+          # a filesystem that reuses inodes can give the replacement the same
+          # dev/ino/uid/mode, and birthtime is the only remaining discriminator.
+          next unless creation_time_supported?
+
           File.unlink(path)
           AdversarialReview::Runner.write_private_file(path, JSON.generate("ok" => true))
         when "symlink"

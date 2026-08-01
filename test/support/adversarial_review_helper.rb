@@ -43,7 +43,29 @@ module AdversarialReviewHelper
     end
   end
 
+  # The direct adapters are exercised with shebang scripts marked executable via
+  # chmod. Windows honors neither, so those tests describe a host the adapters
+  # cannot run on at all -- every direct adapter is ineligible there. Skip rather
+  # than assert something the platform cannot express.
+  def self.shebang_executables_supported?
+    return @shebang_executables_supported unless @shebang_executables_supported.nil?
+
+    @shebang_executables_supported = begin
+      Dir.mktmpdir("shebang-probe") do |directory|
+        probe = File.join(directory, "probe")
+        File.write(probe, "#!#{RbConfig.ruby}\nexit 0\n")
+        File.chmod(0o700, probe)
+        system(probe, out: File::NULL, err: File::NULL) ? true : false
+      end
+    rescue StandardError
+      false
+    end
+  end
+
   def write_fake_executable(directory, name: "fake-agent", body: nil)
+    unless AdversarialReviewHelper.shebang_executables_supported?
+      skip "host cannot execute shebang scripts marked executable with chmod"
+    end
     path = File.join(directory, name)
     source = body || <<~RUBY
       \#!#{RbConfig.ruby}

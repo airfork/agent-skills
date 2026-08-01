@@ -55,11 +55,15 @@ module AdversarialReview
       false
     end
 
-    # Windows can report ino 0 for every file. Comparing that would make inode
-    # identity checks vacuous rather than meaningful, so they are skipped and
-    # declared instead of silently inverted.
+    # Every identity check here compares a path stat against a stat taken from an
+    # open handle for the same file. Windows can report ino 0, or a different ino
+    # for those two routes, either of which makes the comparison vacuously true
+    # or uniformly false rather than meaningful. Probe the exact property the
+    # code relies on, not just a non-zero inode.
     INODE_IDENTITY = begin
-      File.stat(__FILE__).ino != 0
+      by_path = File.stat(__FILE__)
+      by_handle = File.open(__FILE__, File::RDONLY) { |file| file.stat }
+      by_path.ino != 0 && by_path.ino == by_handle.ino && by_path.dev == by_handle.dev
     rescue StandardError
       false
     end
@@ -197,7 +201,8 @@ module AdversarialReview
         verify_directory_identity!(parent, directory)
         File.join(parent, destination_name)
       end
-    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error("unsafe_path", "atomic write path is unsafe", {"path" => path, "cause" => error.class.name})
     end
 
@@ -236,7 +241,8 @@ module AdversarialReview
         unlink_relative(directory, temporary_name) if created
       end
       destination_name
-    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error(
         "unsafe_path", "atomic write path is unsafe",
         {"path" => destination_name, "cause" => error.class.name}
@@ -275,7 +281,7 @@ module AdversarialReview
         unlink_relative(directory, temporary_name) if created
       end
       destination_name
-    rescue Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM, Errno::EISDIR => error
       raise_state_error(
         "unsafe_task_path", "task bundle path is unsafe",
         {"path" => destination_name, "cause" => error.class.name}
@@ -302,7 +308,8 @@ module AdversarialReview
       end
     rescue JSON::ParserError => error
       raise_state_error(code, "persisted JSON is invalid", {"path" => name, "cause" => error.message}, 3)
-    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error(
         unsafe_code, "persisted JSON is unavailable",
         {"path" => name, "cause" => error.class.name}, unsafe_exit_status
@@ -331,7 +338,8 @@ module AdversarialReview
       ensure
         directory.close if directory && !directory.closed?
       end
-    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error(code, "relative directory is unavailable", {"path" => name, "cause" => error.class.name})
     end
 
@@ -374,7 +382,8 @@ module AdversarialReview
 
       file = File.open(expanded, File::RDONLY | NOFOLLOW_FLAG)
       PosixDirectory.new(expanded, file)
-    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ENOENT, Errno::ELOOP, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error(code, "directory is unavailable", {"path" => expanded, "cause" => error.class.name})
     end
 
@@ -393,6 +402,18 @@ module AdversarialReview
       return true unless INODE_IDENTITY
 
       left.dev == right.dev && left.ino == right.ino
+    end
+
+    # `File.absolute_path(path) == path` is the canonical-absolute test used
+    # throughout, but it rejects `C:\dir` because expand_path returns forward
+    # slashes. Normalize separators only where the host actually treats the
+    # backslash as one: on POSIX it is a legal filename character, and rewriting
+    # it there would let a relative `\foo` masquerade as absolute.
+    def canonical_absolute_path?(path)
+      return false unless path.is_a?(String) && !path.empty?
+
+      candidate = File::ALT_SEPARATOR ? path.tr(File::ALT_SEPARATOR, File::SEPARATOR) : path
+      File.absolute_path(candidate) == candidate
     end
 
     def open_relative(directory, name, flags, mode = 0)
@@ -438,6 +459,11 @@ module AdversarialReview
       true
     rescue Errno::ENOENT
       false
+    # POSIX opens a directory and reports stat.file? false; Windows refuses the
+    # open outright. Both mean "present but not a regular file", so they must
+    # reach the same rejection rather than escaping as an unhandled Errno.
+    rescue Errno::EISDIR
+      raise_state_error(code, "path must be a regular file", {"path" => name})
     ensure
       file.close if defined?(file) && file && !file.closed?
     end
@@ -539,7 +565,8 @@ module AdversarialReview
           directory.flock(File::LOCK_UN) if directory_locked && !directory.closed?
         end
       end
-    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error("unsafe_lock", "state lock is unsafe", {"path" => path, "cause" => error.class.name})
     end
 
@@ -578,7 +605,7 @@ module AdversarialReview
       end
       path
     rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EEXIST,
-           Errno::EACCES, Errno::EPERM => error
+           Errno::EACCES, Errno::EPERM, Errno::EISDIR => error
       raise_state_error("unsafe_lock", "state lock could not be created safely", {"path" => path, "cause" => error.class.name})
     end
 
@@ -611,7 +638,8 @@ module AdversarialReview
           verify_directory_identity!(parent, directory)
         end
       end
-    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ELOOP, Errno::ENOENT, Errno::ENOTDIR, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error("unsafe_path", "persisted state path is unsafe", {"path" => path, "cause" => error.class.name})
     end
 
@@ -648,7 +676,8 @@ module AdversarialReview
         end
       end
       expanded
-    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM => error
+    rescue Errno::ENOENT, Errno::ENOTDIR, Errno::ELOOP, Errno::EACCES, Errno::EPERM,
+           Errno::EISDIR => error
       raise_state_error("unsafe_path", "path component is unsafe", {"path" => cursor || path, "cause" => error.class.name})
     end
 

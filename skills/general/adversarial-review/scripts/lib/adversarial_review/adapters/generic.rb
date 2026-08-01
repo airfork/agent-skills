@@ -56,7 +56,7 @@ module AdversarialReview
       end
 
       def self.read_task_bytes_once(task_path)
-        unless File.absolute_path(task_path) == task_path
+        unless Atomic.canonical_absolute_path?(task_path)
           raise Error.new("invalid_handoff", "task handoff path must be absolute")
         end
         flags = File::RDONLY

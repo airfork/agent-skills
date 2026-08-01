@@ -377,7 +377,7 @@ module AdversarialReview
     end
 
     def set_report_path!(path)
-      unless path.nil? || (path.is_a?(String) && File.absolute_path(path) == path)
+      unless path.nil? || Atomic.canonical_absolute_path?(path)
         raise Error.new("invalid_report", "report path must be absolute", {"path" => path}, 2)
       end
       mutate! do |data|

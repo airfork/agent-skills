@@ -292,7 +292,7 @@ module AdversarialReview
     def canonical_repository(repository)
       require_hash!(repository, "repository")
       root = nonempty_string!(repository.fetch("root"), "repository root")
-      invalid!("invalid_repository", "repository root must be absolute") unless File.absolute_path(root) == root
+      invalid!("invalid_repository", "repository root must be absolute") unless Atomic.canonical_absolute_path?(root)
       head = repository.fetch("head")
       unless head.is_a?(String) && head.match?(/\A[0-9a-f]{40}(?:[0-9a-f]{24})?\z/)
         invalid!("invalid_repository", "repository HEAD is invalid")
@@ -352,7 +352,7 @@ module AdversarialReview
     def canonical_cli(cli)
       require_hash!(cli, "cli")
       realpath = nonempty_string!(cli.fetch("realpath"), "CLI realpath")
-      invalid!("invalid_cli", "CLI realpath must be absolute") unless File.absolute_path(realpath) == realpath
+      invalid!("invalid_cli", "CLI realpath must be absolute") unless Atomic.canonical_absolute_path?(realpath)
       {"realpath" => realpath, "version" => nonempty_string!(cli.fetch("version"), "CLI version")}
     rescue KeyError => error
       invalid!("invalid_cli", "CLI provenance is incomplete", {"field" => error.key})

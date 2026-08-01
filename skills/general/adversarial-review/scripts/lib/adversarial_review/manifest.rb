@@ -465,7 +465,12 @@ module AdversarialReview
       nil
     end
 
+    # Hosts that cannot supply comparable inode identity across a path stat and a
+    # handle stat get the size/mtime comparison instead; Atomic.guarantees
+    # reports `inode_identity` false so the weaker check is declared.
     def same_identity?(left, right)
+      return left.size == right.size && left.mtime == right.mtime unless Atomic::INODE_IDENTITY
+
       left.dev == right.dev && left.ino == right.ino
     end
 
