@@ -337,13 +337,13 @@ module AdversarialReview
       File.open(path, flags) do |file|
         opened = file.stat
         unless opened.file? && (opened.mode & 0o111).positive? &&
-               before.dev == opened.dev && before.ino == opened.ino
+               Atomic.same_identity?(before, opened)
           raise SecurityError.new("executable_changed", "selected executable identity changed while reading")
         end
         digest = hash_descriptor(file)
       end
       after = File.lstat(path)
-      unless before.dev == after.dev && before.ino == after.ino && before.size == after.size &&
+      unless Atomic.same_identity?(before, after) && before.size == after.size &&
              before.mtime == after.mtime && before.mode == after.mode
         raise SecurityError.new("executable_changed", "selected executable changed while reading")
       end

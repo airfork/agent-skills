@@ -73,7 +73,11 @@ module AdversarialReviewHelper
         probe = File.join(directory, "probe")
         File.write(probe, "#!#{RbConfig.ruby}\nexit 0\n")
         File.chmod(0o700, probe)
-        system(probe, out: File::NULL, err: File::NULL) ? true : false
+        # [path, path] forces a direct exec: a single string would be handed to
+        # a shell, which can succeed on hosts that cannot exec the file itself.
+        pid = Process.spawn([probe, probe], out: File::NULL, err: File::NULL)
+        Process.wait(pid)
+        true
       end
     rescue StandardError
       false
