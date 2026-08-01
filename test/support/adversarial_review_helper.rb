@@ -102,9 +102,11 @@ module AdversarialReviewHelper
   def self.git_executable
     return @git_executable unless @git_executable.nil?
 
+    # Where PATHEXT exists the extension-bearing form must win: an extensionless
+    # `git` on such a host is typically a shell script, which cannot be spawned
+    # directly and fails with ENOEXEC.
     extensions = ENV.fetch("PATHEXT", "").split(File::PATH_SEPARATOR)
-    extensions = [""] if extensions.empty?
-    extensions = [""] + extensions
+    extensions = extensions.empty? ? [""] : extensions + [""]
     @git_executable = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map { |directory|
       next if directory.empty?
 

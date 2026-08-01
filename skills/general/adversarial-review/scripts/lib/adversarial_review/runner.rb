@@ -355,9 +355,17 @@ module AdversarialReview
     end
     private_class_method :identity
 
+    # Drops the inode comparison where a path stat and a handle stat disagree on
+    # this host; size, mtime, and mode still have to match. Atomic.guarantees
+    # reports `inode_identity` false so the weaker pin is declared, not implied.
     def executable_metadata_matches?(stat, executable)
-      stat.dev == executable.device && stat.ino == executable.inode &&
-        stat.mode == executable.mode && time_nanoseconds(stat.mtime) == executable.mtime_ns &&
+      identity = if Atomic::INODE_IDENTITY
+                   stat.dev == executable.device && stat.ino == executable.inode
+                 else
+                   true
+                 end
+      identity && stat.mode == executable.mode &&
+        time_nanoseconds(stat.mtime) == executable.mtime_ns &&
         stat.size == executable.size
     end
     private_class_method :executable_metadata_matches?
