@@ -13,6 +13,10 @@ require "adversarial_review"
 class AdversarialReviewReportingTest < Minitest::Test
   include AdversarialReviewHelper
 
+  # A rooted path is not an absolute path everywhere: Windows needs a drive, so
+  # "/tmp/repository" fails the canonical-absolute check there. Derive one.
+  FIXTURE_REPOSITORY_ROOT = File.expand_path("/tmp/repository")
+
   def portable_filesystem
     {
       "backend" => "portable",
@@ -907,7 +911,7 @@ class AdversarialReviewReportingTest < Minitest::Test
         "role" => "spec", "path" => "docs/spec.md", "sha256" => "a" * 64
       }],
       "repository" => {
-        "root" => "/tmp/repository", "head" => "b" * 40, "dirty" => true,
+        "root" => FIXTURE_REPOSITORY_ROOT, "head" => "b" * 40, "dirty" => true,
         "status" => [" M docs/spec.md"]
       },
       "started_at" => "2026-07-17T12:00:00Z",

@@ -1,4 +1,5 @@
 require "fileutils"
+require "open3"
 require "json"
 require "rbconfig"
 require "tmpdir"
@@ -96,9 +97,12 @@ module AdversarialReviewHelper
 
   private
 
+  # Captures output rather than discarding it: a fixture failure on a platform
+  # you cannot attach to is only debuggable if the message carries git's own.
   def git(repository, *arguments)
-    success = system("git", "-C", repository, *arguments,
-                     out: File::NULL, err: File::NULL)
-    raise "git fixture command failed: #{arguments.join(" ")}" unless success
+    output, status = Open3.capture2e("git", "-C", repository, *arguments)
+    return if status.success?
+
+    raise "git fixture command failed: #{arguments.join(" ")}\n#{output}"
   end
 end

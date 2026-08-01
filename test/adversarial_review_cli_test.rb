@@ -15,6 +15,9 @@ class AdversarialReviewCliTest < Minitest::Test
   CLI = File.join(SKILL, "scripts", "adversarial-review")
   REPOSITORY_ROOT = File.expand_path("..", __dir__)
   PACKAGE_VERIFIER = File.join(REPOSITORY_ROOT, "scripts", "verify-adversarial-review")
+  # Prefer the system bash so this keeps exercising the same interpreter it
+  # always has; fall back to PATH lookup on hosts that have no /bin/bash.
+  BASH = File.executable?("/bin/bash") ? "/bin/bash" : "bash"
 
   def test_public_cli_help_and_unknown_subcommand_have_stable_output
     stdout, stderr, status = Open3.capture3(CLI, "--help")
@@ -190,7 +193,7 @@ class AdversarialReviewCliTest < Minitest::Test
           "PATH" => [fake_bin, ENV.fetch("PATH")].join(File::PATH_SEPARATOR),
           "VERIFY_HELPER_LOG" => marker
         },
-        "/bin/bash", File.join(scripts, "verify")
+        BASH, File.join(scripts, "verify")
       )
 
       assert status.success?, stdout + stderr

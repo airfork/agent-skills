@@ -1870,9 +1870,10 @@ module AdversarialReview
       unless expected.directory? && !expected.symlink?
         raise Error.new("unsafe_run_dir", "created review run is not a real directory", {"run_dir" => path})
       end
-      flags = File::RDONLY
-      flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
-      directory = File.open(path, flags)
+      # Must go through Atomic: opening a directory as a File is a POSIX-only
+      # move that Windows refuses with EISDIR. The handle is used afterwards for
+      # unlink_relative and fsync, which both backends provide.
+      directory = Atomic.open_bound_directory(path, code: "unsafe_run_dir")
       unless directory.stat.directory? && Atomic.same_identity?(expected, directory.stat)
         directory.close
         raise Error.new("unsafe_run_dir", "created review run changed while it was opened", {"run_dir" => path})
