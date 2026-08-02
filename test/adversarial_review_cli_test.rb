@@ -1733,6 +1733,45 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_a_run_at_its_host_ceiling_keeps_an_ordinary_pass_and_discloses_the_limit
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "ceiling-run")
+      capability_path = File.join(repository, ".git", "ceiling-capabilities.json")
+      File.write(capability_path, JSON.generate(capability_declaration_at(
+        "read_only" => "behavioral", "usage_metrics" => "behavioral"
+      )) + "\n")
+
+      completed = complete_zero_finding_revise_run(
+        repository, run_dir, capability_path,
+        env: {"ADVERSARIAL_REVIEW_HOST" => "claude-code"}
+      )
+
+      assert_equal "PASSED", completed.dig("summary", "verdict")
+      assert_empty completed.dig("summary", "degraded_capabilities")
+      assert_equal ["read_only"], completed.dig("summary", "host_capability_limits")
+      markdown = completed.dig("summary", "markdown")
+      assert_includes markdown, "HOST CAPABILITY LIMITS"
+      assert_includes markdown, "read_only"
+      refute_includes markdown, "## DEGRADED CAPABILITIES"
+    end
+  end
+
+  def test_the_same_declaration_on_an_unnamed_host_stays_degraded
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "unnamed-host-run")
+      capability_path = File.join(repository, ".git", "unnamed-capabilities.json")
+      File.write(capability_path, JSON.generate(capability_declaration_at(
+        "read_only" => "behavioral", "usage_metrics" => "behavioral"
+      )) + "\n")
+
+      completed = complete_zero_finding_revise_run(repository, run_dir, capability_path)
+
+      assert_equal "DEGRADED CAPABILITIES", completed.dig("summary", "verdict")
+      assert_equal ["read_only"], completed.dig("summary", "degraded_capabilities")
+      assert_empty completed.dig("summary", "host_capability_limits")
+    end
+  end
+
   def test_report_refuses_a_nonterminal_run_and_names_the_outstanding_work
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       run_dir = File.join(repository, ".git", "unfinished-run")
@@ -2477,6 +2516,50 @@ class AdversarialReviewCliTest < Minitest::Test
     end
 
     assert_includes error.message, "normalized"
+  end
+
+  def test_host_baseline_excuses_only_the_published_ceiling
+    declaration = complete_capability_declaration("enforced")
+    declaration.fetch("read_only")["status"] = "behavioral"
+    declaration.fetch("usage_metrics")["status"] = "behavioral"
+    at_ceiling = AdversarialReview::Capabilities.normalize(declaration)
+    baseline = AdversarialReview::Capabilities.baseline_for("claude-code")
+
+    gate = AdversarialReview::Capabilities.gate(at_ceiling, "PASS", baseline: baseline)
+    assert_equal "PASS", gate.fetch("verdict")
+    assert_equal false, gate.fetch("ordinary_verdict_suppressed")
+    assert_empty gate.fetch("degraded_capabilities")
+    assert_equal ["read_only"], gate.fetch("host_capability_limits")
+
+    # Effort is pinnable on this host, so leaving it unpinned is this run's
+    # shortfall rather than the host's ceiling.
+    declaration.fetch("effort_selection")["status"] = "unavailable"
+    below = AdversarialReview::Capabilities.normalize(declaration)
+    shortfall = AdversarialReview::Capabilities.gate(below, "PASS", baseline: baseline)
+    assert_equal "DEGRADED CAPABILITIES", shortfall.fetch("verdict")
+    assert_equal ["effort_selection"], shortfall.fetch("degraded_capabilities")
+    assert_equal ["read_only"], shortfall.fetch("host_capability_limits")
+
+    # An unknown host gets no allowances at all.
+    unknown = AdversarialReview::Capabilities.gate(
+      at_ceiling, "PASS", baseline: AdversarialReview::Capabilities.baseline_for("")
+    )
+    assert_equal "DEGRADED CAPABILITIES", unknown.fetch("verdict")
+    assert_equal ["read_only"], unknown.fetch("degraded_capabilities")
+    assert_empty unknown.fetch("host_capability_limits")
+  end
+
+  def test_a_declaration_worse_than_the_host_ceiling_is_not_excused
+    declaration = complete_capability_declaration("enforced")
+    declaration.fetch("read_only")["status"] = "unavailable"
+    record = AdversarialReview::Capabilities.normalize(declaration)
+
+    gate = AdversarialReview::Capabilities.gate(
+      record, "PASS", baseline: AdversarialReview::Capabilities.baseline_for("claude-code")
+    )
+    assert_equal "DEGRADED CAPABILITIES", gate.fetch("verdict")
+    assert_equal ["read_only"], gate.fetch("degraded_capabilities")
+    assert_empty gate.fetch("host_capability_limits")
   end
 
   def test_capability_gate_only_suppresses_an_ordinary_pass
@@ -3476,6 +3559,54 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal expected_stage, JSON.parse(stdout).fetch("stage")
     end
     JSON.parse(stdout)
+  end
+
+  # Revise mode with no findings is the shortest path to an ordinary `PASSED`,
+  # which is the only verdict the capability gate can suppress.
+  def complete_zero_finding_revise_run(repository, run_dir, capability_path, env: {})
+    stdout, stderr, status = run_public_cli(
+      "start", "--repository", repository, "--spec", "docs/spec.md",
+      "--mode", "revise", "--output", "chat",
+      "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+      "--run-dir", run_dir, env: env
+    )
+    assert status.success?, stderr
+    assert_equal "attacking", JSON.parse(stdout).fetch("stage")
+
+    %w[deduplicating culling awaiting-author resolving complete].each do |expected_stage|
+      ingest_pending_tasks(run_dir, capability_path) { |task| empty_result_for(task) }
+      stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
+      assert status.success?, stderr
+      assert_equal expected_stage, JSON.parse(stdout).fetch("stage")
+      next unless expected_stage == "awaiting-author"
+
+      state = AdversarialReview::State.load(run_dir)
+      task_id = state.to_h.fetch("emitted_tasks").find do |_id, record|
+        record.fetch("kind") == "author-actions"
+      end.fetch(0)
+      task = nil
+      state.read_task_bundle(task_id) { |_manifest, _data, value| task = value }
+      actions_path = File.join(repository, ".git", "zero-actions.json")
+      File.write(actions_path, JSON.generate(
+        "schema_version" => 1, "run_id" => task.fetch("run_id"),
+        "task_id" => task.fetch("task_id"),
+        "artifact_digests" => task.fetch("artifact_digests"),
+        "actions" => [], "notes" => []
+      ) + "\n")
+      _stdout, action_stderr, action_status = run_public_cli(
+        "continue", "--run-dir", run_dir, "--actions", actions_path
+      )
+      assert action_status.success?, action_stderr
+    end
+    JSON.parse(stdout)
+  end
+
+  def capability_declaration_at(overrides)
+    complete_capability_declaration("enforced").each do |field, declaration|
+      next unless overrides.key?(field)
+
+      declaration["status"] = overrides.fetch(field)
+    end
   end
 
   def ingest_pending_tasks(run_dir, capability_path)

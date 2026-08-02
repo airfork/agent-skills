@@ -106,8 +106,10 @@ module AdversarialReview
         mode, findings, evidence_gaps, overflow, overflow_evidence_gaps,
         terminal_stage: terminal_stage
       )
+      host = source["host"].to_s
       capability_gate = Capabilities.gate(
-        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
+        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict,
+        baseline: Capabilities.baseline_for(host)
       )
       degraded = capability_gate.fetch("degraded_capabilities")
       disclosed = source.fetch("degraded_capabilities")
@@ -139,7 +141,9 @@ module AdversarialReview
         "overflow" => overflow,
         "overflow_evidence_gaps" => overflow_evidence_gaps,
         "degraded_capabilities" => degraded,
+        "host_capability_limits" => capability_gate.fetch("host_capability_limits"),
         "provenance" => {
+          "host" => host,
           "schema_version" => 1,
           "run_id" => run_id,
           "targets" => targets,
@@ -219,6 +223,7 @@ module AdversarialReview
         "overflow" => deep_copy(value.fetch("overflow")),
         "overflow_evidence_gaps" => deep_copy(value.fetch("overflow_evidence_gaps")),
         "degraded_capabilities" => deep_copy(value.fetch("degraded_capabilities")),
+        "host_capability_limits" => deep_copy(value.fetch("host_capability_limits")),
         "provenance" => deep_copy(value.fetch("provenance")),
         "markdown" => markdown(value)
       }
@@ -918,6 +923,18 @@ module AdversarialReview
         lines << degraded.join(", ")
         lines << ""
       end
+      # A capability the host cannot enforce at all is disclosed but never
+      # suppresses the verdict: it says nothing about this run that is not
+      # already true of every run on this host. Falling below that published
+      # ceiling is what stays in DEGRADED CAPABILITIES above.
+      limits = value.fetch("host_capability_limits")
+      unless limits.empty?
+        lines << "## HOST CAPABILITY LIMITS"
+        lines << ""
+        lines << "Host `#{provenance["host"]}` cannot enforce: #{limits.join(", ")}. " \
+                 "Declared at this host's published ceiling, so the verdict stands."
+        lines << ""
+      end
       # Reduced filesystem hardening is a property of the control plane, not of
       # the reviewer, so it is disclosed separately from the capability gate and
       # never changes the verdict.
@@ -1158,7 +1175,7 @@ module AdversarialReview
       required = %w[
         schema_version run_id mode tier output terminal_stage verdict findings metrics changelog
         author_actions rejected_findings evidence_gaps open_questions overflow overflow_evidence_gaps
-        degraded_capabilities provenance resolution_checks
+        degraded_capabilities host_capability_limits provenance resolution_checks
       ]
       missing = required.reject { |key| value.key?(key) }
       invalid!("invalid_summary", "render summary is incomplete", {"missing" => missing}) unless missing.empty?
@@ -1275,11 +1292,15 @@ module AdversarialReview
         terminal_stage: terminal_stage
       )
       gate = Capabilities.gate(
-        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict
+        capabilities, ordinary_verdict == "PASSED" ? "PASS" : ordinary_verdict,
+        baseline: Capabilities.baseline_for(provenance["host"])
       )
       expected_degraded = gate.fetch("degraded_capabilities")
       unless value.fetch("degraded_capabilities") == expected_degraded
         invalid!("invalid_summary", "render summary degraded capability disclosure is invalid")
+      end
+      unless value.fetch("host_capability_limits") == gate.fetch("host_capability_limits")
+        invalid!("invalid_summary", "render summary host capability limits are invalid")
       end
       expected_verdict = gate.fetch("verdict") == "PASS" ? "PASSED" : gate.fetch("verdict")
       invalid!("invalid_summary", "render summary verdict is inconsistent") unless value["verdict"] == expected_verdict

@@ -93,6 +93,9 @@ never claim scripted crash recovery or resumability.
 
 ## Outcomes
 
-`DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a required capability is `unavailable` or a safety boundary is `behavioral`.
+`DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a required capability is `unavailable` or a safety boundary is `behavioral`,
+and only below the host's published ceiling. Set `ADVERSARIAL_REVIEW_HOST` so the run is judged against its host; capabilities at that
+ceiling are disclosed under `HOST CAPABILITY LIMITS` and keep the verdict. Pin whatever the host does expose: on Claude Code, dispatch
+generic bundles with a per-agent reasoning effort and output schema, or the run is degraded by its own dispatch rather than by its host.
 `REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict. Retained verdicts disclose degraded capabilities separately.
 Return the script's stable IDs, provenance, and usage. Critique mode never edits targets.

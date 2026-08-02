@@ -159,6 +159,9 @@ module AdversarialReview
         context_paths: options[:context]
       )
       manifest["selected_executor"] = selected
+      # Recorded once, at start, so the capability ceiling a run is judged
+      # against is fixed before any reviewed content is seen.
+      manifest["host"] = env["ADVERSARIAL_REVIEW_HOST"].to_s.downcase
       manifest["jobs"] = options.fetch(:jobs)
       manifest["execution_metadata_required"] = true
       run_dir = options[:run_dir] || State.default_run_dir(
@@ -1152,7 +1155,9 @@ module AdversarialReview
                      else
                        aggregate_capabilities(reviewer_records, manifest)
                      end
-      gate = Capabilities.gate(capabilities, "PASS")
+      gate = Capabilities.gate(
+        capabilities, "PASS", baseline: Capabilities.baseline_for(manifest["host"])
+      )
       emitted = snapshot.fetch("emitted_tasks")
       angles = manifest.fetch("enabled_tasks").map do |angle|
         tasks = emitted.values.select { |record| record["angle"] == angle }
@@ -1195,6 +1200,7 @@ module AdversarialReview
         "enabled_tasks" => manifest.fetch("enabled_tasks"),
         "angles" => angles,
         "capabilities" => capabilities,
+        "host" => manifest["host"],
         "degraded_capabilities" => gate.fetch("degraded_capabilities"),
         "usage" => usage,
         "findings" => snapshot.fetch("findings"),

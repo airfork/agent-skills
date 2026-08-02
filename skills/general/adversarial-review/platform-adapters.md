@@ -19,6 +19,30 @@ is only `behavioral`. It replaces only an ordinary `PASSED`. `REPORT ONLY`,
 `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict.
 Retained verdicts disclose degraded capabilities separately.
 
+## Host Capability Ceilings
+
+A capability no host run can enforce says nothing about a particular run, so
+reporting it as degradation makes the verdict constant and therefore
+uninformative. `Capabilities::HOST_BASELINES` publishes, per host, the
+capabilities that host structurally cannot enforce. A run that declares a status
+at or above its host's ceiling keeps its ordinary verdict and discloses those
+capabilities under `HOST CAPABILITY LIMITS`; a run that falls below a ceiling it
+could have met stays `DEGRADED CAPABILITIES`. So the verdict separates "this
+host cannot prove it" from "this run did not bother".
+
+The ceiling is a package-owned fact keyed by `ADVERSARIAL_REVIEW_HOST`, recorded
+in the manifest at `start` before any reviewed content is seen. An unset or
+unknown host gets no allowances, and a declaration worse than the published
+ceiling is never excused, so neither a missing nor a forged host name can soften
+the gate past what this package already published.
+
+`claude-code` publishes `read_only: behavioral` and `usage_metrics: behavioral`:
+every Claude Code agent type retains a shell, so no dispatch makes a reviewer
+mechanically read-only, and the harness reports no input/cached token split.
+Reasoning effort and output schemas are pinnable per agent, so neither is
+excused — a Claude Code run that leaves either unpinned is degraded by its own
+dispatch, not by its host.
+
 The public CLI records serial dispatch truthfully with `parallel_dispatch` as `unavailable`.
 For default/high direct Codex and Claude runs, parallelism is
 advisory rather than a hard eligibility field: all other safety and identity
