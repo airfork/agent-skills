@@ -3,6 +3,11 @@ require "open3"
 require "tmpdir"
 require "yaml"
 
+$LOAD_PATH.unshift(
+  File.expand_path("../skills/general/adversarial-review/scripts/lib", __dir__)
+)
+require "adversarial_review"
+
 class ModelTierContractTest < Minitest::Test
   REPO_UNDER_TEST = File.expand_path("..", __dir__)
   EXPECTED_CODEX_MODELS = {
@@ -172,6 +177,24 @@ class ModelTierContractTest < Minitest::Test
     assert_includes angles, "Implementer is enabled only when a spec is present"
     assert_includes angles, "Feasibility is enabled only when a plan is present"
     assert_includes angles, "bounded scan of authoritative target prose"
+  end
+
+  def test_every_published_host_ceiling_is_documented_with_its_capabilities
+    adapters = read("skills/general/adversarial-review/platform-adapters.md")
+
+    assert_includes adapters, "## Host Capability Ceilings"
+    AdversarialReview::Capabilities::HOST_BASELINES.each do |host, permitted|
+      assert_includes adapters, host,
+                      "host #{host} publishes a ceiling but is undocumented"
+      permitted.each_key do |capability|
+        assert_includes adapters, capability,
+                        "#{host} excuses #{capability} without documenting why"
+      end
+    end
+    # A capability the host can pin must never be excused by its ceiling.
+    claude = AdversarialReview::Capabilities.baseline_for("claude-code")
+    refute claude.key?("effort_selection"), "effort is pinnable on Claude Code"
+    refute claude.key?("structured_output"), "schemas are enforceable on Claude Code"
   end
 
   def test_limited_capacity_and_terminal_verdicts_are_deterministic

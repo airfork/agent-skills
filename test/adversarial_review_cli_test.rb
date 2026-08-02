@@ -3430,7 +3430,10 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   def run_public_cli(*arguments, env: {})
-    Open3.capture3(env, CLI, *arguments)
+    # Clear the ambient host first: an operator who exports
+    # ADVERSARIAL_REVIEW_HOST would otherwise change which capability ceiling
+    # these runs are judged against. Explicit env still wins.
+    Open3.capture3({"ADVERSARIAL_REVIEW_HOST" => nil}.merge(env), CLI, *arguments)
   end
 
   def empty_result_for(task)

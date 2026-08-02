@@ -123,6 +123,35 @@ attested effort, fresh context, or independent voting, so its direct result is i
 Claude alone may run `ultra`, using three independent evidence-bearing votes;
 split votes involving `UNPROVEN` require arbitration.
 
+## Claude Code Generic Dispatch
+
+Claude Code has no direct adapter, so `--executor auto` resolves to `generic` and
+the parent dispatches the emitted bundles itself. How it dispatches decides four
+of the eight capabilities, so dispatch through the workflow surface rather than a
+plain subagent call, and declare only what that surface actually provides.
+
+Give each bundle its own agent, and per agent pass the manifest's requested
+effort, the manifest's requested model, and the bundle's schema. Schema
+validation happens at the tool-call layer with retry, so a returned result cannot
+silently miss the closed schema; effort and model are real parameters rather than
+prose. That justifies `structured_output: enforced`, `effort_selection:
+behavioral`, and `model_selection: behavioral` — behavioral rather than enforced
+because the harness returns no per-agent attestation that the requested effort or
+model was the one used. Declaring either `unavailable` is a dispatch defect, not
+a host limit: both are pinnable here, so the baseline does not excuse them.
+
+`fresh_context` is `enforced` when each bundle gets its own agent with an
+independent context and no visibility into the others, and `parallel_dispatch` is
+`enforced` when a batch is dispatched concurrently. `read_only` stays
+`behavioral` at best: every available agent type retains a shell, so no dispatch
+makes a reviewer mechanically unable to write, and the control plane must not
+install an agent definition to change that. Declare it `behavioral` with the
+tool-set evidence, never `enforced`.
+
+Set `ADVERSARIAL_REVIEW_HOST=claude-code` so the run is judged against the
+`claude-code` ceiling. Without it the host is unknown, no allowance applies, and
+a correctly dispatched run still reports `DEGRADED CAPABILITIES` for `read_only`.
+
 ## Cursor Adapter
 
 Direct Cursor requires print mode, ask/read-only mode, enabled sandbox, explicit
