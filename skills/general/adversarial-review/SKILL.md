@@ -46,6 +46,8 @@ mode/output values are rejected regardless of argument order.
 - The parent alone applies `FIXED|REJECTED` actions. Reviewers never edit. Limit
   parent edits to reviewed files; preserve rejection.
 - Running the control plane does not install or change global skill links, agent definitions, or user configuration.
+- Every reported verdict comes from `report`. Never hand-write a verdict, a findings table, or a
+  capability disclosure the control plane did not emit.
 
 ## Run
 
@@ -58,6 +60,10 @@ mode/output values are rejected regardless of argument order.
 3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
    `PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding.
 4. Use `status --run-dir RUN_DIR --json` to resume. Return generated output.
+5. Emit the verdict with `report --run-dir RUN_DIR`, adding `--report PATH` to write the file.
+   The report is the run's output, never prose you compose: `run_not_terminal` means the run
+   still owes the work named in its details, so finish the state machine instead of writing
+   a verdict by hand. Report a run you could not finish as unfinished.
 
 ## Filesystem Backends
 

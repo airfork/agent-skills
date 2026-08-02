@@ -25,6 +25,7 @@ commands.
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review ingest --run-dir RUN --task ID --result RESULT.json --capabilities CAPABILITIES.json` | Validate and ingest one generic reviewer result. | Advances only the named task in durable run state. |
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review continue --run-dir RUN` | Advance the validated state machine or render a terminal report. | Updates durable run state and configured report output. |
 | `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review status --run-dir RUN --json` | Print deterministic resumable run status. | Read-only. |
+| `/absolute/path/to/installed/adversarial-review/scripts/adversarial-review report --run-dir RUN` | Render the terminal verdict and report for a finished run; refuse an unfinished one. | Read-only unless `--report PATH` is passed. |
 
 There is no repository-wide application server, build system, or linter to wrap. Skill-specific checks belong with the skill or its contract test.
 

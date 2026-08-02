@@ -48,6 +48,7 @@ module AdversarialReview
                 when "continue" then continue_run(argv, env: env, program_path: program_path)
                 when "ingest" then ingest(argv)
                 when "status" then status(argv)
+                when "report" then report(argv, program_path: program_path)
                 else
                   raise Error.new("invocation_error", "unknown subcommand: #{command}", 2)
                 end
@@ -98,6 +99,7 @@ module AdversarialReview
           continue   advance one validated state-machine stage
           ingest     validate and ingest one task result
           status     print deterministic JSON run status
+          report     render the terminal verdict and report for a finished run
 
         Run `#{name} SUBCOMMAND --help` for exact options.
       TEXT
@@ -405,6 +407,67 @@ module AdversarialReview
       parse!(parser, argv)
       require_option!(options, :run_dir)
       response(State.load(options.fetch(:run_dir)))
+    end
+
+    TERMINAL_STAGES = %w[complete did-not-converge].freeze
+
+    # Renders the authoritative verdict for a finished run. A report exists only
+    # once the state machine reaches a terminal stage, so an unfinished run is
+    # refused by naming its outstanding work rather than rendering a partial
+    # result a caller could mistake for a completed review. Rendering never
+    # mutates a run that already carries its immutable summary, and writes a
+    # file only when `--report` asks for one.
+    def report(argv, program_path:)
+      options = {}
+      parser = OptionParser.new do |opts|
+        opts.banner = "Usage: adversarial-review report --run-dir PATH [--report PATH]"
+        opts.on("--run-dir PATH") { |value| options[:run_dir] = value }
+        opts.on("--report PATH") { |value| options[:report] = value }
+        opts.on("-h", "--help") { raise Error.new("help", opts.to_s, 0) }
+      end
+      parse!(parser, argv)
+      require_option!(options, :run_dir)
+      state = State.load(options.fetch(:run_dir))
+      snapshot = state.to_h
+      result = response(state)
+      unless TERMINAL_STAGES.include?(snapshot.fetch("stage"))
+        raise Error.new(
+          "run_not_terminal", "run has not reached a terminal stage, so it has no report",
+          3, unfinished_report_details(snapshot, result)
+        )
+      end
+
+      manifest = state.manifest_snapshot
+      existing_summary = snapshot.fetch("summary")
+      summary = existing_summary || Reporting.summary(
+        report_source(state, manifest, snapshot, program_path)
+      )
+      unless existing_summary
+        state.persist_summary!(summary)
+        summary = state.to_h.fetch("summary")
+      end
+      result["verdict"] = summary.fetch("verdict")
+      result["summary"] = Reporting.chat_payload(summary)
+      if options[:report]
+        result["report_path"] = append_terminal_report(
+          report_path_for(manifest, options.fetch(:report), run_dir: options.fetch(:run_dir)),
+          summary
+        )
+      end
+      result
+    end
+
+    # Names what the run still owes so the caller resumes the state machine
+    # instead of writing a verdict by hand.
+    def unfinished_report_details(snapshot, result)
+      {
+        "stage" => snapshot.fetch("stage"),
+        "next_action" => result.fetch("next_action"),
+        "pending_tasks" => result.fetch("pending_tasks").length,
+        "pending_author_actions" => pending_author_actions?(snapshot),
+        "remediation" => "ingest every dispatched task result, then run `continue` " \
+                         "until the run reaches complete or did-not-converge"
+      }
     end
 
     def parse!(parser, argv)

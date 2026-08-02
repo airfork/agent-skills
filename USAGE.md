@@ -153,6 +153,10 @@ the result to Generic bundles. No post-content failure changes vendor.
 4. Repeat `continue` through per-ID resolution and the round-two fresh sweep.
    The two-round cap ends as passed or `DID NOT CONVERGE`.
 5. Inspect resumable state with `status --run-dir RUN --json`.
+6. Render the finished run's verdict with `report --run-dir RUN`, adding
+   `--report PATH` to write the file. The report is the run's own output: an
+   unfinished run is refused as `run_not_terminal` and names what it still owes,
+   so never hand-write a verdict the control plane did not emit.
 
 Reports contain immutable candidate/finding IDs, `PROMOTE|REFUTE|UNPROVEN`
 dispositions, source angles, current target digests, complete capability and

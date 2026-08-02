@@ -27,6 +27,7 @@ class AdversarialReviewCliTest < Minitest::Test
     assert_includes stdout, "continue"
     assert_includes stdout, "ingest"
     assert_includes stdout, "status"
+    assert_includes stdout, "report"
 
     stdout, stderr, status = Open3.capture3(CLI, "unknown")
     assert_equal 2, status.exitstatus
@@ -1732,6 +1733,76 @@ class AdversarialReviewCliTest < Minitest::Test
     end
   end
 
+  def test_report_refuses_a_nonterminal_run_and_names_the_outstanding_work
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "unfinished-run")
+      _stdout, stderr, status = run_public_cli(
+        "start", "--repository", repository, "--spec", "docs/spec.md",
+        "--tier", "default", "--mode", "revise", "--output", "both",
+        "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+        "--run-dir", run_dir
+      )
+      assert status.success?, stderr
+
+      stdout, stderr, status = run_public_cli("report", "--run-dir", run_dir)
+      assert_equal 3, status.exitstatus
+      assert_empty stdout
+      error = JSON.parse(stderr)
+      assert_equal "run_not_terminal", error.fetch("code")
+      details = error.fetch("details")
+      assert_equal "attacking", details.fetch("stage")
+      assert_equal "awaiting-results", details.fetch("next_action")
+      assert_operator details.fetch("pending_tasks"), :>, 0
+      refute_empty details.fetch("remediation")
+      refute File.exist?(File.join(repository, "docs", "spec-review.md"))
+    end
+  end
+
+  def test_report_renders_the_terminal_summary_without_mutating_the_run
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "render-run")
+      capability_path = File.join(repository, ".git", "render-capabilities.json")
+      completed = complete_zero_finding_critique_run(repository, run_dir, capability_path)
+
+      state_path = File.join(run_dir, "state.json")
+      before = Digest::SHA256.hexdigest(File.binread(state_path))
+
+      stdout, stderr, status = run_public_cli("report", "--run-dir", run_dir)
+      assert status.success?, stderr
+      assert_empty stderr
+      rendered = JSON.parse(stdout)
+
+      assert_equal completed.fetch("run_id"), rendered.fetch("run_id")
+      assert_equal "complete", rendered.fetch("stage")
+      assert_equal completed.dig("summary", "verdict"), rendered.fetch("verdict")
+      assert_equal completed.dig("summary", "verdict"), rendered.dig("summary", "verdict")
+      assert_includes rendered.dig("summary", "markdown"), completed.fetch("run_id")
+      assert_equal before, Digest::SHA256.hexdigest(File.binread(state_path))
+      refute File.exist?(File.join(repository, "docs", "spec-review.md"))
+    end
+  end
+
+  def test_report_writes_a_file_for_a_chat_only_run_and_stays_idempotent
+    with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
+      run_dir = File.join(repository, ".git", "write-run")
+      capability_path = File.join(repository, ".git", "write-capabilities.json")
+      completed = complete_zero_finding_critique_run(repository, run_dir, capability_path)
+      report = File.join(repository, "review.md")
+
+      stdout, stderr, status = run_public_cli("report", "--run-dir", run_dir, "--report", report)
+      assert status.success?, stderr
+      assert_equal report, JSON.parse(stdout).fetch("report_path")
+      assert File.file?(report)
+      first = File.binread(report)
+      assert_includes first, completed.fetch("run_id")
+
+      stdout, stderr, status = run_public_cli("report", "--run-dir", run_dir, "--report", report)
+      assert status.success?, stderr
+      assert_equal report, JSON.parse(stdout).fetch("report_path")
+      assert_equal first, File.binread(report)
+    end
+  end
+
   def test_public_cli_report_only_lifecycle_completes_with_findings_without_author_actions
     contents = "# Product spec\n\nTODO: rollback ownership is unspecified.\n"
     with_repository(files: {"docs/spec.md" => contents}) do |repository|
@@ -3382,6 +3453,29 @@ class AdversarialReviewCliTest < Minitest::Test
       })
     RUBY
     write_fake_executable(directory, name: "codex-invalid-role", body: body)
+  end
+
+  # Drives a generic critique run with no findings from start to `complete`.
+  # Zero findings keeps the lifecycle to attack, dedupe, and cull, which is the
+  # shortest path to a terminal run the report command can render.
+  def complete_zero_finding_critique_run(repository, run_dir, capability_path, output: "chat")
+    File.write(capability_path, "{}\n")
+    stdout, stderr, status = run_public_cli(
+      "start", "--repository", repository, "--spec", "docs/spec.md",
+      "--mode", "critique", "--output", output,
+      "--executor", "generic", "--model", "inherit", "--effort", "inherit",
+      "--run-dir", run_dir
+    )
+    assert status.success?, stderr
+    assert_equal "attacking", JSON.parse(stdout).fetch("stage")
+
+    %w[deduplicating culling complete].each do |expected_stage|
+      ingest_pending_tasks(run_dir, capability_path) { |task| empty_result_for(task) }
+      stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
+      assert status.success?, stderr
+      assert_equal expected_stage, JSON.parse(stdout).fetch("stage")
+    end
+    JSON.parse(stdout)
   end
 
   def ingest_pending_tasks(run_dir, capability_path)
