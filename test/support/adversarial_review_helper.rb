@@ -75,9 +75,11 @@ module AdversarialReviewHelper
         File.chmod(0o700, probe)
         # [path, path] forces a direct exec: a single string would be handed to
         # a shell, which can succeed on hosts that cannot exec the file itself.
+        # The exit status matters too -- a host can spawn something and still
+        # fail to honor the shebang.
         pid = Process.spawn([probe, probe], out: File::NULL, err: File::NULL)
-        Process.wait(pid)
-        true
+        _, status = Process.wait2(pid)
+        status.success?
       end
     rescue StandardError
       false

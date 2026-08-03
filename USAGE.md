@@ -89,9 +89,21 @@ REVIEW_REPO="/absolute/path/to/reviewed/repository"
 ```
 
 Resolve `AR_SKILL_DIR` from the skill loaded by the host, not from the reviewed
-checkout. Ruby 2.6 or newer on a POSIX host exposing `openat`, `linkat`,
-`renameat`, and `unlinkat` is required; use the manual fallback on unsupported
-hosts. Run any subcommand with `--help` for parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
+checkout. Ruby 2.6 or newer is required. A POSIX host exposing `openat`,
+`linkat`, `renameat`, and `unlinkat` gets the hardened filesystem backend; every
+other host, including native Windows, runs the portable backend, which keeps the
+full workflow and discloses the guarantees it cannot enforce. Use the manual
+fallback only when Ruby itself is unavailable.
+
+On Windows, invoke the executable through the interpreter — it is an
+extensionless `#!/usr/bin/env ruby` script, which Windows cannot execute
+directly:
+
+```text
+ruby "<AR_SKILL_DIR>/scripts/adversarial-review" start --repository "<REVIEW_REPO>" ...
+```
+
+Run any subcommand with `--help` for parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
 `--tier ultra`, `--report-only` to `--mode critique --output both`, and
 `--chat-only` to `--output chat`.
 

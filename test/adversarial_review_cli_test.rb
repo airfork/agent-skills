@@ -3,6 +3,7 @@ require "minitest/mock"
 require "json"
 require "stringio"
 require "open3"
+require "rbconfig"
 
 SKILL = File.expand_path("../skills/general/adversarial-review", __dir__) unless defined?(SKILL)
 $LOAD_PATH.unshift(File.join(SKILL, "scripts", "lib"))
@@ -20,7 +21,7 @@ class AdversarialReviewCliTest < Minitest::Test
   BASH = File.executable?("/bin/bash") ? "/bin/bash" : "bash"
 
   def test_public_cli_help_and_unknown_subcommand_have_stable_output
-    stdout, stderr, status = Open3.capture3(CLI, "--help")
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, CLI, "--help")
     assert status.success?, stderr
     assert_empty stderr
     assert_includes stdout, "start"
@@ -29,7 +30,7 @@ class AdversarialReviewCliTest < Minitest::Test
     assert_includes stdout, "status"
     assert_includes stdout, "report"
 
-    stdout, stderr, status = Open3.capture3(CLI, "unknown")
+    stdout, stderr, status = Open3.capture3(RbConfig.ruby, CLI, "unknown")
     assert_equal 2, status.exitstatus
     assert_empty stdout
     error = JSON.parse(stderr)
@@ -40,7 +41,7 @@ class AdversarialReviewCliTest < Minitest::Test
   def test_verification_accepts_a_valid_copied_package
     with_copied_adversarial_review_package do |package_root|
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       assert status.success?, stdout + stderr
@@ -58,7 +59,7 @@ class AdversarialReviewCliTest < Minitest::Test
       File.write(bad_ruby, "def broken(\n")
 
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       refute status.success?
@@ -75,7 +76,7 @@ class AdversarialReviewCliTest < Minitest::Test
       File.write(bad_schema, "{\"type\":")
 
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       refute status.success?
@@ -93,7 +94,7 @@ class AdversarialReviewCliTest < Minitest::Test
         File.symlink(outside, scripts)
 
         stdout, stderr, status = Open3.capture3(
-          PACKAGE_VERIFIER, "--root", package_root
+          BASH, PACKAGE_VERIFIER, "--root", package_root
         )
 
         refute status.success?
@@ -112,7 +113,7 @@ class AdversarialReviewCliTest < Minitest::Test
         File.symlink(outside, library)
 
         stdout, stderr, status = Open3.capture3(
-          PACKAGE_VERIFIER, "--root", package_root
+          BASH, PACKAGE_VERIFIER, "--root", package_root
         )
 
         refute status.success?
@@ -130,7 +131,7 @@ class AdversarialReviewCliTest < Minitest::Test
       FileUtils.rm(entrypoint)
 
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       refute status.success?
@@ -147,7 +148,7 @@ class AdversarialReviewCliTest < Minitest::Test
       FileUtils.rm(entrypoint)
 
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       refute status.success?
@@ -164,7 +165,7 @@ class AdversarialReviewCliTest < Minitest::Test
       FileUtils.rm(schema)
 
       stdout, stderr, status = Open3.capture3(
-        PACKAGE_VERIFIER, "--root", package_root
+        BASH, PACKAGE_VERIFIER, "--root", package_root
       )
 
       refute status.success?
@@ -3433,7 +3434,7 @@ class AdversarialReviewCliTest < Minitest::Test
     # Clear the ambient host first: an operator who exports
     # ADVERSARIAL_REVIEW_HOST would otherwise change which capability ceiling
     # these runs are judged against. Explicit env still wins.
-    Open3.capture3({"ADVERSARIAL_REVIEW_HOST" => nil}.merge(env), CLI, *arguments)
+    Open3.capture3({"ADVERSARIAL_REVIEW_HOST" => nil}.merge(env), RbConfig.ruby, CLI, *arguments)
   end
 
   def empty_result_for(task)

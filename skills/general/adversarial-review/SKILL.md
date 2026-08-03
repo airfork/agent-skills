@@ -25,6 +25,14 @@ REVIEW_REPO="/absolute/path/to/reviewed/repository"
   --model MODEL --effort EFFORT
 ```
 
+The executable is a `#!/usr/bin/env ruby` script with no file extension, which
+Windows cannot execute directly. Invoke it through the interpreter there, with
+the same arguments:
+
+```text
+ruby "<AR_SKILL_DIR>/scripts/adversarial-review" start --repository "<REVIEW_REPO>" ...
+```
+
 Map host invocations: `--high` maps to `--tier high`; `--ultra` maps to `--tier ultra`; `--report-only` maps to `--mode critique --output both`;
 `--chat-only` maps to `--output chat`. Choices are
 `--executor auto|codex|claude|cursor|gemini|generic` and

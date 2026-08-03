@@ -224,6 +224,11 @@ symlink-swap or crash-window protections the portable backend cannot provide.
 Both backends write the same on-disk format, so a run started on one host can be
 resumed on the other: a Windows-started run resumes on Linux and the reverse.
 
+`scripts/adversarial-review` is an extensionless `#!/usr/bin/env ruby` script.
+Windows cannot execute one directly, so invoke it as
+`ruby <skill>/scripts/adversarial-review ...` there. Same arguments, same
+behavior; only the spawn form differs.
+
 `ADVERSARIAL_REVIEW_FS_BACKEND=portable` forces the weaker backend so a POSIX
 host can exercise it. Only the weaker direction can be forced, and forcing it is
 recorded in provenance.
