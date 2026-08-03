@@ -468,12 +468,35 @@ module AdversarialReview
       file.close if defined?(file) && file && !file.closed?
     end
 
+    # POSIX lets a rename or unlink proceed while other handles are open on the
+    # target; Windows denies it, including for the transient handles antivirus
+    # and search indexers take. That denial is momentary, so retry briefly and
+    # then surface the original error. Only the portable path needs this: the
+    # POSIX backend never hits the condition.
+    SHARING_RETRY_ATTEMPTS = 25
+    SHARING_RETRY_INTERVAL = 0.01
+
+    def with_sharing_retry
+      attempts = 0
+      begin
+        yield
+      rescue Errno::EACCES, Errno::EPERM
+        attempts += 1
+        raise if attempts >= SHARING_RETRY_ATTEMPTS
+
+        sleep SHARING_RETRY_INTERVAL
+        retry
+      end
+    end
+
     def rename_relative(directory, source, destination)
       validate_relative_name!(source)
       validate_relative_name!(destination)
       unless posix_backend?
         # File.rename replaces an existing destination on both POSIX and Win32.
-        File.rename(File.join(directory.path, source), File.join(directory.path, destination))
+        with_sharing_retry do
+          File.rename(File.join(directory.path, source), File.join(directory.path, destination))
+        end
         return true
       end
 
@@ -502,7 +525,9 @@ module AdversarialReview
       unless posix_backend?
         path = File.join(directory.path, name)
         begin
-          flags == AT_REMOVEDIR ? Dir.rmdir(path) : File.unlink(path)
+          with_sharing_retry do
+            flags == AT_REMOVEDIR ? Dir.rmdir(path) : File.unlink(path)
+          end
         rescue Errno::ENOENT
           nil
         end
