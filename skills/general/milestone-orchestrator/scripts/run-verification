@@ -16,6 +16,14 @@
 #
 # Exit codes: 0 command passed, 1 command failed or timed out, 2 usage error,
 #             3 unregistered command or unparseable PLAN, 4 sha mismatch.
+
+# Probed once: a host either supports POSIX process groups or it does not.
+PROCESS_GROUPS = begin
+  Process.getpgid(Process.pid)
+  true
+rescue StandardError, NotImplementedError
+  false
+end
 require "json"
 require "fileutils"
 
@@ -105,8 +113,12 @@ File.open(log_path, "w") do |log|
   log.puts "# run-verification #{command_id} @ #{sha || "no-sha"} (#{stamp})"
   log.puts "# argv: #{argv.inspect}  cwd: #{cwd}  timeout: #{timeout_seconds}s"
   log.flush
-  pid = Process.spawn(*argv, chdir: File.expand_path(cwd, repo),
-                      out: log.fileno, err: log.fileno, pgroup: true)
+  # Process groups let a timeout kill the command tree. Hosts without them
+  # reject the option outright, so probe rather than assume; there the timeout
+  # can only signal the direct child.
+  spawn_options = {chdir: File.expand_path(cwd, repo), out: log.fileno, err: log.fileno}
+  spawn_options[:pgroup] = true if PROCESS_GROUPS
+  pid = Process.spawn(*argv, **spawn_options)
   deadline = Time.now + timeout_seconds
   status = nil
   loop do
@@ -117,11 +129,13 @@ File.open(log_path, "w") do |log|
       # Prefer killing the whole process group; macOS can raise EPERM on
       # group signals in some states, so fall back to the direct pid.
       kill_tree = lambda do |sig|
+        raise Errno::EPERM unless PROCESS_GROUPS
+
         Process.kill("-#{sig}", pid)
-      rescue Errno::ESRCH, Errno::EPERM
+      rescue Errno::ESRCH, Errno::EPERM, Errno::EINVAL, NotImplementedError
         begin
           Process.kill(sig, pid)
-        rescue Errno::ESRCH, Errno::EPERM
+        rescue Errno::ESRCH, Errno::EPERM, Errno::EINVAL, NotImplementedError
           nil
         end
       end

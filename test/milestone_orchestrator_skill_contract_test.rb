@@ -34,8 +34,25 @@ class MilestoneOrchestratorSkillContractTest < Minitest::Test
   end
 
   def test_validate_state_is_executable
+    # The executable bit is a POSIX concept. Hosts that instead key execution off
+    # a filename suffix report every extensionless script as non-executable, so
+    # there is nothing here to assert.
+    skip "host does not carry a POSIX executable bit" unless posix_executable_bit?
+
     assert File.executable?(File.join(SKILL_DIR, "scripts", "validate-state"))
     assert File.executable?(File.join(SKILL_DIR, "scripts", "control-state"))
+  end
+
+  def posix_executable_bit?
+    require "tmpdir"
+    Dir.mktmpdir("executable-probe") do |directory|
+      probe = File.join(directory, "probe")
+      File.write(probe, "")
+      File.chmod(0o700, probe)
+      File.executable?(probe)
+    end
+  rescue StandardError
+    false
   end
 
   def test_frontmatter_name_and_trigger
