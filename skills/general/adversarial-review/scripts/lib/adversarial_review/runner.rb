@@ -74,7 +74,7 @@ module AdversarialReview
       end
       before = File.lstat(executable.path)
       unless executable_metadata_matches?(before, executable) && before.file? &&
-             !before.symlink? && (before.mode & 0o111).positive?
+             !before.symlink? && executable_mode?(before, executable.path)
         raise SecurityError.new("executable_changed", "selected executable changed after capability probing")
       end
 
@@ -84,7 +84,7 @@ module AdversarialReview
       File.open(executable.path, flags) do |file|
         opened = file.stat
         unless executable_metadata_matches?(opened, executable) && opened.file? &&
-               (opened.mode & 0o111).positive?
+               executable_mode?(opened, executable.path)
           raise SecurityError.new(
             "executable_changed", "selected executable identity changed before hashing"
           )
@@ -336,7 +336,7 @@ module AdversarialReview
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
       File.open(path, flags) do |file|
         opened = file.stat
-        unless opened.file? && (opened.mode & 0o111).positive? &&
+        unless opened.file? && executable_mode?(opened, path) &&
                Atomic.same_identity?(before, opened)
           raise SecurityError.new("executable_changed", "selected executable identity changed while reading")
         end
@@ -358,6 +358,16 @@ module AdversarialReview
     # Drops the inode comparison where a path stat and a handle stat disagree on
     # this host; size, mtime, and mode still have to match. Atomic.guarantees
     # reports `inode_identity` false so the weaker pin is declared, not implied.
+    # POSIX marks executability with a mode bit; hosts without those bits key
+    # it off the filename suffix instead, where File.executable? is the
+    # authority. The raw bit test rejects every script on such a host.
+    def executable_mode?(stat, path)
+      return (stat.mode & 0o111).positive? if Atomic::POSIX_PERMISSIONS
+
+      File.executable?(path)
+    end
+    private_class_method :executable_mode?
+
     def executable_metadata_matches?(stat, executable)
       identity = if Atomic::INODE_IDENTITY
                    stat.dev == executable.device && stat.ino == executable.inode

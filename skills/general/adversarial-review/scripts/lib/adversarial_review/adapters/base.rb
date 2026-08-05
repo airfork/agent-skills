@@ -968,8 +968,11 @@ module AdversarialReview
           raise ArgumentError, "isolated #{label} must be an absolute path"
         end
         expected = File.lstat(path)
+        # 0700 is inexpressible on hosts without POSIX permission bits, where
+        # Atomic.guarantees already reports posix_permissions false.
+        private_mode = !Atomic::POSIX_PERMISSIONS || (expected.mode & 0o777) == 0o700
         unless expected.directory? && !expected.symlink? && expected.uid == Process.euid &&
-               (expected.mode & 0o777) == 0o700
+               private_mode
           raise ArgumentError, "isolated #{label} must be a private owned directory"
         end
         canonical = File.realpath(path)
@@ -977,8 +980,9 @@ module AdversarialReview
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         File.open(canonical, flags) do |directory|
           opened = directory.stat
-          unless opened.directory? && opened.dev == expected.dev && opened.ino == expected.ino &&
-                 opened.uid == Process.euid && (opened.mode & 0o777) == 0o700
+          unless opened.directory? && Atomic.same_identity?(expected, opened) &&
+                 opened.uid == Process.euid &&
+                 (!Atomic::POSIX_PERMISSIONS || (opened.mode & 0o777) == 0o700)
             raise ArgumentError, "isolated #{label} identity or permissions changed"
           end
         end
