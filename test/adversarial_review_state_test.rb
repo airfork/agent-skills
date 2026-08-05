@@ -1089,6 +1089,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_creates_a_prepared_state
+    skip_without_posix_permissions
     Dir.mktmpdir("adversarial-review-state") do |directory|
       run_dir = File.join(directory, "run")
 
@@ -1226,6 +1227,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_bootstrap_rollback_does_not_delete_a_substituted_run_directory
+    skip_without_inode_identity
     Dir.mktmpdir("adversarial-review-state") do |directory|
       run_dir = File.join(directory, "run")
       moved_run_dir = File.join(directory, "run-created-and-moved")
@@ -1307,6 +1309,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_create_task_bundle_yields_frozen_snapshots_and_writes_under_the_state_lock
+    skip_without_posix_permissions
     with_state do |state, run_dir|
       state_before = File.binread(File.join(run_dir, "state.json"))
       lock_was_held = nil
@@ -1397,6 +1400,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_create_task_bundle_rejects_a_substituted_run_directory_identity
+    skip_without_inode_identity
     Dir.mktmpdir("adversarial-review-state-task-substitution") do |directory|
       run_dir = File.join(directory, "run")
       moved_run_dir = File.join(directory, "authenticated-run")
@@ -1415,6 +1419,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_create_task_bundle_rejects_a_substituted_tasks_directory_identity
+    skip_without_inode_identity
     with_state do |state, run_dir|
       tasks_dir = File.join(run_dir, "tasks")
       moved_tasks_dir = File.join(run_dir, "authenticated-tasks")
@@ -1920,6 +1925,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_atomic_lock_rejects_replacement_while_original_inode_is_locked
+    skip_without_inode_identity
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
       anchor_path = File.join(run_dir, ".state.lock.anchor")
@@ -2014,6 +2020,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_a_replaced_lock_anchor
+    skip_without_inode_identity
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
       anchor_path = File.join(run_dir, ".state.lock.anchor")
@@ -2030,7 +2037,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_load_rejects_a_lock_with_nonprivate_mode
-    skip_without_posix_backend("posix_permissions")
+    skip_without_posix_permissions
     with_state do |_state, run_dir|
       lock_path = File.join(run_dir, ".state.lock")
       anchor_path = File.join(run_dir, ".state.lock.anchor")
@@ -2152,6 +2159,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_atomic_read_rejects_parent_swap_before_returning_parsed_json
+    skip_without_inode_identity
     Dir.mktmpdir("adversarial-review-atomic") do |directory|
       parent = File.join(directory, "parent")
       moved_parent = File.join(directory, "parent-moved")

@@ -245,7 +245,10 @@ module AdversarialReview
         existing = read_report(directory, name)
         run_id = value.fetch("run_id")
         marker = "<!-- adversarial-review-run:#{run_id}:v1 -->"
-        duplicate_marker = /^<!-- (?:\/)?adversarial-review-run:#{Regexp.escape(run_id)}(?::v1)? -->$/
+        # \r? because an existing report may carry CRLF line endings: a marker
+        # the duplicate check fails to see would let the same run be appended
+        # twice.
+        duplicate_marker = /^<!-- (?:\/)?adversarial-review-run:#{Regexp.escape(run_id)}(?::v1)? -->\r?$/
         if existing.match?(duplicate_marker)
           invalid!(
             "duplicate_run", "report already contains this adversarial review run",

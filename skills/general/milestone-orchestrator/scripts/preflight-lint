@@ -146,7 +146,16 @@ if plan
   commands = plan["verification_commands"] || {}
 
   # Executables must resolve from a fresh checkout: repo-relative or on PATH.
+  # Windows carries the executable suffix in PATHEXT rather than a mode bit, so
+  # a bare "ruby" only resolves once those suffixes are tried too.
   path_dirs = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR)
+  path_exts = ENV.fetch("PATHEXT", "").split(File::PATH_SEPARATOR)
+  exe_candidates = lambda do |name|
+    return [name] if path_exts.empty?
+
+    [name] + path_exts.map { |extension| "#{name}#{extension}" }
+  end
+  separators = [File::SEPARATOR, File::ALT_SEPARATOR].compact
   commands.each do |command_id, command|
     next unless command.is_a?(Hash)
     argv = command["argv"]
@@ -154,10 +163,12 @@ if plan
     exe = argv.first
     cwd = File.expand_path(command["cwd"] || ".", repo)
     resolvable =
-      if exe.include?("/")
-        File.executable?(File.expand_path(exe, cwd))
+      if separators.any? { |separator| exe.include?(separator) }
+        exe_candidates.call(File.expand_path(exe, cwd)).any? { |c| File.executable?(c) }
       else
-        path_dirs.any? { |d| File.executable?(File.join(d, exe)) }
+        path_dirs.any? do |d|
+          exe_candidates.call(exe).any? { |c| File.executable?(File.join(d, c)) }
+        end
       end
     unless resolvable
       add.call("ERROR", "missing_executable", "verification_commands.#{command_id}",

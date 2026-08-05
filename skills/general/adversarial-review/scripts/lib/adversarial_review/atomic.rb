@@ -68,6 +68,21 @@ module AdversarialReview
       false
     end
 
+    # Whether the host carries POSIX permission bits, which is a property of the
+    # filesystem rather than of the selected backend: forcing the portable
+    # backend on a POSIX host does not stop chmod from working there.
+    POSIX_PERMISSIONS = begin
+      require "tmpdir"
+      Dir.mktmpdir("permission-probe") do |directory|
+        probe = File.join(directory, "probe")
+        File.write(probe, "")
+        File.chmod(0o600, probe)
+        (File.stat(probe).mode & 0o777) == 0o600
+      end
+    rescue StandardError
+      false
+    end
+
     # Only the weaker backend may be forced, and only for testing the portable
     # path on a POSIX host. Forcing the hardened backend onto a host that cannot
     # support it would fail at the first call anyway.
@@ -93,7 +108,7 @@ module AdversarialReview
         "descriptor_relative_paths" => posix_backend?,
         "directory_locking" => posix_backend?,
         "durable_directory_metadata" => posix_backend?,
-        "posix_permissions" => posix_backend?,
+        "posix_permissions" => POSIX_PERMISSIONS,
         "inode_identity" => INODE_IDENTITY,
         "forced" => ENV["ADVERSARIAL_REVIEW_FS_BACKEND"] == "portable"
       }
@@ -649,9 +664,10 @@ module AdversarialReview
     def reject_lock_handle(file, path)
       stat = file.stat
       # Hosts without POSIX permission bits cannot express 0600, so asserting it
-      # there would reject every lock the backend just created. `guarantees`
-      # reports `posix_permissions` false rather than implying the check ran.
-      return true if stat.file? && (!posix_backend? || (stat.mode & 0o777) == 0o600)
+      # there would reject every lock the backend just created. This is probed
+      # per host, not inferred from the backend: `guarantees` reports
+      # `posix_permissions` false rather than implying the check ran.
+      return true if stat.file? && (!POSIX_PERMISSIONS || (stat.mode & 0o777) == 0o600)
 
       raise_state_error("unsafe_lock", "state lock must be a private regular file", {"path" => path})
     end

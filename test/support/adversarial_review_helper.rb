@@ -15,6 +15,33 @@ module AdversarialReviewHelper
     skip "portable filesystem backend declares #{guarantee} unavailable"
   end
 
+  # POSIX permission bits are a host property, not a backend one: forcing the
+  # portable backend on a POSIX host leaves chmod working, so gating on the
+  # backend would silently drop coverage from that leg.
+  def skip_without_posix_permissions
+    return if AdversarialReview::Atomic::POSIX_PERMISSIONS
+
+    skip "host does not carry POSIX permission bits"
+  end
+
+  # Substitution defenses compare a path stat against a handle stat. Where the
+  # host cannot supply comparable inode numbers that comparison is skipped by
+  # design and reported as `inode_identity` false, so there is no detection to
+  # assert -- the operation still fails closed, just at a later check.
+  def skip_without_inode_identity
+    return if AdversarialReview::Atomic::INODE_IDENTITY
+
+    skip "host cannot supply comparable inode identity"
+  end
+
+  # Killing a whole process tree on timeout needs process groups. Runner reports
+  # the absence and signals only the direct child instead.
+  def skip_without_process_groups
+    return if AdversarialReview::Runner::PROCESS_GROUPS
+
+    skip "host has no process groups"
+  end
+
   # Both backends refuse unsafe paths; the portable backend often refuses them at
   # an earlier, coarser check because it has no descriptor to pin.
   def assert_unsafe_code(expected, actual, portable_alternatives: ["unsafe_path"])
@@ -38,7 +65,10 @@ module AdversarialReviewHelper
       files.each do |path, contents|
         absolute = File.join(repository, path)
         FileUtils.mkdir_p(File.dirname(absolute))
-        File.write(absolute, contents)
+        # binwrite, not write: text mode rewrites \n to \r\n on some hosts, so
+        # the fixture would not contain the bytes the test specified and every
+        # content digest computed from it would differ.
+        File.binwrite(absolute, contents)
       end
 
       if commit

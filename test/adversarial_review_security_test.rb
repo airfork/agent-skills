@@ -311,6 +311,7 @@ class AdversarialReviewSecurityTest < Minitest::Test
   end
 
   def test_timeout_terminates_the_process_group_and_descendant
+    skip_without_process_groups
     Dir.mktmpdir("adversarial-review-process") do |directory|
       child_pid_file = File.join(directory, "child.pid")
       script = <<~'RUBY'
@@ -345,6 +346,7 @@ class AdversarialReviewSecurityTest < Minitest::Test
   end
 
   def test_timeout_kills_resistant_descendant_after_leader_and_readers_exit
+    skip_without_process_groups
     Dir.mktmpdir("adversarial-review-process") do |directory|
       child_pid_file = File.join(directory, "resistant.pid")
       script = <<~'RUBY'
@@ -396,6 +398,7 @@ class AdversarialReviewSecurityTest < Minitest::Test
   end
 
   def test_isolated_directory_and_private_file_modes_and_cleanup
+    skip_without_posix_permissions
     path = nil
     file_path = nil
     AdversarialReview::Runner.with_isolated_directory do |directory|
