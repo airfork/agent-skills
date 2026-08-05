@@ -14,6 +14,15 @@
 #
 # Output: one finding per line (`ERROR code path message` / `WARN ...`).
 # Exit codes: 0 no errors (warnings allowed), 1 errors present, 2 usage.
+
+# Probed once: a host either supports POSIX process groups or it does not.
+# Without them a timed-out predicate can only be signalled directly.
+PROCESS_GROUPS = begin
+  Process.getpgid(Process.pid)
+  true
+rescue StandardError, NotImplementedError
+  false
+end
 require "json"
 require "tempfile"
 
@@ -268,8 +277,10 @@ if plan
 
     out_file = Tempfile.new("preflight-predicate")
     begin
-      pid = Process.spawn(*argv, chdir: File.expand_path(cwd_rel, repo),
-                          out: out_file.fileno, err: File::NULL, pgroup: true)
+      spawn_options = {chdir: File.expand_path(cwd_rel, repo),
+                       out: out_file.fileno, err: File::NULL}
+      spawn_options[:pgroup] = true if PROCESS_GROUPS
+      pid = Process.spawn(*argv, **spawn_options)
       deadline = Time.now + timeout
       status = nil
       timed_out = false
@@ -279,11 +290,13 @@ if plan
         if Time.now > deadline
           timed_out = true
           begin
+            raise Errno::EPERM unless PROCESS_GROUPS
+
             Process.kill("-KILL", pid)
-          rescue Errno::ESRCH, Errno::EPERM
+          rescue Errno::ESRCH, Errno::EPERM, Errno::EINVAL, NotImplementedError
             begin
               Process.kill("KILL", pid)
-            rescue Errno::ESRCH, Errno::EPERM
+            rescue Errno::ESRCH, Errno::EPERM, Errno::EINVAL, NotImplementedError
               nil
             end
           end

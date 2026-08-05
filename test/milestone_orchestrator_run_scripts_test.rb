@@ -12,14 +12,39 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
   RUN_VERIFICATION = File.join(MilestoneOrchestratorStateHelper::SKILL_SCRIPTS, "run-verification")
   PREFLIGHT_LINT = File.join(MilestoneOrchestratorStateHelper::SKILL_SCRIPTS, "preflight-lint")
 
+
+  # A bare "git" is not spawnable on every host, and these fixture calls were
+  # unchecked, so the failure surfaced far away as a missing commit sha.
+  def self.git_executable
+    return @git_executable unless @git_executable.nil?
+
+    extensions = ENV.fetch("PATHEXT", "").split(File::PATH_SEPARATOR)
+    extensions = extensions.empty? ? [""] : extensions + [""]
+    @git_executable = ENV.fetch("PATH", "").split(File::PATH_SEPARATOR).filter_map { |directory|
+      next if directory.empty?
+
+      extensions.filter_map { |extension|
+        candidate = File.join(directory, "git#{extension}")
+        candidate if File.file?(candidate) && File.executable?(candidate)
+      }.first
+    }.first || "git"
+  end
+
+  def git!(*arguments)
+    output, status = Open3.capture2e(self.class.git_executable, "-C", @repo, *arguments)
+    raise "git fixture failed: #{arguments.join(" ")}\n#{output}" unless status.success?
+
+    output
+  end
+
   def setup
     @repo = Dir.mktmpdir
     @milestone_dir = File.join(@repo, "docs", "milestones", "example")
     FileUtils.mkdir_p(@milestone_dir)
-    system("git", "-C", @repo, "init", "-q")
-    system("git", "-C", @repo, "-c", "user.email=t@example.com", "-c", "user.name=T",
-           "commit", "-q", "--allow-empty", "-m", "init")
-    @head = `git -C #{@repo} rev-parse HEAD`.strip
+    git!("init", "-q")
+    git!("-c", "user.email=t@example.com", "-c", "user.name=T",
+         "commit", "-q", "--allow-empty", "-m", "init")
+    @head = git!("rev-parse", "HEAD").strip
   end
 
   def teardown
@@ -340,7 +365,7 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
 
   def test_unowned_contract_file_warns
     File.write(File.join(@repo, "PROJECT_STATUS.md"), "status\n")
-    system("git", "-C", @repo, "add", "PROJECT_STATUS.md")
+    git!("add", "PROJECT_STATUS.md")
     write_spec
     write_plan({"verify-ok" => {"argv" => ["ruby", "-e", "0"], "cwd" => ".", "timeout_seconds" => 60}})
     stdout, _stderr, exit_code = run_script(PREFLIGHT_LINT, @milestone_dir, "--repo", @repo)
