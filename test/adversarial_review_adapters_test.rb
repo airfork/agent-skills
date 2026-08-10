@@ -136,6 +136,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_runner_captures_bounded_output_without_deadlock
+    skip_without_direct_adapter_host
     result = AdversarialReview::Runner.run(
       argv: ruby_script('STDOUT.write("o" * 200_000); STDERR.write("e" * 200_000)'),
       stdin_data: "",
@@ -151,6 +152,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_runner_returns_nonzero_exit_and_monotonic_duration
+    skip_without_direct_adapter_host
     result = AdversarialReview::Runner.run(
       argv: ruby_script('STDERR.write("nope"); exit 23'),
       stdin_data: "",
@@ -260,6 +262,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_base_builds_a_minimal_documented_child_environment
+    skip_without_direct_adapter_host
     klass = Class.new(AdversarialReview::Adapters::Base) do
       def credential_variables
         ["VENDOR_API_KEY"]
@@ -321,6 +324,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_child_environment_rejects_noncanonical_or_insecure_isolated_roots
+    skip_without_direct_adapter_host
     Dir.mktmpdir("adversarial-review-home") do |parent|
       insecure = File.join(parent, "insecure")
       Dir.mkdir(insecure, 0o755)
@@ -1851,6 +1855,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_codex_final_response_rejects_oversize_replacement_and_symlink
+    skip_without_direct_adapter_host
     adapter = AdversarialReview::Adapters::Codex.allocate
     Dir.mktmpdir("adversarial-review-final") do |directory|
       %w[oversize replacement symlink].each do |attack|
@@ -1885,6 +1890,7 @@ class AdversarialReviewAdaptersTest < Minitest::Test
   end
 
   def test_codex_final_response_rejects_in_place_truncation_during_read
+    skip_without_direct_adapter_host
     opened = Queue.new
     resume = Queue.new
     klass = Class.new(AdversarialReview::Adapters::Codex) do

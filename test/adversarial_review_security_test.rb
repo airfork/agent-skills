@@ -385,6 +385,7 @@ class AdversarialReviewSecurityTest < Minitest::Test
   end
 
   def test_output_reader_failure_is_explicit_after_child_cleanup
+    skip_without_direct_adapter_host
     failure = proc { |_pipe, _limit| raise "reader exploded" }
     error = AdversarialReview::Runner.stub(:drain, failure) do
       assert_raises(AdversarialReview::Runner::Error) do

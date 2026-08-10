@@ -93,7 +93,9 @@ class MilestoneOrchestratorRunScriptsTest < Minitest::Test
     assert File.file?(digest["log"])
     assert_includes File.read(digest["log"]), "ok"
     assert digest["tail"].any? { |l| l.include?("ok") }
-    assert_kind_of Float, digest["load_1m"]
+    # load_1m comes from uptime(1), which not every host provides. The digest
+    # reports nil there rather than inventing a number.
+    assert_kind_of Float, digest["load_1m"] unless digest["load_1m"].nil?
   end
 
   def test_failing_command_exits_one_with_fail_digest

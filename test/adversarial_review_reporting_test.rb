@@ -677,6 +677,7 @@ class AdversarialReviewReportingTest < Minitest::Test
   end
 
   def test_append_uses_exact_markers_refuses_duplicate_ids_and_keeps_lock_identity
+    skip_without_posix_permissions
     Dir.mktmpdir("adversarial-review-report") do |directory|
       path = File.join(directory, "review.md")
       summary = AdversarialReview::Reporting.summary(summary_source)

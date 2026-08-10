@@ -42,6 +42,17 @@ module AdversarialReviewHelper
     skip "host has no process groups"
   end
 
+  # The direct adapters -- and Runner, which exists to spawn them -- are
+  # ineligible on hosts that cannot mark a file executable, pin POSIX modes, or
+  # exec a shebang script. Those runs take the generic bundle path instead, so
+  # there is no direct-adapter behavior on such a host to assert.
+  def skip_without_direct_adapter_host
+    return if AdversarialReview::Atomic::POSIX_PERMISSIONS &&
+              AdversarialReviewHelper.shebang_executables_supported?
+
+    skip "host cannot run direct adapters; generic bundles are the path there"
+  end
+
   # Both backends refuse unsafe paths; the portable backend often refuses them at
   # an earlier, coarser check because it has no descriptor to pin.
   def assert_unsafe_code(expected, actual, portable_alternatives: ["unsafe_path"])
