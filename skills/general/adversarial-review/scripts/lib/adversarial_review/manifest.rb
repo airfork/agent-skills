@@ -399,7 +399,10 @@ module AdversarialReview
     def read_target_snapshot(role, path)
       absolute_path, relative_path, expected_stat = canonical_target(role, path)
       before_target_open(role, path, absolute_path)
-      flags = File::RDONLY
+      # BINARY: this content is digested, so it must be the file's real bytes.
+      # Text mode would strip \r on some hosts and record a digest that
+      # matches no actual file.
+      flags = File::RDONLY | Atomic::BINARY_FLAG
       flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
       begin
         File.open(absolute_path, flags) do |file|

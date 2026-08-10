@@ -322,7 +322,10 @@ module AdversarialReview
           raise Error, "current target escapes repository"
         end
         before = File.lstat(absolute)
-        flags = File::RDONLY
+        # BINARY: this content is digested, so it must be the file's real bytes.
+        # Text mode would strip \r on some hosts and record a digest that
+        # matches no actual file.
+        flags = File::RDONLY | Atomic::BINARY_FLAG
         flags |= File::NOFOLLOW if File.const_defined?(:NOFOLLOW)
         bytes = File.open(absolute, flags) do |file|
           opened = file.stat

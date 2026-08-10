@@ -22,6 +22,18 @@
 #
 # Exit codes: 0 ok, 1 transition/validation rejection, 2 usage error,
 #             3 lease/fencing failure, 4 remote-expectation mismatch.
+
+# Runs git without a shell. A backtick call needs POSIX redirection to silence
+# stderr, and that redirection is itself POSIX-only, so the whole call fails on
+# hosts without it and returns "" indistinguishably from a real empty result.
+def git_output(*arguments)
+  require "open3"
+  output, status = Open3.capture2e("git", *arguments)
+  status.success? ? output : ""
+rescue StandardError
+  ""
+end
+
 require "json"
 require "time"
 require_relative "lib/state_document"
@@ -62,7 +74,7 @@ end
 
 lease_dir = options["lease-dir"]
 if lease_dir.nil?
-  common_dir = `git -C #{File.dirname(state_path).inspect} rev-parse --git-common-dir 2>/dev/null`.strip
+  common_dir = git_output("-C", File.dirname(state_path), "rev-parse", "--git-common-dir").strip
   lease_dir =
     if common_dir.empty?
       File.join(File.dirname(state_path), ".milestone-orchestrator-lease")

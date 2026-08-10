@@ -18,6 +18,27 @@
 #             3 unregistered command or unparseable PLAN, 4 sha mismatch.
 
 # Probed once: a host either supports POSIX process groups or it does not.
+
+# Runs git without a shell. A backtick call needs POSIX redirection to silence
+# stderr, and that redirection is itself POSIX-only, so the whole call fails on
+# hosts without it and returns "" indistinguishably from a real empty result.
+def git_output(*arguments)
+  require "open3"
+  output, status = Open3.capture2e("git", *arguments)
+  status.success? ? output : ""
+rescue StandardError
+  ""
+end
+
+# Optional diagnostic; absent on hosts without the command.
+def shell_output(command)
+  require "open3"
+  output, status = Open3.capture2e(command)
+  status.success? ? output : ""
+rescue StandardError
+  ""
+end
+
 PROCESS_GROUPS = begin
   Process.getpgid(Process.pid)
   true
@@ -60,7 +81,7 @@ end
 plan_dir = File.expand_path(File.dirname(plan_path))
 repo = options["repo"]
 if repo.nil?
-  toplevel = `git -C #{plan_dir.inspect} rev-parse --show-toplevel 2>/dev/null`.strip
+  toplevel = git_output("-C", plan_dir, "rev-parse", "--show-toplevel").strip
   repo = toplevel.empty? ? plan_dir : toplevel
 end
 repo = File.expand_path(repo)
@@ -94,7 +115,7 @@ if cwd.start_with?("/") || cwd.split("/").include?("..")
 end
 timeout_seconds = Integer(command["timeout_seconds"] || 3600)
 
-sha = `git -C #{repo.inspect} rev-parse HEAD 2>/dev/null`.strip
+sha = git_output("-C", repo, "rev-parse", "HEAD").strip
 sha = nil if sha.empty?
 expected = options["expected-sha"]
 if expected && sha != expected
@@ -154,7 +175,7 @@ duration = (Time.now - started).round(1)
 # Machine load at completion — timing-sensitive gates on shared boxes get
 # discarded to contention; recording load makes that adjudicable from the
 # digest instead of a post-hoc investigation.
-load_1m = `uptime 2>/dev/null`[/load averages?:?\s+([\d.]+)/, 1]&.to_f
+load_1m = shell_output("uptime")[/load averages?:?\s+([\d.]+)/, 1]&.to_f
 
 pass = !timed_out && exit_code == 0
 tail_lines = pass ? PASS_TAIL_LINES : FAIL_TAIL_LINES

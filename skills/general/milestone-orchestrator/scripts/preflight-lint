@@ -17,6 +17,18 @@
 
 # Probed once: a host either supports POSIX process groups or it does not.
 # Without them a timed-out predicate can only be signalled directly.
+
+# Runs git without a shell. A backtick call needs POSIX redirection to silence
+# stderr, and that redirection is itself POSIX-only, so the whole call fails on
+# hosts without it and returns "" indistinguishably from a real empty result.
+def git_output(*arguments)
+  require "open3"
+  output, status = Open3.capture2e("git", *arguments)
+  status.success? ? output : ""
+rescue StandardError
+  ""
+end
+
 PROCESS_GROUPS = begin
   Process.getpgid(Process.pid)
   true
@@ -64,7 +76,7 @@ end
 dir = File.expand_path(dir)
 repo = options["repo"]
 if repo.nil?
-  toplevel = `git -C #{dir.inspect} rev-parse --show-toplevel 2>/dev/null`.strip
+  toplevel = git_output("-C", dir, "rev-parse", "--show-toplevel").strip
   repo = toplevel.empty? ? dir : toplevel
 end
 repo = File.expand_path(repo)
@@ -338,7 +350,7 @@ if plan
   # Repo contract files (status ledgers, changelogs) that no task owns have
   # caused runtime ownership reconciliations in real runs.
   owned = tasks.values.select { |t| t.is_a?(Hash) }.flat_map { |t| t["owned_paths"] || [] }
-  tracked = `git -C #{repo.inspect} ls-files 2>/dev/null`.split("\n")
+  tracked = git_output("-C", repo, "ls-files").split("\n")
   tracked.select { |f| f =~ CONTRACT_FILE_PATTERN }.each do |contract|
     next if owned.any? { |p| p == contract || contract.start_with?("#{p.chomp("/")}/") }
     add.call("WARN", "unowned_contract_file", contract,
