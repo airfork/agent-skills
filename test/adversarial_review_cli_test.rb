@@ -2142,7 +2142,7 @@ class AdversarialReviewCliTest < Minitest::Test
         {"status" => "fixed", "rationale" => "Address round one.",
          "changed_paths" => ["docs/spec.md"]}
       )
-      File.write(File.join(repository, "docs/spec.md"), "# Product spec\nRound one fixed.\n")
+      File.binwrite(File.join(repository, "docs/spec.md"), "# Product spec\nRound one fixed.\n")
       state.refresh_targets_after_actions!
       state.transition_to("resolving")
       state.record_resolution(first_finding_id, "resolved")
@@ -2180,7 +2180,7 @@ class AdversarialReviewCliTest < Minitest::Test
         "continue", "--run-dir", run_dir, "--actions", actions_path
       )
       assert status.success?, stderr
-      File.write(File.join(repository, "docs/spec.md"), "# Product spec\nRound two fixed.\n")
+      File.binwrite(File.join(repository, "docs/spec.md"), "# Product spec\nRound two fixed.\n")
 
       stdout, stderr, status = run_public_cli("continue", "--run-dir", run_dir)
       assert status.success?, stderr
@@ -3341,7 +3341,7 @@ class AdversarialReviewCliTest < Minitest::Test
         {"status" => "fixed", "rationale" => "Added the owner.",
          "changed_paths" => ["docs/spec.md"]}
       )
-      File.write(File.join(repository, "docs/spec.md"), "# Product spec\nOwner: release manager\n")
+      File.binwrite(File.join(repository, "docs/spec.md"), "# Product spec\nOwner: release manager\n")
       state.refresh_targets_after_actions!
       state.transition_to("resolving")
       state.record_resolution(finding_id, "contested")

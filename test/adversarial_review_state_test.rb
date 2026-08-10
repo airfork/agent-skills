@@ -147,7 +147,7 @@ class AdversarialReviewStateTest < Minitest::Test
         finding_id,
         {"status" => "fixed", "rationale" => "Add owner", "changed_paths" => ["docs/spec.md"]}
       )
-      File.write(File.join(repository, "docs/spec.md"), "# Product spec\nOwner: release manager\n")
+      File.binwrite(File.join(repository, "docs/spec.md"), "# Product spec\nOwner: release manager\n")
 
       refreshed = state.refresh_targets_after_actions!
 
