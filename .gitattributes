@@ -1,0 +1,10 @@
+# Check every text file out with LF on every platform.
+#
+# Skills are read, sliced, and digested as bytes: prompt sections are extracted
+# from Markdown by heading, schemas are hashed, and reports are matched against
+# exact markers. A CRLF checkout on Windows changes those bytes, so the same
+# skill would produce different digests and different prompt text depending on
+# the host it was cloned to. Normalizing at checkout keeps one skill one thing.
+#
+# text=auto still lets git detect and leave binaries alone.
+* text=auto eol=lf

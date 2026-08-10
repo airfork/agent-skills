@@ -2595,6 +2595,7 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   def test_generic_adapter_emits_one_private_pending_task_without_launching_a_process
+    skip_without_posix_permissions
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md")
       Dir.mktmpdir("adversarial-review-generic") do |directory|
@@ -2950,6 +2951,7 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   def test_generic_adapter_rejects_a_substituted_run_after_state_authentication
+    skip_without_inode_identity
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md")
       task = AdversarialReview::Prompts.attack_task(manifest, "assumptions-checker", 1)
@@ -3115,6 +3117,7 @@ class AdversarialReviewCliTest < Minitest::Test
   end
 
   def test_generic_transaction_never_reads_forged_run_data_after_lock_authentication
+    skip_without_inode_identity
     with_repository(files: {"docs/spec.md" => "# Product spec\n"}) do |repository|
       manifest = build_manifest(repository, spec: "docs/spec.md")
       forged_manifest = JSON.parse(JSON.generate(manifest))

@@ -207,6 +207,7 @@ class AdversarialReviewStateTest < Minitest::Test
   end
 
   def test_ingest_attack_allocates_ids_and_collapses_exact_duplicates_with_sources
+    skip_without_posix_permissions
     with_ingest_state(stage: "attacking") do |state, run_dir, task|
       duplicate = result_finding("Missing rollback owner")
       payload = attack_payload(task, [duplicate, duplicate.dup, result_finding("Missing timeout")])

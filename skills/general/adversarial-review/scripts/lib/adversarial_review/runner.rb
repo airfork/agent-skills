@@ -344,7 +344,8 @@ module AdversarialReview
       end
       after = File.lstat(path)
       unless Atomic.same_identity?(before, after) && before.size == after.size &&
-             before.mtime == after.mtime && before.mode == after.mode
+             time_nanoseconds(before.mtime) == time_nanoseconds(after.mtime) &&
+             before.mode == after.mode
         raise SecurityError.new("executable_changed", "selected executable changed while reading")
       end
       Executable.new(
@@ -391,7 +392,13 @@ module AdversarialReview
     end
     private_class_method :hash_descriptor
 
+    # Drops to whole seconds where a path stat and a handle stat disagree on
+    # sub-second mtime, which would otherwise make an unchanged executable look
+    # replaced between pinning and verification. Size, mode, and the SHA-256
+    # digest still pin the file.
     def time_nanoseconds(time)
+      return time.to_i * 1_000_000_000 unless Atomic::STABLE_MTIME_NANOSECONDS
+
       time.to_i * 1_000_000_000 + time.nsec
     end
     private_class_method :time_nanoseconds

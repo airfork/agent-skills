@@ -68,6 +68,18 @@ module AdversarialReview
       false
     end
 
+    # Whether a path stat and a handle stat agree on sub-second mtime. Some
+    # hosts round the two routes differently, which would make an unchanged file
+    # look modified between pinning it and re-verifying it. Where this is false,
+    # callers compare whole seconds and lean on size, mode, and digest.
+    STABLE_MTIME_NANOSECONDS = begin
+      by_path = File.stat(__FILE__)
+      by_handle = File.open(__FILE__, File::RDONLY) { |file| file.stat }
+      by_path.mtime.nsec == by_handle.mtime.nsec
+    rescue StandardError
+      false
+    end
+
     # Whether the host carries POSIX permission bits, which is a property of the
     # filesystem rather than of the selected backend: forcing the portable
     # backend on a POSIX host does not stop chmod from working there.

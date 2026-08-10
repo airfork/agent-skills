@@ -2,6 +2,7 @@ require "minitest/autorun"
 require "digest"
 require "json"
 require "open3"
+require "rbconfig"
 require "tmpdir"
 
 $LOAD_PATH.unshift(File.expand_path("../scripts/lib", __dir__))
@@ -146,7 +147,7 @@ class PromptEngineerSandboxTest < Minitest::Test
       Dir.mkdir(result_dir)
 
       stdout, stderr, status = Open3.capture3(
-        CLI, "launch", "--run-dir", root, "--packet", packet_path,
+        RbConfig.ruby, CLI, "launch", "--run-dir", root, "--packet", packet_path,
         "--result-dir", result_dir
       )
 
@@ -160,7 +161,7 @@ class PromptEngineerSandboxTest < Minitest::Test
 
   def test_cli_probe_reports_unsupported_without_running_a_host
     stdout, stderr, status = Open3.capture3(
-      CLI, "probe", "--host", "claude", "--json"
+      RbConfig.ruby, CLI, "probe", "--host", "claude", "--json"
     )
 
     assert_equal 3, status.exitstatus
