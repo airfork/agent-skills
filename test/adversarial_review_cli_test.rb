@@ -2014,7 +2014,7 @@ class AdversarialReviewCliTest < Minitest::Test
       assert_equal "awaiting-author", JSON.parse(stdout).fetch("stage")
       assert_empty pending_task_bundles(run_dir)
 
-      File.write(
+      File.binwrite(
         File.join(repository, "docs/spec.md"),
         "# Product spec\n\nThe incident commander owns rollback execution.\n"
       )
