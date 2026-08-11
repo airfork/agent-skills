@@ -20,7 +20,7 @@ folder.
 
 | Skill | Category | Install | Recommended tier | Use for |
 |-------|----------|---------|------------------|---------|
-| `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini, Copilot | `deep` | Script-backed fresh-context critique and optional revise/reject resolution of repository planning documents. |
+| `adversarial-review` | `general` | Codex, Claude, Cursor, Gemini, Copilot | `standard` | Single-round read-only critique of a spec or plan: four parallel fresh-context attackers, mechanical quote verification, and one rejection-first synthesis pass that ships at most three findings in chat. |
 | `prompt-engineer` | `general` | Candidate: Codex and Claude disabled; Cursor and Gemini disabled | `standard` (heavy `deep`) | Explicit prompt diagnosis and revision after qualification; no ordinary managed install or implicit activation. |
 | `code-review` | `codex-cursor` | Codex, Gemini, Copilot | `deep` | Thorough review of diffs, PRs, staged changes, dirty worktrees, and verified review-finding remediation. |
 | `milestone-orchestrator` | `general` | Codex, Claude | `deep` | Planning and unattended multi-agent implementation of large repository milestones, ending in a reviewed draft PR. |
@@ -66,122 +66,56 @@ operator approval exist.
 
 ## `adversarial-review`
 
-Use `adversarial-review` before implementing non-trivial, high-impact,
-ambiguous, security-sensitive, architecture-shaping, or expensive-to-rework
-plans and specs.
+Use `adversarial-review` before implementing a non-trivial, high-impact,
+ambiguous, security-sensitive, or expensive-to-rework spec or plan.
 
-Inputs must be repository files: a spec, a plan, or both. The portable Ruby
-control plane owns task contracts, validation, state, IDs, and reports; host
-agents execute its read-only task bundles.
+Inputs are repository files: a spec, a plan, or both. The review is read-only
+and returns at most three findings in chat. It never edits the reviewed
+documents and never writes a report file. Zero findings is a valid outcome.
 
 ### Invocation
 
 `$adversarial-review`, `/adversarial-review`, Cursor/Gemini skill activation,
-and equivalent natural language map to the checked-in executable:
+and equivalent natural language all run the same single-round review. Name the
+target paths, or let the skill pick the most recently modified spec or plan and
+say which it chose. There are no tiers, executors, or modes to select.
+
+### Shape
+
+1. Four fresh-context attackers dispatch in one parallel batch at Sonnet
+   medium: `implementer`, `tester`, `pre-mortem`, and `feasibility` when a plan
+   is present. Each returns at most two findings, each carrying a verbatim
+   quote from the file it cites.
+2. `scripts/check-quotes` verifies those quotes mechanically. Any finding whose
+   quote is not byte-present in the file it names is dropped before synthesis.
+3. One synthesis pass at Opus high rejects aggressively -- dropping document
+   hygiene, generic risks, and anything without a concrete failure -- merges
+   duplicates, and ships at most three ranked findings.
+4. The parent reports severity, location, quote, failure, and a suggested
+   resolution for each survivor, plus how many candidates were dropped. Then it
+   stops.
+
+Expect roughly ten minutes end to end.
+
+### Quote verification
 
 ```bash
 AR_SKILL_DIR="/absolute/path/to/installed/adversarial-review"
-REVIEW_REPO="/absolute/path/to/reviewed/repository"
-"$AR_SKILL_DIR/scripts/adversarial-review" start \
-  --repository "$REVIEW_REPO" --spec docs/spec.md --plan docs/plan.md \
-  --tier default --mode revise --output both \
-  --executor auto --model MODEL --effort EFFORT
+"$AR_SKILL_DIR/scripts/check-quotes" --repository "$REVIEW_REPO" CANDIDATES.json
 ```
 
-Resolve `AR_SKILL_DIR` from the skill loaded by the host, not from the reviewed
-checkout. Ruby 2.6 or newer is required. A POSIX host exposing `openat`,
-`linkat`, `renameat`, and `unlinkat` gets the hardened filesystem backend; every
-other host, including native Windows, runs the portable backend, which keeps the
-full workflow and discloses the guarantees it cannot enforce. Use the manual
-fallback only when Ruby itself is unavailable.
+Exit `0` when every quote verifies, `1` when any fails, and `2` on a usage or
+IO error, so a caller can tell "the review found bad quotes" from "the check
+never ran". Add `--json` for machine-readable output, or pass `-` to read
+candidates from stdin. Line endings are normalized; nothing else is, so the
+match stays verbatim.
 
-On Windows, invoke the executable through the interpreter — it is an
-extensionless `#!/usr/bin/env ruby` script, which Windows cannot execute
-directly:
+Without Ruby, verify each quote by reading the cited file and searching for the
+exact string, and say that verification was manual. Without host support for
+parallel dispatch, run the four angles sequentially and say the review took
+longer than it should have. Never skip verification because tooling is missing.
 
-```text
-ruby "<AR_SKILL_DIR>/scripts/adversarial-review" start --repository "<REVIEW_REPO>" ...
-```
-
-Run any subcommand with `--help` for parser-level syntax. Host agents map `--high` to `--tier high`, `--ultra` to
-`--tier ultra`, `--report-only` to `--mode critique --output both`, and
-`--chat-only` to `--output chat`.
-
-### Options
-
-The parser choices are `--executor auto|codex|claude|cursor|gemini|generic` and
-`--output chat|file|both`.
-
-| Option | Values/default | Behavior |
-|--------|----------------|----------|
-| `--spec`, `--plan` | one or both required | Repository-relative review targets. |
-| `--repository` | current directory | Canonical repository root. |
-| `--tier` | `default|high|ultra`; `default` | `high` adds divergence/arbitration; direct `ultra` is Claude-only. Non-Claude auto selection uses generic, never a silent `high` downgrade. |
-| `--mode` | `critique|revise`; `revise` | Critique reports only; revise accepts parent fixes/rejections and verifies resolution. |
-| `--output` | `chat|file|both`; `both` | Select rendered destinations. File output defaults beside the first target as `<stem>-review.md`. |
-| `--executor` | `auto|codex|claude|cursor|gemini|generic`; `auto` | Only qualifying public auto selection may convert an ineligible pre-content adapter result to generic bundles; explicit direct stops. |
-| `--model`, `--effort` | `inherit` | Direct execution requires explicit exact values. Generic mode records requested values and host evidence. |
-| `--jobs` | positive integer; `1` | Direct execution rejects values above 1; generic emits independent bundles for host-native parallelism. |
-| `--context` | repeatable path | Add bounded repository context. |
-| `--run-dir` | generated beneath Git common state | Override durable run state location. |
-| `--report` | generated sibling report | Override the report path outside the run directory and protected inputs. |
-| `--report-only` | alias | Exactly `--mode critique --output both`. |
-| `--chat-only` | alias | Exactly `--output chat`. |
-| `--ultra` | alias | Exactly `--tier ultra`. |
-
-Alias normalization is order-independent. Contradictory explicit values are
-rejected; in particular, `--report-only` never permits `--mode revise` and
-cannot be combined with `--chat-only`.
-
-There is no quick/low tier and no silent model, effort, tier, or vendor
-downgrade. The public CLI declares `parallel_dispatch` unavailable, so its
-required gate makes direct adapter results ineligible before reviewed content. Direct adapter classes
-are fixture-conformant for embedding orchestrators that supply real dispatch
-evidence; the public CLI does not claim direct execution. Generic bundles are
-intended for host-native parallelism.
-
-Only `--executor auto`, at the pre-content boundary with zero prior external
-attempts, converts an ineligible result to emitted Generic bundles. Explicit direct
-selection stops with exit `4` or `5`, stays pinned/resumable, and never converts
-the result to Generic bundles. No post-content failure changes vendor.
-
-### Lifecycle
-
-1. Run `start`; retain `run_dir`. `pending_task_handoffs` is the normative dispatch surface;
-   `pending_tasks` is path inventory for compatibility, not dispatch authority.
-   Read each task's bytes exactly once and verify `task_sha256` before parsing JSON
-   or using task-controlled fields. Then match cwd/schema metadata to the trusted
-   handoff and set the worker cwd. Keep the schema under the installed skill root;
-   read it once, verify `schema_sha256`, and parse/use those same in-memory bytes.
-   Never reopen task/schema paths for dispatch. A task mismatch fails as
-   `task_digest_mismatch`.
-2. For each generic reviewer task, return its closed-schema result and capability
-   declaration with `ingest --run-dir RUN --task ID --result RESULT.json
-   --capabilities CAPABILITIES.json`. Return exactly the assigned
-   `checks_completed`; one missing-check repair is permitted and recorded.
-3. Run `continue --run-dir RUN` until more results or parent actions are needed.
-   Submit parent-only `FIXED|REJECTED` actions with `continue --actions
-   ACTIONS.json`; reviewers never edit targets.
-4. Repeat `continue` through per-ID resolution and the round-two fresh sweep.
-   The two-round cap ends as passed or `DID NOT CONVERGE`.
-5. Inspect resumable state with `status --run-dir RUN --json`.
-6. Render the finished run's verdict with `report --run-dir RUN`, adding
-   `--report PATH` to write the file. The report is the run's own output: an
-   unfinished run is refused as `run_not_terminal` and names what it still owes,
-   so never hand-write a verdict the control plane did not emit.
-
-Reports contain immutable candidate/finding IDs, `PROMOTE|REFUTE|UNPROVEN`
-dispositions, source angles, current target digests, complete capability and
-executor/CLI/model/effort provenance, retries, timing, and usage metrics when
-exposed. `DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a
-required capability is unavailable or a safety boundary is behavioral.
-`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their
-verdict. Retained verdicts disclose degraded capabilities separately.
 Running a review never installs global links or agent configuration.
-
-If Ruby is unavailable, use the bounded manual fallback in the skill: follow
-its attack/judge references and schemas, preserve IDs and parent authority,
-disclose degraded scripting capabilities, and do not invent durable state.
 
 ## `code-review`
 

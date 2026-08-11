@@ -19,7 +19,7 @@ this skill as "proven for large milestones" until layers 1, 3, and 4 have run.
 One bounded real milestone (`level-catalog-expansion` in the private
 `airfork/hallcall` elevator-sim repo) ran the full lifecycle on the native
 Claude adapter: PREPARE (grounding, one decision packet, SPEC/PLAN,
-`adversarial-review` default tier, one approval) then unattended RUN (7 plan
+`adversarial-review` (v1 control plane, since retired), one approval) then unattended RUN (7 plan
 tasks, 4 waves, 6 isolated worker worktrees + 1 integration worktree, serial
 `--no-ff` integration, fresh-context review, independent `./scripts/verify`,
 fenced push with remote-ref expectation checks, one draft PR, mandatory
@@ -205,6 +205,25 @@ scan); integrate-before-branching-dependents with merge-base recorded in
 packets (m81); inherited chained gates proven to run in fresh worktrees;
 lease TTL sized to the run. Residual cost is product content and shared-box
 environment; further audits on demand rather than per-cycle.
+
+## Adversarial-review v2 (2026-08-11)
+
+The `adversarial-review` skill that `adversarial` depth calls was rebuilt, so
+the depth's cost and contract changed under this document's earlier entries.
+Measurement of v1's own run artifacts drove it: a 3h21m run terminating
+`DID NOT CONVERGE`, and 320 of 321 findings across fifteen runs applied with no
+adjudication — the `FIXED|REJECTED` decision the depth relied on was a rubber
+stamp. v2 is one round, read-only, capped at three findings, and takes about ten
+minutes. See `docs/plans/2026-08-11-adversarial-review-v2-design.md`.
+
+Two consequences here. `adversarial` depth no longer has a higher tier to
+escalate to, so the escalate-on-surprise rule in intake.md now terminates at
+`adversarial` rather than at `--high`/`--ultra`. And because v2 never edits the
+reviewed documents, applying a finding is explicitly the coordinator's decision
+— which is what the earlier entries assumed was happening and, per the data, was
+not.
+
+The v1.3 note above stands as written; the pipeline it names is the retired one.
 
 ## Pressure-test protocol (for layer 1)
 

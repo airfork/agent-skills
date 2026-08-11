@@ -51,8 +51,7 @@ skills:
       - copilot
       - cursor
       - gemini
-    recommended_model_tier: deep
-    heavy_model_tier: ultracode
+    recommended_model_tier: standard
     install:
       codex:
         enabled: true
@@ -69,8 +68,8 @@ skills:
       copilot:
         enabled: true
         mode: symlink
-    description: Script-backed portable control plane for deterministic adversarial review of specs and plans, using first-class generic task bundles, immutable IDs, revise/reject resolution, and resumable provenance-rich reports.
-    notes: Place in general because one portable task/result contract supports Codex, Claude Code, Cursor, Gemini, Copilot, and other generic hosts. Managed symlink install is available for Codex, Claude, Cursor, Gemini, and Copilot, but review execution never applies global install changes. The qualifying public auto path emits generic bundles because parallel dispatch is unavailable; explicit direct selection stops when ineligible. Direct adapter components are fixture-conformant for embedding orchestrators that supply real dispatch evidence and pass machine-readable capability attestation. Copilot has no direct adapter and runs the generic bundle path. Codex named-agent TOMLs remain optional separate setup. The control plane requires POSIX descriptor-relative filesystem calls for its hardened backend and falls back to a declared-degraded portable backend elsewhere, including native Windows.
+    description: Single-round read-only critique of a spec or plan. Four fresh-context attackers run in one parallel batch, a deterministic quote check drops unverifiable findings, and one synthesis pass ships at most three. Roughly ten minutes, chat only, never edits the reviewed documents.
+    notes: Place in general because dispatch is delegated to the host, so Codex, Claude Code, Cursor, Gemini, and Copilot all run the same contract without a vendor adapter. v2 replaced v1's scripted control plane after measurement showed 3h21m runs terminating without convergence and 320 of 321 findings applied without adjudication; see docs/plans/2026-08-11-adversarial-review-v2-design.md. The recommended tier is standard because the skill tiers internally - attackers at sonnet/medium, one synthesis pass at opus/high - rather than running every role deep. Only scripts/check-quotes remains scripted, because a model verifying its own quotes is the check that fails. Codex named-agent TOMLs remain optional separate setup.
 
   - name: prompt-engineer
     path: skills/general/prompt-engineer

@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "adversarial-review synthesis result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["candidates_received", "candidates_dropped", "findings"],
+  "properties": {
+    "candidates_received": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "candidates_dropped": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 8
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 3,
+      "description": "Survivors, ranked by the cost of discovering the problem later. An empty array is a valid and good result.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "path",
+          "quote",
+          "failure",
+          "severity",
+          "source_angles",
+          "resolution"
+        ],
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "quote": {"type": "string", "minLength": 1, "maxLength": 2000},
+          "heading": {"type": "string", "maxLength": 1024},
+          "failure": {"type": "string", "minLength": 1, "maxLength": 4000},
+          "severity": {"enum": ["CRITICAL", "HIGH", "MEDIUM"]},
+          "source_angles": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 4,
+            "uniqueItems": true,
+            "items": {
+              "enum": ["implementer", "tester", "feasibility", "pre-mortem"]
+            },
+            "description": "Every angle that independently reached this defect. Convergence is severity evidence, not a reason to ship duplicates."
+          },
+          "resolution": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 2000,
+            "description": "One sentence on what would resolve it. A suggestion for the author, who decides; this skill does not edit documents."
+          }
+        }
+      }
+    }
+  }
+}

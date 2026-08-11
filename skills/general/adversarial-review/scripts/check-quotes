@@ -1,0 +1,144 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# Verifies that every candidate finding's `quote` appears verbatim in the file
+# it cites. A model asked to check its own quotes is precisely the check that
+# fails, so this stays deterministic.
+#
+#   check-quotes --repository REPO CANDIDATES.json
+#   check-quotes --repository REPO -          # read candidates from stdin
+#
+# Exit 0 when every quote verifies, 1 when any fails, 2 on usage or IO error.
+
+require "json"
+require "optparse"
+
+NORMALIZED_NEWLINES = "\r\n"
+
+def die(message)
+  warn("check-quotes: #{message}")
+  exit 2
+end
+
+options = {repository: Dir.pwd, json: false}
+parser = OptionParser.new do |opts|
+  opts.banner = "Usage: check-quotes --repository REPO CANDIDATES.json"
+  opts.on("--repository PATH", "Root the cited paths resolve against") do |value|
+    options[:repository] = value
+  end
+  opts.on("--json", "Emit the verdict as JSON") { options[:json] = true }
+  opts.on("-h", "--help") { puts opts; exit 0 }
+end
+
+begin
+  parser.parse!
+rescue OptionParser::ParseError => error
+  die(error.message)
+end
+
+die("expected exactly one candidates file (or - for stdin)") unless ARGV.length == 1
+
+begin
+  repository = File.realpath(File.expand_path(options.fetch(:repository)))
+rescue SystemCallError => error
+  die("repository is unavailable: #{error.class}")
+end
+die("repository is not a directory") unless File.directory?(repository)
+
+source = ARGV.fetch(0)
+begin
+  raw = source == "-" ? $stdin.read : File.read(source)
+rescue SystemCallError => error
+  die("could not read candidates: #{error.class}")
+end
+
+begin
+  document = JSON.parse(raw)
+rescue JSON::ParserError => error
+  die("candidates are not valid JSON: #{error.message}")
+end
+
+# Accept a single attacker result, an array of them, or a bare findings array.
+results = case document
+          when Array then document
+          when Hash then [document]
+          else die("candidates must be an object or an array")
+          end
+
+candidates = results.flat_map do |result|
+  case result
+  when Hash
+    angle = result["angle"] || "unknown"
+    # Numbered within its own angle, so a label points at the attacker's own
+    # first or second finding rather than at a position in the merged batch.
+    Array(result["findings"]).each_with_index.map do |finding, ordinal|
+      ["#{angle}##{ordinal + 1}", finding]
+    end
+  else
+    die("each candidate result must be an object")
+  end
+end
+
+# Reading each cited file once keeps a large multi-finding batch to one read per
+# file rather than one per finding.
+contents = {}
+verdicts = candidates.map do |label, finding|
+  unless finding.is_a?(Hash)
+    next {label: label, ok: false, reason: "finding is not an object"}
+  end
+
+  path = finding["path"]
+  quote = finding["quote"]
+  unless path.is_a?(String) && !path.empty? && quote.is_a?(String) && !quote.empty?
+    next {label: label, ok: false, reason: "finding is missing path or quote"}
+  end
+
+  resolved = File.expand_path(path, repository)
+  unless resolved == repository || resolved.start_with?(repository + File::SEPARATOR)
+    next {label: label, ok: false, path: path, reason: "cited path escapes the repository"}
+  end
+
+  unless contents.key?(resolved)
+    contents[resolved] = begin
+      File.read(resolved).encode(universal_newline: true)
+    rescue SystemCallError
+      nil
+    end
+  end
+  body = contents.fetch(resolved)
+  if body.nil?
+    next {label: label, ok: false, path: path, reason: "cited file is unreadable"}
+  end
+
+  # Line endings are normalized on both sides so a CRLF checkout does not fail
+  # an otherwise exact quote. Nothing else is normalized: the match is verbatim.
+  if body.include?(quote.encode(universal_newline: true))
+    {label: label, ok: true, path: path}
+  else
+    {label: label, ok: false, path: path, reason: "quote is not present in the cited file"}
+  end
+end
+
+failed = verdicts.reject { |verdict| verdict.fetch(:ok) }
+
+if options.fetch(:json)
+  puts JSON.pretty_generate(
+    "checked" => verdicts.length,
+    "verified" => verdicts.length - failed.length,
+    "failed" => failed.map { |v| v.reject { |k, _| k == :ok } }
+  )
+else
+  verdicts.each do |verdict|
+    mark = verdict.fetch(:ok) ? "OK  " : "FAIL"
+    detail = verdict.fetch(:ok) ? verdict[:path] : "#{verdict[:path]}: #{verdict[:reason]}"
+    puts "#{mark} #{verdict.fetch(:label)}  #{detail}"
+  end
+  puts
+  if failed.empty?
+    puts "#{verdicts.length} quote(s) verified"
+  else
+    puts "#{failed.length} of #{verdicts.length} quote(s) failed; drop those findings"
+  end
+end
+
+exit(failed.empty? ? 0 : 1)

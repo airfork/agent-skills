@@ -3,11 +3,6 @@ require "open3"
 require "tmpdir"
 require "yaml"
 
-$LOAD_PATH.unshift(
-  File.expand_path("../skills/general/adversarial-review/scripts/lib", __dir__)
-)
-require "adversarial_review"
-
 class ModelTierContractTest < Minitest::Test
   REPO_UNDER_TEST = File.expand_path("..", __dir__)
   EXPECTED_CODEX_MODELS = {
@@ -74,21 +69,15 @@ class ModelTierContractTest < Minitest::Test
     code_skill = read("skills/codex-cursor/code-review/SKILL.md")
     code_readme = read("skills/codex-cursor/code-review/README.md")
     code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
-    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
-    adversarial_adapter = read("skills/general/adversarial-review/platform-adapters.md")
 
     refute_includes code_skill, 'never a downgraded or "fast" model'
     refute_includes code_readme, "Verifiers are never downgraded to a faster model at any tier"
     refute_includes code_adapter, 'Never substitute a downgraded or "fast" model for verifiers at any tier'
-    refute_includes adversarial_skill, "Judges and arbiters must never be downgraded to a fast or cheap model."
-    refute_includes adversarial_adapter, "Never substitute a downgraded or fast model for judges or arbiters."
 
     codex_policy = "On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier"
     assert_includes code_skill, codex_policy
     assert_includes code_readme, codex_policy
     assert_includes code_adapter, codex_policy
-    assert_includes adversarial_skill, codex_policy
-    assert_includes adversarial_adapter, codex_policy
 
     fallback_policy = "use the host's maximum available effort and disclose that the requested tier was not fully enforceable"
     assert_includes code_skill, fallback_policy
@@ -142,7 +131,6 @@ class ModelTierContractTest < Minitest::Test
   def test_codex_fallback_and_report_only_modes_are_executable
     code_skill = read("skills/codex-cursor/code-review/SKILL.md")
     code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
-    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
 
     fallback_sentences = [
       "If the named agent definitions are unavailable, spawn generic subtasks with the read-only wrapper below instead of requiring installation.",
@@ -152,62 +140,15 @@ class ModelTierContractTest < Minitest::Test
       assert_includes code_skill, sentence
       assert_includes code_adapter, sentence
     end
-    assert_includes adversarial_skill, "`--report-only` maps to `--mode critique --output both`"
-    assert_includes adversarial_skill, "`--chat-only` maps to `--output chat`"
-    assert_includes adversarial_skill, "Critique mode never edits targets."
-  end
-
-  def test_adversarial_skill_uses_progressive_disclosure_and_documents_generic_handoff
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-    angles = read("skills/general/adversarial-review/attack-angles.md")
-
-    refute_includes skill,
-                    "Load details from\n[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and\n[platform-adapters.md](platform-adapters.md)."
-    assert_includes skill,
-                    "Load `platform-adapters.md` only for executor selection, adapter troubleshooting, or backend detail."
-    assert_includes skill,
-                    "Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging."
-    assert_includes adapters, "repository_root"
-    assert_includes adapters, "schema_path"
-    assert_includes adapters, "schema_sha256"
-    assert_includes adapters, "Start the worker with its working directory set to `repository_root`"
-    assert_includes adapters, "verify `schema_sha256` before using `schema_path`"
-    assert_includes angles, "The control plane emits the exact authoritative `required_checks` array"
-    assert_includes angles, "Implementer is enabled only when a spec is present"
-    assert_includes angles, "Feasibility is enabled only when a plan is present"
-    assert_includes angles, "bounded scan of authoritative target prose"
-  end
-
-  def test_every_published_host_ceiling_is_documented_with_its_capabilities
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-
-    assert_includes adapters, "## Host Capability Ceilings"
-    AdversarialReview::Capabilities::HOST_BASELINES.each do |host, permitted|
-      assert_includes adapters, host,
-                      "host #{host} publishes a ceiling but is undocumented"
-      permitted.each_key do |capability|
-        assert_includes adapters, capability,
-                        "#{host} excuses #{capability} without documenting why"
-      end
-    end
-    # A capability the host can pin must never be excused by its ceiling.
-    claude = AdversarialReview::Capabilities.baseline_for("claude-code")
-    refute claude.key?("effort_selection"), "effort is pinnable on Claude Code"
-    refute claude.key?("structured_output"), "schemas are enforceable on Claude Code"
   end
 
   def test_limited_capacity_and_terminal_verdicts_are_deterministic
     code_skill = read("skills/codex-cursor/code-review/SKILL.md")
     code_adapter = read("skills/codex-cursor/code-review/platform-adapters.md")
-    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
 
     bounded_waves = "Run parallel finder and verifier dispatch in bounded waves that respect the host's current concurrency limit; do not assume the full roster can start at once."
     assert_includes code_skill, bounded_waves
     assert_includes code_adapter, bounded_waves
-    assert_includes adversarial_skill, "Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity."
-    assert_includes adversarial_skill, "`PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding."
-    refute_includes adversarial_skill, "Stuck `CRITICAL` or `HIGH` findings mean the review did not pass."
   end
 
   def test_named_agent_install_and_github_fallback_are_explicit
@@ -240,17 +181,6 @@ class ModelTierContractTest < Minitest::Test
     assert_includes code_adapter, "For Codex fallback role processes, require a proven read-only sandbox; if Codex cannot confirm it, stop the role rather than relying only on behavioral instructions."
     assert_includes code_adapter, "codex --model <selected-gpt-5.6-slug> --profile review"
     refute_includes code_adapter, "e.g. `codex -c model_reasoning_effort=high`"
-
-    adversarial_adapter = read("skills/general/adversarial-review/platform-adapters.md")
-    assert_includes adversarial_adapter, "Treat generic mode as the portable baseline and first-class fallback."
-    assert_includes adversarial_adapter, "The control plane never silently downgrades model, effort, tier, or vendor."
-    assert_includes adversarial_adapter, "requested and observed model"
-    assert_includes adversarial_adapter, "A failed or missing observation returns an ineligible generic-shaped adapter result"
-
-    adversarial_skill = read("skills/general/adversarial-review/SKILL.md")
-    portable_effort_policy = "If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback."
-    assert_includes adversarial_skill, portable_effort_policy
-    refute_includes adversarial_skill, "If the host cannot enforce xhigh effort, continue only with disclosure."
   end
 
   def test_review_intensity_parser_separates_model_tiers
@@ -285,17 +215,6 @@ class ModelTierContractTest < Minitest::Test
     refute_includes adapter, "Run review sessions at high parent reasoning effort too."
   end
 
-  def test_codex_adversarial_fallback_is_fail_closed
-    adapter = read("skills/general/adversarial-review/platform-adapters.md")
-
-    assert_includes adapter, "A direct adapter may run only when a pinned executable"
-    assert_includes adapter, "Runtime events must\nconfirm all shared-gate claims."
-    assert_includes adapter, "Codex `0.144.5` was observed during design"
-    assert_includes adapter, "so its direct result is currently ineligible and generic-shaped"
-    assert_includes adapter, "A future version can become direct-eligible only after machine attestation and caller dispatch evidence pass"
-    refute_includes adapter, "downgrade to `--high`"
-  end
-
   def test_base_branch_fallback_executes_without_origin_head
     skill = read("skills/codex-cursor/code-review/SKILL.md")
     script = skill[/# BEGIN BASE_BRANCH_RESOLUTION\n(?<body>.*?)# END BASE_BRANCH_RESOLUTION/m, :body]
@@ -316,211 +235,6 @@ class ModelTierContractTest < Minitest::Test
       out, err, status = Open3.capture3("sh", "-c", "#{script}\nprintf '%s\\n' \"$BASE_BRANCH\"", chdir: dir)
       assert status.success?, err
       assert_equal "trunk", out.strip
-    end
-  end
-
-  def test_adversarial_natural_language_critique_is_chat_only
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    policy = "For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file."
-
-    assert_includes skill, policy
-    assert_includes skill, "`--report-only` never authorizes revision."
-    refute_includes skill, "Repository writes require an explicit `--report-only`"
-  end
-
-  def test_adversarial_role_payload_contracts_are_normative
-    attack_angles = read("skills/general/adversarial-review/attack-angles.md")
-    judge_rubric = read("skills/general/adversarial-review/judge-rubric.md")
-
-    assert_includes attack_angles, '"artifact_digests": {"docs/spec.md": "<64 lowercase hex SHA-256>"}'
-    assert_includes attack_angles, '"checks_completed": ["named check actually performed"]'
-    assert_includes attack_angles, '"location": {"path": "docs/spec.md", "line_start": 12, "line_end": 14, "heading": "Rollout"}'
-    assert_includes attack_angles, "Every attacker and divergence probe must return the current artifact digests and the checks it actually completed."
-
-    assert_includes judge_rubric, "Candidate IDs are immutable after ingestion and use `C-<angle-slug>-<attempt>-<sequence>`; every later role returns those IDs instead of batch-local indexes."
-    assert_includes judge_rubric, '"disposition": "PROMOTE|REFUTE|UNPROVEN"'
-    assert_includes judge_rubric, "`UNPROVEN` records an evidence gap; it is neither a promotion nor a refutation."
-    assert_includes judge_rubric, "At `--ultra`, aggregate three independent votes only when at least two voters independently meet the evidence burden for the same `PROMOTE` or `REFUTE` disposition."
-    assert_includes judge_rubric, "Any split involving `UNPROVEN` goes to arbitration and is never counted as a refutation."
-    assert_includes judge_rubric, "- `author-is-right` -> `REJECTED`"
-    assert_includes judge_rubric, "- `judge-is-right` -> `UNRESOLVED`"
-    assert_includes judge_rubric, "- `needs-human` -> `UNRESOLVED`"
-  end
-
-  def test_adversarial_review_public_control_plane_is_portable_and_explicit
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    angles = read("skills/general/adversarial-review/attack-angles.md")
-    rubric = read("skills/general/adversarial-review/judge-rubric.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-    usage = read("USAGE.md")
-    commands = read("COMMANDS.md")
-    catalog = read("CATALOG.md")
-    manifest = YAML.load_file(File.join(REPO_UNDER_TEST, "skills.yaml"))
-    metadata = manifest.fetch("skills").find { |entry| entry.fetch("name") == "adversarial-review" }
-
-    assert_includes skill, '"$AR_SKILL_DIR/scripts/adversarial-review" start'
-    assert_includes skill, "--executor auto|codex|claude|cursor|gemini|generic"
-    assert_includes skill, "--output chat|file|both"
-    assert_includes skill, "`--report-only` maps to `--mode critique --output both`"
-    assert_includes skill, "`--chat-only` maps to `--output chat`"
-    assert_includes skill, "The default is `--mode revise --output both`"
-    assert_includes skill, "DID NOT CONVERGE"
-    assert_includes skill, "The parent alone applies `FIXED|REJECTED` actions"
-    assert_includes skill, "does not install or change global skill links, agent definitions, or user configuration"
-
-    assert_includes angles, "Candidate IDs remain immutable"
-    assert_includes rubric, '"disposition": "PROMOTE|REFUTE|UNPROVEN"'
-    assert_includes rubric, "Any split involving `UNPROVEN` goes to arbitration"
-    assert_includes rubric, "In round 2 only"
-
-    %w[Generic Codex Claude Cursor Gemini Copilot].each do |adapter|
-      assert_includes adapters, "## #{adapter} Adapter"
-    end
-    assert_includes adapters, "never silently downgrades model, effort, tier, or vendor"
-    assert_includes adapters, "machine-readable runtime attestation"
-    assert_includes adapters, "requested and observed model and effort"
-    assert_includes adapters, "Claude-only"
-    assert_includes adapters, "The parser rejects direct `--jobs` greater than 1"
-    assert_includes adapters, "malicious same-UID local administrator"
-
-    assert_includes usage, "--executor auto|codex|claude|cursor|gemini|generic"
-    assert_includes usage, "--output chat|file|both"
-    assert_includes commands, "/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start"
-    refute_includes commands, "rtk skills/general/adversarial-review/scripts/adversarial-review"
-    assert_match(/script-backed portable control plane/i, catalog)
-
-    assert_equal %w[claude codex copilot cursor gemini], metadata.fetch("interfaces").sort
-    assert metadata.dig("install", "cursor", "enabled")
-    assert metadata.dig("install", "copilot", "enabled")
-    assert_equal "deep", metadata.fetch("recommended_model_tier")
-    assert_equal "ultracode", metadata.fetch("heavy_model_tier")
-  end
-
-  def test_adversarial_review_documents_installed_paths_and_fail_closed_boundaries
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    usage = read("USAGE.md")
-    commands = read("COMMANDS.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-
-    assert_includes skill, 'AR_SKILL_DIR="/absolute/path/to/directory-containing-this-SKILL.md"'
-    assert_includes skill, 'REVIEW_REPO="/absolute/path/to/reviewed/repository"'
-    assert_includes skill, '"$AR_SKILL_DIR/scripts/adversarial-review" start'
-    assert_includes skill, '--repository "$REVIEW_REPO"'
-    refute_includes skill, "skills/general/adversarial-review/scripts/adversarial-review start"
-
-    assert_includes usage, 'AR_SKILL_DIR="/absolute/path/to/installed/adversarial-review"'
-    assert_includes usage, '--repository "$REVIEW_REPO"'
-    assert_includes commands, "/absolute/path/to/installed/adversarial-review/scripts/adversarial-review start --repository /absolute/path/to/reviewed/repository"
-    refute_includes commands, "skills/general/adversarial-review/scripts/adversarial-review start"
-
-    auto_boundary = /automatic generic fallback.*`--executor auto`.*before reviewed content.*before any external attempt/im
-    assert_match auto_boundary, adapters
-    assert_match(/explicit direct.*exit `4`.*resumable.*pinned/im, adapters)
-    assert_match(/reviewed content.*exit `5`.*resumable.*pinned/im, adapters)
-
-    assert_includes adapters, "`parallel_dispatch` as `unavailable`"
-    assert_match(/default\/high direct Codex and Claude.*advisory.*all other safety/im, adapters)
-    assert_includes adapters, "Ultra keeps parallel dispatch as a hard requirement."
-    assert_match(/Cursor and\s+Gemini remain direct-ineligible/, adapters)
-    assert_includes adapters, "Generic bundles are the portable path for host-native parallelism."
-    assert_includes adapters, "`pending_task_handoffs` is the normative dispatch surface"
-    assert_match(/verify `task_sha256`.*before parsing JSON.*before using.*cwd.*schema.*prompt/im, adapters)
-    assert_match(/read the task bytes exactly once/i, adapters)
-    assert_match(/schema.*installed skill root.*read.*once.*verify.*same.*bytes/im, adapters)
-    assert_match(/use the returned in-memory task and schema/i, adapters)
-    assert_match(/`pending_tasks`.*path inventory.*not.*dispatch/im, adapters)
-    assert_includes usage, "`pending_task_handoffs` is the normative dispatch surface"
-    assert_match(/verify `task_sha256`.*before parsing JSON/im, usage)
-    assert_includes skill, "`pending_task_handoffs`"
-    refute_match(/public CLI.*direct.*serial/i, adapters)
-    refute_includes usage, "Direct adapters dispatch validated tasks serially."
-  end
-
-  def test_adversarial_review_documents_host_aliases_manual_fallback_and_degraded_verdict
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    usage = read("USAGE.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-
-    assert_includes skill, "`--high` maps to `--tier high`"
-    assert_includes skill, "`--ultra` maps to `--tier ultra`"
-    assert_includes skill, "`--report-only` maps to `--mode critique --output both`"
-    assert_includes skill, "`--chat-only` maps to `--output chat`"
-
-    assert_includes skill, "Ruby 2.6 or newer"
-    assert_includes skill, "When Ruby is unavailable"
-    assert_match(/attack-angles\.md.*judge-rubric\.md.*assets\/schemas/m, skill)
-    assert_match(/immutable IDs.*`UNPROVEN`.*parent-only decisions/m, skill)
-    assert_includes skill, "Scripting unavailable; capabilities degraded."
-    assert_includes skill, "do not invent durable state"
-    assert_includes skill, "never switch to a weaker direct executor"
-
-    [skill, usage, adapters].each do |text|
-      assert_includes text, "DEGRADED CAPABILITIES"
-    end
-    assert_match(/required capability.*`unavailable`.*safety boundary.*`behavioral`/im, skill)
-    assert_includes skill, "replaces only an ordinary `PASSED`"
-    assert_match(/`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict/im, skill)
-    assert_includes skill, "Retained verdicts disclose degraded capabilities separately."
-  end
-
-  def test_adversarial_review_documents_both_filesystem_backends
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-
-    assert_includes skill, "## Filesystem Backends"
-    assert_includes adapters, "## Filesystem Backends"
-
-    # The requirement line must no longer claim POSIX is mandatory.
-    assert_includes skill, "Require Ruby 2.6 or newer plus repository spec/plan files."
-    refute_match(/Require Ruby 2\.6 or newer on a POSIX host/, skill)
-    assert_includes skill, "including native Windows, runs the portable backend"
-
-    [skill, adapters].each do |text|
-      assert_includes text, "DEGRADED FILESYSTEM HARDENING"
-      assert_match(/never changes the verdict/, text)
-    end
-
-    assert_match(/probes the host.*rather than from\s*\na platform name/m, adapters)
-    assert_includes adapters, "do not claim\nsymlink-swap or crash-window protections the portable backend cannot provide"
-    assert_includes adapters, "ADVERSARIAL_REVIEW_FS_BACKEND=portable"
-    assert_match(/Only the weaker direction can be forced/, adapters)
-  end
-
-  def test_adversarial_review_adapter_ineligibility_is_not_universal_cli_fallback
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-    usage = read("USAGE.md")
-
-    assert_includes adapters, "A failed or missing observation returns an ineligible generic-shaped adapter result"
-    assert_match(/Only the public CLI with `--executor auto`.*pre-content.*zero prior external attempts.*converts.*emitted Generic bundles/im, adapters)
-    assert_match(/Explicit direct.*exit `4` or `5`.*never converts.*Generic bundles/im, adapters)
-
-    # Copilot is deliberately absent: it has no direct adapter to declare
-    # ineligible, so it documents the generic bundle path instead.
-    %w[Codex Claude Cursor Gemini].each do |vendor|
-      section = adapters[/## #{vendor} Adapter\n(?<body>.*?)(?=\n## |\z)/m, :body]
-      refute_nil section, vendor
-      normalized = section.gsub(/\s+/, " ")
-      assert_match(/ineligible.*generic-shaped|generic-shaped.*ineligible/i, normalized, vendor)
-      assert_includes normalized, "The adapter does not emit Generic bundles; only the qualifying public auto boundary converts it."
-      refute_match(/falls? back|selects? generic|execution falls/i, normalized, vendor)
-    end
-
-    assert_match(/Only `--executor auto`.*converts.*Generic bundles/im, usage)
-    assert_match(/Explicit direct.*exit `4` or `5`.*never.*Generic bundles/im, usage)
-  end
-
-  def test_adversarial_review_degradation_only_replaces_an_ordinary_pass
-    skill = read("skills/general/adversarial-review/SKILL.md")
-    adapters = read("skills/general/adversarial-review/platform-adapters.md")
-    usage = read("USAGE.md")
-
-    [skill, adapters, usage].each do |text|
-      normalized = text.gsub(/\s+/, " ")
-      assert_includes normalized, "DEGRADED CAPABILITIES"
-      assert_includes normalized, "replaces only an ordinary `PASSED`"
-      assert_includes normalized, "`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict"
-      assert_includes normalized, "Retained verdicts disclose degraded capabilities separately."
-      refute_match(/revise\/reject outcomes.*keep their verdict/i, normalized)
     end
   end
 

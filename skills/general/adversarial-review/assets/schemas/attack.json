@@ -1,179 +1,55 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "adversarial-review attacker result",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "run_id",
-    "task_id",
-    "angle",
-    "artifact_digests",
-    "checks_completed",
-    "findings",
-    "metrics",
-    "notes"
-  ],
+  "required": ["angle", "findings"],
   "properties": {
-    "schema_version": {
-      "type": "integer",
-      "const": 1
-    },
-    "run_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 8192
-    },
-    "task_id": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 8192
-    },
     "angle": {
-      "type": "string",
-      "minLength": 1,
-      "maxLength": 8192
-    },
-    "artifact_digests": {
-      "type": "object",
-      "additionalProperties": {
-        "type": "string",
-        "minLength": 1,
-        "pattern": "^[0-9a-f]{64}$",
-        "maxLength": 8192
-      }
-    },
-    "checks_completed": {
-      "type": "array",
-      "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 8192
-      },
-      "maxItems": 256
+      "enum": ["implementer", "tester", "feasibility", "pre-mortem"]
     },
     "findings": {
       "type": "array",
+      "maxItems": 2,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": [
-          "location",
-          "category",
-          "summary",
-          "evidence",
-          "consequence"
-        ],
+        "required": ["path", "quote", "failure", "severity"],
         "properties": {
-          "location": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": [
-              "path",
-              "line_start",
-              "line_end",
-              "heading"
-            ],
-            "properties": {
-              "path": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 8192
-              },
-              "line_start": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "line_end": {
-                "type": "integer",
-                "minimum": 1
-              },
-              "heading": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 8192
-              }
-            }
-          },
-          "category": {
-            "enum": [
-              "Omission",
-              "Ambiguity",
-              "Inconsistency",
-              "Incorrect fact",
-              "Extraneous"
-            ]
-          },
-          "summary": {
+          "path": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8192
+            "maxLength": 4096,
+            "description": "Repository-relative path of the file the quote is taken from."
           },
-          "evidence": {
+          "quote": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8192
+            "maxLength": 2000,
+            "description": "Verbatim text from the file at `path`. Checked byte-for-byte by scripts/check-quotes; an approximate quote discards the finding."
           },
-          "consequence": {
+          "heading": {
+            "type": "string",
+            "maxLength": 1024,
+            "description": "Nearest enclosing heading, to locate the quote for a reader."
+          },
+          "failure": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 8192
+            "maxLength": 4000,
+            "description": "What breaks, when, and for whom. Not a property of the document."
+          },
+          "severity": {
+            "enum": ["CRITICAL", "HIGH", "MEDIUM"]
           }
-        }
-      },
-      "maxItems": 256
-    },
-    "metrics": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "input_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "output_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "cached_tokens": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "duration_ms": {
-          "type": "number",
-          "minimum": 0
-        },
-        "testable_criteria_percent": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100
-        },
-        "requirements_total": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "requirements_covered": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "coverage_percent": {
-          "type": "number",
-          "minimum": 0,
-          "maximum": 100
-        },
-        "unmapped_tasks": {
-          "type": "integer",
-          "minimum": 0
         }
       }
     },
     "notes": {
       "type": "array",
-      "items": {
-        "type": "string",
-        "minLength": 1,
-        "maxLength": 8192
-      },
-      "maxItems": 256
+      "maxItems": 8,
+      "items": {"type": "string", "minLength": 1, "maxLength": 2000},
+      "description": "Optional. Checks performed that produced nothing, so a thin review reads as thin."
     }
   }
 }

@@ -1,2 +1,0 @@
-{"type":"system","subtype":"init","session_id":"$SESSION_ID","workspace":"$CWD","model":"$OBSERVED_MODEL","mode":"ask","sandbox":"enabled","output_format":"stream-json"}
-{"type":"result","subtype":"success","session_id":"$SESSION_ID","model":"$OBSERVED_MODEL","effort":"$OBSERVED_EFFORT","structured_output":$ROLE_RESPONSE,"usage":{"input_tokens":31,"output_tokens":9,"total_tokens":40}}

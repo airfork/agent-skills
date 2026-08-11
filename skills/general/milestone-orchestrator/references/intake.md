@@ -132,16 +132,13 @@ from `lite` to `full` mid-run is a plan-only replan, while relaxing `full` to
 
 Review depth is a coordinator recommendation made from risk after grounding,
 surfaced with its rationale in the final approval prompt, and recorded in
-`PLAN.md`. Default to the cheapest depth that fits the risk — the full
-adversarial pipeline runs every role at xhigh reasoning and can cost more
-than a small milestone's implementation — and let the user override in
-either direction.
+`PLAN.md`. Default to the cheapest depth that fits the risk, and let the user
+override in either direction.
 
 | Depth | Default for | Mechanics |
 |-------|-------------|-----------|
 | `standard` | `lite`-profile milestones and well-understood `full` ones | One fresh-context reviewer at high reasoning effort reviews `SPEC.md` and `PLAN.md` together: acceptance coverage, spec-plan drift, path-ownership gaps and overlaps, gating-quantity provenance, verification-command sanity (do they run from a fresh checkout?), feasibility, and unstated assumptions. |
-| `adversarial` | Architecture-shaping, security-sensitive, migration-heavy, ambiguous, cross-cutting, or expensive-to-rework milestones | This repository's `adversarial-review` skill at default tier — spec first, then the plan with coverage and drift checks (combined into one pass under `lite`). |
-| `adversarial --high` / `--ultra` | The same risks at unusually large scale or with especially high uncertainty | Per that skill's tier table (`--ultra` is Claude-only). |
+| `adversarial` | Architecture-shaping, security-sensitive, migration-heavy, ambiguous, cross-cutting, or expensive-to-rework milestones | This repository's `adversarial-review` skill — four parallel fresh-context attackers and one rejection-first synthesis pass, run on the spec and the plan together. It has one depth; there is no higher tier to escalate to. |
 
 **Proof-bearing milestones cap how cheap review may go.** When the primary
 deliverable is a causal proof, falsification result, or a park-or-promote
@@ -151,9 +148,10 @@ artifact carrying that conclusion is reviewed at high effort even under a
 passed a causal proof that a later high review overturned post-closeout; the
 park decision survived by luck, not process.
 
-At adversarial depths, resolve or explicitly reject all promoted findings per
-that skill's judge and convergence rules; a non-converged review blocks RUN
-unless the user accepts the documented open question. At `standard` depth,
+At `adversarial` depth, the skill is read-only and returns at most three
+findings; fix or explicitly reject each one before approval, and record the
+rejection rationale in `PLAN.md`. Applying a finding is always the
+coordinator's decision, never the review's. At `standard` depth,
 material findings must be fixed or explicitly accepted by the user before
 approval — the depth is cheaper, not softer about unresolved findings. If a
 `standard` review surfaces architecture-level risk the grounding missed,

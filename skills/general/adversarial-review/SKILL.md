@@ -1,109 +1,87 @@
 ---
 name: adversarial-review
 description: >-
-  Use when the user invokes $adversarial-review or /adversarial-review, asks to
-  adversarially review a spec, implementation plan, migration plan, architecture
-  design, or planning document before implementation, or asks for xhigh
-  fresh-context critique with revise/reject and resolution verification.
+  Use when the user invokes $adversarial-review or /adversarial-review, or asks
+  to adversarially review a spec, implementation plan, migration plan, or
+  architecture design before implementation. Returns at most three
+  evidence-backed findings in chat, in roughly ten minutes. Read-only: never
+  edits the reviewed documents.
 ---
 
 # Adversarial Review
 
-Require Ruby 2.6 or newer plus repository spec/plan files. A POSIX host with descriptor-relative filesystem calls gets the hardened backend; every other host, including native Windows, runs the portable backend, which keeps the full workflow but enforces fewer filesystem guarantees and says so in the report. Load `platform-adapters.md` only for executor selection, adapter troubleshooting, or backend detail.
-Load `attack-angles.md` and `judge-rubric.md` only for Ruby-unavailable manual fallback or role-contract debugging.
+Four fresh-context reviewers attack a planning document in parallel, one
+synthesis pass kills everything that does not survive scrutiny, and you get at
+most three findings in chat. Nothing is written to disk. The reviewed documents
+are never edited.
 
-## Invoke
-
-Resolve the executable from the loaded skill, never from the reviewed checkout:
-
-```bash
-AR_SKILL_DIR="/absolute/path/to/directory-containing-this-SKILL.md"
-REVIEW_REPO="/absolute/path/to/reviewed/repository"
-"$AR_SKILL_DIR/scripts/adversarial-review" start \
-  --repository "$REVIEW_REPO" --spec docs/spec.md --plan docs/plan.md \
-  --tier default --mode revise --output both --executor auto \
-  --model MODEL --effort EFFORT
-```
-
-The executable is a `#!/usr/bin/env ruby` script with no file extension, which
-Windows cannot execute directly. Invoke it through the interpreter there, with
-the same arguments:
-
-```text
-ruby "<AR_SKILL_DIR>/scripts/adversarial-review" start --repository "<REVIEW_REPO>" ...
-```
-
-Map host invocations: `--high` maps to `--tier high`; `--ultra` maps to `--tier ultra`; `--report-only` maps to `--mode critique --output both`;
-`--chat-only` maps to `--output chat`. Choices are
-`--executor auto|codex|claude|cursor|gemini|generic` and
-`--output chat|file|both`. The default is `--mode revise --output both`. Run the
-executable or subcommand with `--help` for other options.
-
-For ordinary natural-language requests that ask only for critique or review, run the report-only stages and return findings in chat only; do not revise documents or create or append a report file.
-Repository writes require an explicit request to revise or fix the documents,
-or an explicit `$adversarial-review` invocation whose chosen mode is `revise`.
-`--report-only` never authorizes revision. Contradictory aliases and explicit
-mode/output values are rejected regardless of argument order.
-
-## Non-Negotiables
-
-- Never silently change vendor, tier, model, or effort. On Codex, the explicitly selected parent GPT-5.6 model is acceptable at every tier.
-  If the host cannot enforce required role effort, follow the selected platform adapter's explicit fallback or stop rule; do not invent a weaker generic fallback.
-- Require fresh read-only tasks, digests, closed JSON, immutable IDs,
-  and evidence-bearing capabilities.
-- The parent alone applies `FIXED|REJECTED` actions. Reviewers never edit. Limit
-  parent edits to reviewed files; preserve rejection.
-- Running the control plane does not install or change global skill links, agent definitions, or user configuration.
-- Every reported verdict comes from `report`. Never hand-write a verdict, a findings table, or a
-  capability disclosure the control plane did not emit.
+Returning zero findings is a valid and good outcome. Say so plainly.
 
 ## Run
 
-1. Start and retain `run_dir`. Dispatch only `pending_task_handoffs`; legacy
-   `pending_tasks` is path inventory. Read task bytes once, verify the trusted
-   `task_sha256` before parsing or using task fields. Read the skill-contained
-   schema once, verify its digest, and use the returned in-memory task/schema.
-2. `ingest` each result/declaration. `continue` until results, actions, or
-   terminal state; submit decisions only via `continue --actions ACTIONS.json`.
-3. Complete per-ID resolution and the round-two fresh sweep. Any stuck promoted finding at the round cap yields `DID NOT CONVERGE`, regardless of severity.
-   `PASSED WITH OPEN QUESTIONS` is reserved for non-blocking questions that are not tied to a promoted finding.
-4. Use `status --run-dir RUN_DIR --json` to resume. Return generated output.
-5. Emit the verdict with `report --run-dir RUN_DIR`, adding `--report PATH` to write the file.
-   The report is the run's output, never prose you compose: `run_not_terminal` means the run
-   still owes the work named in its details, so finish the state machine instead of writing
-   a verdict by hand. Report a run you could not finish as unfinished.
+1. **Resolve targets.** Use the paths the user named. With none named, use the
+   most recently modified spec or plan under `docs/plans/` or `docs/`, and say
+   which file you picked. Read each target once and keep the text.
 
-## Filesystem Backends
+2. **Dispatch four attackers in a single parallel batch** — one message, four
+   concurrent reviewers, never sequentially. Each gets a fresh context, the full
+   target text, exactly one angle from [attack-angles.md](attack-angles.md), and
+   the output contract in `assets/schemas/attack.json`.
 
-The control plane selects its backend by probing the host, never by platform
-name. Report the selected backend; do not describe a portable run as equivalent
-to a hardened one.
+   | Angle | Enabled when |
+   |---|---|
+   | `implementer` | always |
+   | `tester` | always |
+   | `feasibility` | a plan is present |
+   | `pre-mortem` | always |
 
-| Backend | Selected when | Enforces |
-|---------|---------------|----------|
-| `posix` | descriptor-relative calls and directory descriptors are both available | descriptor-relative paths, directory locking, durable directory metadata, POSIX mode bits, inode identity |
-| `portable` | anything else, including native Windows | atomic publish, hard-linked lock anchors, and cross-process file locking only |
+   Run attackers at **`sonnet`, effort `medium`**. They are breadth-finders;
+   higher effort buys latency, not coverage. Attackers are read-only: they may
+   read repository files to check a claim, and may not edit anything or run
+   builds, tests, or package installs.
 
-A portable run still produces immutable IDs, durable resumable state, digests,
-and the same verdicts. It cannot close symlink-swap and rename-under-us races,
-so its report carries a `DEGRADED FILESYSTEM HARDENING` section naming the
-guarantees that were not enforced. That disclosure is separate from the
-capability gate and never changes the verdict.
+   Each attacker returns **at most two findings**. Fewer is better. An attacker
+   that finds nothing returns an empty array.
 
-## Ruby-Unavailable Fallback
+3. **Check the quotes.** Every finding carries a verbatim `quote` from the file
+   it cites. Verify them deterministically:
 
-When Ruby is unavailable, do not invent durable state. Manually follow
-[attack-angles.md](attack-angles.md), [judge-rubric.md](judge-rubric.md), and
-`assets/schemas/`; preserve immutable IDs,
-`UNPROVEN` evidence gaps, and parent-only decisions. State: `Scripting unavailable; capabilities degraded.`
-Disclose missing automation, never switch to a weaker direct executor, and
-never claim scripted crash recovery or resumability.
+   ```bash
+   "$AR_SKILL_DIR/scripts/check-quotes" --repository REPO CANDIDATES.json
+   ```
 
-## Outcomes
+   The script names every finding whose quote is not byte-present in the file it
+   cites. Drop those before synthesis; never pass an unverified quote forward.
+   Do not substitute your own reading of the files for this check.
 
-`DEGRADED CAPABILITIES` replaces only an ordinary `PASSED` when a required capability is `unavailable` or a safety boundary is `behavioral`,
-and only below the host's published ceiling. Set `ADVERSARIAL_REVIEW_HOST` so the run is judged against its host; capabilities at that
-ceiling are disclosed under `HOST CAPABILITY LIMITS` and keep the verdict. Pin whatever the host does expose: on Claude Code, dispatch
-generic bundles with a per-agent reasoning effort and output schema, or the run is degraded by its own dispatch rather than by its host.
-`REPORT ONLY`, `PASSED WITH OPEN QUESTIONS`, and `DID NOT CONVERGE` keep their verdict. Retained verdicts disclose degraded capabilities separately.
-Return the script's stable IDs, provenance, and usage. Critique mode never edits targets.
+4. **Synthesize once,** at **`opus`, effort `high`**, following
+   [synthesis-rubric.md](synthesis-rubric.md) and
+   `assets/schemas/synthesis.json`. The synthesizer's job is to reject, not to
+   catalogue. It ships **at most three** findings.
+
+5. **Report in chat.** For each surviving finding: severity, location, the
+   quote, the concrete failure, and what would fix it. Then stop. Do not edit
+   the documents, do not write a report file, and do not open a follow-up loop.
+
+## Non-Negotiables
+
+- **Read-only.** This skill never edits the reviewed documents. If the user
+  wants the findings applied, that is a separate request they make after seeing
+  them.
+- **No finding without a verified verbatim quote.** A quote that fails
+  `check-quotes` is dropped, not repaired and not paraphrased.
+- **Caps are hard.** Two findings per attacker, three shipped. If more than
+  three survive, the synthesizer ranks and cuts; it does not negotiate the cap.
+- **One round.** There is no revise loop, no re-attack after fixes, and no
+  convergence criterion. v1 had those; see
+  `docs/plans/2026-08-11-adversarial-review-v2-design.md` for why they were cut.
+- Report the angles that ran and any that were skipped, so a thin review is
+  visible as thin rather than passing as clean.
+
+## Degraded Hosts
+
+Without host support for parallel subagent dispatch, run the four angles
+sequentially and say the review took longer than it should have. Without Ruby,
+`check-quotes` is unavailable: verify each quote by reading the cited file and
+searching for the exact string, and state that quote verification was manual.
+Never skip verification because the tooling is missing.
